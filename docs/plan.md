@@ -106,6 +106,13 @@
 
 **S7. Сеть и чтение секретов в sandbox — до этапа 2.2.** Проверить на `loop-settings.json`: (а) Bash в sandbox не выходит наружу (`curl https://pypi.org`), (б) выходит на localhost (тест к Postgres в docker), (в) запрет `Read(.env*)` действует и на `cat .env` из Bash. По S4 проверена только запись.
 
+**Находки шага 1.3 (2.1.296):**
+- `--append-system-prompt-file` в `--help` не показан, но работает. Из нескольких таких флагов действует только последний, поэтому адаптер склеивает файлы правил в один.
+- `--session-id <uuid>` задаёт id новой сессии: оркестратор знает его до старта процесса и пишет в БД заранее, `kill -9` не теряет id для `--resume`.
+- CLAUDE.md из рабочего каталога подхватывается при `--setting-sources project`, в том числе вне git.
+- `rate_limit_event` приходит и в сессии, возобновлённой через `--resume`.
+- Ошибка API (неизвестная модель) приходит как `result` с `subtype: "success"`, `is_error: true`, `terminal_reason: "api_error"`; неизвестный флаг — код 1 и текст в stderr без единого события.
+
 **S1b** отложен до первого реального прогона: повтор `rate_limit_event` проверим на логах длинной сессии. Пробный вызов, на который можно опереться, если события не повторяются, уже проверен (S1).
 
 ---
@@ -339,7 +346,7 @@ LOOP_KNOWLEDGE_DIR=~/andrey_personal_projects/MY-KNOWLEDGE-DATABASE/USEFUL_JOB_N
 
 Для цикла:
 - Отдельный `loop-settings.json` (`--setting-sources project --settings loop-settings.json`, пользовательские настройки не подтягиваются — проверено в S4): allow-список команд (`uv`, `pytest`, `ruff`, `flake8`, `make <цели профиля>`, `git status/diff/log/show`), deny на `git commit/push/reset/checkout/rebase`, `rm -rf`, сетевые утилиты; `sandbox` для Bash (запись только в рабочий каталог и `$TMPDIR`), сеть из sandbox закрыта; `Write`/`Edit` разрешены только в рабочем каталоге, `Read`/`Write`/`Edit` запрещены для `.env*`, `*.pem`, `*.key`; `autoMemoryEnabled: false`.
-- Чистое окружение: `claude` запускается с `env`, где оставлены только `PATH`, `HOME`, `LANG` и переменные из профиля репозитория. Токены и ключи из shell не наследуются.
+- Чистое окружение: `claude` запускается с `env`, где оставлены только `PATH`, `HOME`, `USER`, `LANG`, `TMPDIR` и переменные из профиля репозитория. Без `USER` OAuth-токен не находится в keychain («Not logged in»). Токены и ключи из shell не наследуются.
 - Инварианты из раздела 7 ловят то, что пропустили настройки.
 
 ### Работа в текущей ветке: риски и защиты

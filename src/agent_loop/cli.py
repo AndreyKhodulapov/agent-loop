@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_loop import config, log
+from agent_loop import agent, config, log
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,6 @@ STUBS = {
     "answer": "answer the questions of a run waiting for a human",
     "status": "show runs and their state",
     "stats": "show metrics of finished runs",
-    "selfcheck": "check that the installed claude CLI matches the adapter",
     "gc": "stop leftovers of runs that died without cleanup",
 }
 
@@ -58,6 +57,9 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "config", help="show effective settings and where each came from"
     ).set_defaults(handler=_show_config)
+    commands.add_parser(
+        "selfcheck", help="check that the installed claude CLI matches the adapter"
+    ).set_defaults(handler=_selfcheck)
     return parser
 
 
@@ -78,4 +80,20 @@ def _show_config(args: argparse.Namespace, cfg: config.Config) -> int:
     width = max(len(name) for name, _, _ in rows)
     for name, value, source in rows:
         print(f"{name:<{width}}  {value or '-'}  ({source})")
+    return 0
+
+
+def _selfcheck(args: argparse.Namespace, cfg: config.Config) -> int:
+    with log.scope(stage="selfcheck"):
+        logger.info(
+            "two short sessions on %s, raw streams in %s",
+            agent.SELFCHECK_MODEL,
+            cfg.home / "selfcheck",
+        )
+        try:
+            version = agent.selfcheck(cfg.home)
+        except agent.AgentError as exc:
+            logger.error("failed: %s", exc)
+            return 1
+        logger.info("ok, claude %s", version)
     return 0
