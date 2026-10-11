@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 PROFILE_FILE = "profile.json"
 DEFAULT_TIMEOUT = 10 * 60
-OUTPUT_TAIL_LINES = 20
+# The fixer gets the failures from it: a test report puts them at the end.
+OUTPUT_TAIL_LINES = 200
 
 
 class CommandError(Exception):

@@ -113,6 +113,10 @@ MIGRATIONS = [
     """
     ALTER TABLE steps ADD COLUMN untracked TEXT NOT NULL DEFAULT '[]';
     """,
+    # Tests found before the first step of a task: the gate checks that the task loses none.
+    """
+    ALTER TABLE tasks ADD COLUMN tests INTEGER;
+    """,
 ]
 
 
@@ -142,6 +146,7 @@ class Task:
     reason: str | None
     created_at: str
     updated_at: str
+    tests: int | None
 
 
 @dataclass(frozen=True)
@@ -248,6 +253,9 @@ class Store:
                 (dst, reason, now, task_id),
             )
             self._record(row["run_id"], task_id, row["status"], dst, reason, now)
+
+    def set_tests(self, task_id: int, count: int) -> None:
+        self._conn.execute("UPDATE tasks SET tests = ? WHERE id = ?", (count, task_id))
 
     def start_step(
         self,

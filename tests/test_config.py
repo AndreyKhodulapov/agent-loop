@@ -84,6 +84,7 @@ def test_repository_profile(repo, home):
         "[commands]\n"
         'fmt = ""\n'
         'lint = "flake8"\n'
+        'collect = "pytest --collect-only -q"\n'
         'up = "docker compose -p {run_id} up -d --wait"\n'
         "[timeouts]\n"
         "lint = 120\n"
@@ -95,7 +96,11 @@ def test_repository_profile(repo, home):
 
     assert cfg.settings.doc_lang == "ru"
     assert cfg.repo == config.Profile(
-        commands={"lint": "flake8", "up": "docker compose -p {run_id} up -d --wait"},
+        commands={
+            "lint": "flake8",
+            "collect": "pytest --collect-only -q",
+            "up": "docker compose -p {run_id} up -d --wait",
+        },
         timeouts={"lint": 120},
         env={"POSTGRES_PORT": "{free_port}"},
         deps_files=("requirements*.txt", "uv.lock"),

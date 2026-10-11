@@ -18,7 +18,7 @@ DEFAULT_HOME = "~/.agent-loop"
 PROFILE_NAME = "loop.toml"
 DOC_LANGS = ("ru", "en")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-COMMANDS = ("install", "fmt", "lint", "test", "test_full", "up", "down", "smoke")
+COMMANDS = ("install", "fmt", "lint", "collect", "test", "test_full", "up", "down", "smoke")
 
 
 class ConfigError(Exception):

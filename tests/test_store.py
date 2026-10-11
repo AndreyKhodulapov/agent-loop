@@ -91,6 +91,7 @@ def test_older_database_is_migrated_with_its_data(db_path, monkeypatch):
         assert db.run(run_id).branch == "main"
         assert len(db.limit_snapshots(run_id)) == 1
         assert db.steps(task_id)[0].untracked == []
+        assert db.tasks(run_id)[0].tests is None
     finally:
         db.close()
     assert user_version(db_path) == len(store.MIGRATIONS)
@@ -216,6 +217,9 @@ def test_tasks_are_numbered_per_run(db, run_id):
     ]
     assert tasks[0].card == CARD
     assert [t.seq for t in db.tasks(other)] == [1]
+
+    db.set_tests(tasks[1].id, 228)
+    assert [t.tests for t in db.tasks(run_id)] == [None, 228]
 
 
 def test_step_is_started_and_finished_once(db, run_id):

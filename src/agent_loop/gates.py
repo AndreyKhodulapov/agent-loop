@@ -3,7 +3,9 @@
 The permission rules and the sandbox keep the agent within bounds; the gate catches what got
 past them and what the agent is free to do but must not: weaken the tests, grow the diff past
 the size of one task, add a file with secrets. The work is the changes of tracked files against
-the checkpoint of the step and the files the step has added.
+the checkpoint of the step and the files the step has added. Once the work keeps these
+invariants, the commands of the repository profile check that it installs, is formatted, passes
+the linter and the tests.
 """
 
 from __future__ import annotations
@@ -11,12 +13,14 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+import shlex
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
-from agent_loop import git, protected
-from agent_loop.config import Profile, Settings
+from agent_loop import commands, git, protected
+from agent_loop.commands import CommandError
+from agent_loop.config import ConfigError, Profile, Settings
 from agent_loop.step import PROJECT_SETTINGS
 from agent_loop.store import Step
 
@@ -26,6 +30,7 @@ BRANCH_CHANGED = "branch_changed"
 HOOK_CONFIG = "hook_config"
 DIFF_TOO_BIG = "diff_too_big"
 WEAKENED_TESTS = "weakened_tests"
+FLAKY_TESTS = "flaky_tests"
 
 SECRET_PATTERNS = (".env*", "*.pem", "*.key", "*credentials*")
 # Configs of git hook managers: their hooks run outside the sandbox on the operator's commit.
@@ -54,6 +59,7 @@ ASSERT = re.compile(r"\b(assert\w*|expect\(|require\.|t\.(Error|Fatal)\w*)")
 class Verdict:
     # pass, or the status the task moves to: fixing, paused, needs_human or replan.
     status: str
+    # Why; on pass, a warning for the report: flaky tests the task has not touched.
     reason: str | None = None
     # For the executor or the operator, one finding per item.
     findings: tuple[str, ...] = ()
@@ -64,12 +70,19 @@ class Verdict:
 
 
 def check(
-    repo: Path, run_dir: Path, branch: str, step: Step, profile: Profile, settings: Settings
+    repo: Path,
+    run_dir: Path,
+    branch: str,
+    step: Step,
+    profile: Profile,
+    settings: Settings,
+    tests_before: int | None,
 ) -> Verdict:
     """Check the work of `step` on the branch of the run.
 
     A moved branch pauses the run before anything else is touched: it may be the operator's
-    work. The protected files are put back, as before each session.
+    work. The protected files are put back, as before each session. `tests_before` is what
+    `count_tests` found before the first step of the task; None skips the count.
     """
     moved = branch_moved(repo, branch, step.checkpoint)
     if moved is not None:
@@ -121,7 +134,24 @@ def check(
     if findings:
         logger.warning("weakened tests: %s", "; ".join(findings))
         return Verdict("fixing", WEAKENED_TESTS, tuple(findings), secrets, lines)
-    return Verdict("pass", None, (), secrets, lines)
+    status, reason, findings = _run_commands(repo, profile, list(numstat), tests_before)
+    return Verdict(status, reason, findings, secrets, lines)
+
+
+def count_tests(profile: Profile, repo: Path) -> int | None:
+    """Tests the `collect` command of the profile finds; None if the profile has no such command.
+
+    The count is the first integer in the last non-empty line of the output: pytest ends with
+    `228 tests collected in 0.53s`, `grep -c` prints the bare number.
+    """
+    if "collect" not in profile.commands:
+        return None
+    output = commands.run(profile, "collect", repo)
+    last = next((line for line in reversed(output.splitlines()) if line.strip()), "")
+    match = re.search(r"\d+", last)
+    if match is None:
+        raise ConfigError(f"collect: no number in the last line of the output: {last!r}")
+    return int(match.group())
 
 
 def branch_moved(repo: Path, branch: str, checkpoint: str) -> str | None:
@@ -136,6 +166,80 @@ def branch_moved(repo: Path, branch: str, checkpoint: str) -> str | None:
     if head != checkpoint:
         return f"HEAD is {head[:12]} instead of {checkpoint[:12]}"
     return None
+
+
+def _run_commands(
+    repo: Path, profile: Profile, changed: list[str], tests_before: int | None
+) -> tuple[str, str | None, tuple[str, ...]]:
+    """Status, reason and findings of the profile commands on the work.
+
+    A failed `install` stops the gate: nothing else is meaningful without the dependencies.
+    The other commands all run, so the fixer gets every failure at once.
+    """
+    deps = [path for path in changed if _matches(path, profile.deps_files)]
+    if deps and "install" in profile.commands:
+        logger.info("dependencies have changed (%s), installing", ", ".join(deps))
+        try:
+            commands.run(profile, "install", repo)
+        except CommandError as exc:
+            logger.warning("%s", str(exc).splitlines()[0])
+            return "fixing", "install_failed", (str(exc),)
+    # Test modules only, by name: a fixture file or a removed test passed to the runner is an
+    # error of the runner, not of the work.
+    tests = [
+        path
+        for path in changed
+        if TEST_NAME.search(PurePosixPath(path).name) and (repo / path).exists()
+    ]
+    value = " ".join(shlex.quote(path) for path in tests)
+    profile = replace(
+        profile,
+        commands={
+            name: command.replace("{changed_tests}", value)
+            for name, command in profile.commands.items()
+        },
+    )
+
+    failures = []
+    for name in ("fmt", "lint"):
+        if name in profile.commands:
+            try:
+                commands.run(profile, name, repo)
+            except CommandError as exc:
+                failures.append((f"{name}_failed", str(exc)))
+    if tests_before is not None:
+        try:
+            count = count_tests(profile, repo)
+        except CommandError as exc:
+            failures.append(("collect_failed", str(exc)))
+        else:
+            if count is not None and count < tests_before:
+                failures.append(
+                    (WEAKENED_TESTS, f"{count} tests collected, {tests_before} before the task")
+                )
+    flaky = None
+    if "test" in profile.commands:
+        try:
+            commands.run(profile, "test", repo)
+        except CommandError as exc:
+            logger.warning("%s, running the tests again", str(exc).splitlines()[0])
+            try:
+                commands.run(profile, "test", repo)
+            except CommandError as again:
+                failures.append(("test_failed", str(again)))
+            else:
+                flaky = f"the tests failed once and passed when run again:\n{exc}"
+                # The report of the failed run names the failed test files.
+                if any(PurePosixPath(path).name in str(exc) for path in tests):
+                    failures.append((FLAKY_TESTS, flaky))
+                    flaky = None
+    if failures:
+        logger.warning("failed: %s", ", ".join(reason for reason, _ in failures))
+        return "fixing", failures[0][0], tuple(finding for _, finding in failures)
+    if flaky is not None:
+        logger.warning("flaky tests the task has not touched, they need a task of their own")
+        return "pass", FLAKY_TESTS, (flaky,)
+    return "pass", None, ()
 
 
 def _numstat(output: str) -> dict[str, int]:

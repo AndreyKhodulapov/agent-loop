@@ -4,7 +4,7 @@ import subprocess
 import pytest
 
 from agent_loop import gates, git, protected
-from agent_loop.config import Profile, Settings
+from agent_loop.config import ConfigError, Profile, Settings
 from agent_loop.store import Step
 
 SETTINGS = Settings(diff_soft_lines=20, diff_hard_lines=40)
@@ -50,9 +50,9 @@ def commit(repo, message):
     subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
 
 
-def check(repo, step, secret_patterns=()):
-    profile = Profile(secret_patterns=secret_patterns)
-    return gates.check(repo, repo.parent / "run", "main", step, profile, SETTINGS)
+def check(repo, step, profile=None, tests_before=None):
+    profile = profile or Profile()
+    return gates.check(repo, repo.parent / "run", "main", step, profile, SETTINGS, tests_before)
 
 
 def test_clean_work_passes_with_its_size(repo, work):
@@ -74,7 +74,7 @@ def test_new_files_like_secrets_are_left_out(repo, work):
     (repo / "deploy" / "store.p12").write_text("key\n")
     (repo / "deploy" / "config.py").write_text("HOST = 1\n")
 
-    verdict = check(repo, work, ("*.p12",))
+    verdict = check(repo, work, Profile(secret_patterns=("*.p12",)))
 
     assert verdict.status == "pass"
     assert verdict.secrets == (
@@ -213,3 +213,174 @@ def test_changed_tests_that_keep_their_checks_pass(repo, work, change):
     change(repo)
 
     assert check(repo, work).status == "pass"
+
+
+@pytest.fixture
+def calls(tmp_path):
+    """The log the commands of a profile append to, outside the repository."""
+    return tmp_path / "calls.log"
+
+
+def logged(calls, name, then=""):
+    return f"echo {name} >> {calls}; {then}"
+
+
+def test_install_runs_when_dependencies_change(repo, work, calls):
+    profile = Profile(
+        commands={"install": logged(calls, "install"), "lint": logged(calls, "lint")},
+        deps_files=("requirements*.txt",),
+    )
+    (repo / "requirements-dev.txt").write_text("pytest\n")
+
+    assert check(repo, work, profile).status == "pass"
+    assert calls.read_text() == "install\nlint\n"
+
+
+def test_install_is_skipped_when_dependencies_do_not_change(repo, work, calls):
+    profile = Profile(commands={"install": logged(calls, "install")}, deps_files=("uv.lock",))
+    (repo / "app.py").write_text("x = 2\n")
+
+    assert check(repo, work, profile).status == "pass"
+    assert not calls.exists()
+
+
+def test_failed_install_stops_the_gate(repo, work, calls):
+    profile = Profile(
+        commands={
+            "install": "echo no such package; exit 1",
+            "lint": logged(calls, "lint"),
+        },
+        deps_files=("app.py",),
+    )
+    (repo / "app.py").write_text("x = 2\n")
+
+    verdict = check(repo, work, profile)
+
+    assert (verdict.status, verdict.reason) == ("fixing", "install_failed")
+    assert verdict.findings == ("install: exit code 1\nno such package",)
+    assert not calls.exists()
+
+
+def test_every_failed_command_goes_to_the_fixer(repo, work, calls):
+    profile = Profile(
+        commands={
+            "fmt": "echo would reformat app.py; exit 1",
+            "lint": "echo app.py:1: E501; exit 1",
+            "test": logged(calls, "test", "echo FAILED test_app; exit 1"),
+        }
+    )
+    (repo / "app.py").write_text("x = 2\n")
+
+    verdict = check(repo, work, profile)
+
+    assert (verdict.status, verdict.reason) == ("fixing", "fmt_failed")
+    assert verdict.findings == (
+        "fmt: exit code 1\nwould reformat app.py",
+        "lint: exit code 1\napp.py:1: E501",
+        "test: exit code 1\nFAILED test_app",
+    )
+    # Run again before it counts as failed.
+    assert calls.read_text() == "test\ntest\n"
+
+
+def test_commands_do_not_run_when_the_invariants_fail(repo, work, calls):
+    profile = Profile(commands={"lint": logged(calls, "lint")})
+    edit_test(repo, "def test_add", "@pytest.mark.skip\ndef test_add")
+
+    assert check(repo, work, profile).reason == gates.WEAKENED_TESTS
+    assert not calls.exists()
+
+
+def test_changed_test_modules_go_to_the_test_command(repo, work, tmp_path):
+    args = tmp_path / "args"
+    profile = Profile(commands={"test": f"printf '%s\\n' {{changed_tests}} > {args}"})
+    (repo / "tests" / "test_app.py").write_text(TEST_FILE + "\n# more\n")
+    (repo / "tests" / "test_new one.py").write_text("def test_new():\n    assert True\n")
+    (repo / "tests" / "conftest.py").write_text("import pytest\n")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "calc_test.go").write_text("package pkg\n")
+
+    assert check(repo, work, profile).status == "pass"
+    assert args.read_text().splitlines() == [
+        "pkg/calc_test.go",
+        "tests/test_app.py",
+        "tests/test_new one.py",
+    ]
+
+
+def test_removed_test_module_is_not_passed_to_the_test_command(repo, work, tmp_path):
+    args = tmp_path / "args"
+    profile = Profile(commands={"test": f"echo [{{changed_tests}}] > {args}"})
+    move_test(repo)
+
+    assert check(repo, work, profile).status == "pass"
+    assert args.read_text() == "[tests/test_calc.py]\n"
+
+
+def flaky(calls, report):
+    """A test command that fails with `report` on the first run and passes on the second."""
+    return f"test -e {calls} || {{ touch {calls}; echo {report}; exit 1; }}"
+
+
+def test_flaky_test_of_the_task_goes_to_the_fixer(repo, work, calls):
+    edit_test(repo, "import pytest\n", "import pytest\n\n\ndef test_more():\n    assert True\n")
+    profile = Profile(commands={"test": flaky(calls, "FAILED tests/test_app.py::test_more")})
+
+    verdict = check(repo, work, profile)
+
+    assert (verdict.status, verdict.reason) == ("fixing", gates.FLAKY_TESTS)
+    assert verdict.findings[0].endswith("test: exit code 1\nFAILED tests/test_app.py::test_more")
+
+
+def test_flaky_test_the_task_has_not_touched_passes_with_a_warning(repo, work, calls):
+    (repo / "app.py").write_text("x = 2\n")
+    profile = Profile(commands={"test": flaky(calls, "FAILED tests/test_db.py::test_pool")})
+
+    verdict = check(repo, work, profile)
+
+    assert (verdict.status, verdict.reason) == ("pass", gates.FLAKY_TESTS)
+    assert "FAILED tests/test_db.py::test_pool" in verdict.findings[0]
+
+
+@pytest.mark.parametrize(
+    ("output", "status"),
+    [
+        ("9 tests collected in 0.1s", "pass"),
+        ("collected tests\n10 tests collected in 0.1s\n\n", "pass"),
+        ("8/10 tests collected (2 deselected) in 0.1s", "fixing"),
+        ("8", "fixing"),
+    ],
+)
+def test_fewer_collected_tests_are_weakened_tests(repo, work, output, status):
+    profile = Profile(commands={"collect": f"printf '{output}'"})
+    (repo / "app.py").write_text("x = 2\n")
+
+    verdict = check(repo, work, profile, tests_before=9)
+
+    assert verdict.status == status
+    if status == "fixing":
+        assert verdict.reason == gates.WEAKENED_TESTS
+        assert verdict.findings == ("8 tests collected, 9 before the task",)
+
+
+def test_tests_are_not_counted_without_a_count_before_the_task(repo, work, calls):
+    profile = Profile(commands={"collect": logged(calls, "collect")})
+
+    assert check(repo, work, profile).status == "pass"
+    assert not calls.exists()
+
+
+def test_failed_collect_goes_to_the_fixer(repo, work):
+    profile = Profile(commands={"collect": "echo ImportError; exit 2"})
+
+    verdict = check(repo, work, profile, tests_before=9)
+
+    assert (verdict.status, verdict.reason) == ("fixing", "collect_failed")
+    assert verdict.findings == ("collect: exit code 2\nImportError",)
+
+
+def test_count_tests_needs_a_number_from_the_collect_command(repo):
+    assert gates.count_tests(Profile(), repo) is None
+    assert gates.count_tests(Profile(commands={"collect": "echo 228 tests"}), repo) == 228
+    with pytest.raises(ConfigError, match="no number in the last line"):
+        gates.count_tests(Profile(commands={"collect": "echo 5 tests; echo done"}), repo)

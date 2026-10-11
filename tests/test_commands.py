@@ -43,7 +43,7 @@ def test_run_passes_the_profile_env_and_returns_output(tmp_path):
 
 
 def test_failed_command_reports_the_tail_of_its_output(tmp_path):
-    profile = Profile(commands={"test": "seq 1 30; echo boom >&2; exit 3"})
+    profile = Profile(commands={"test": "seq 1 300; echo boom >&2; exit 3"})
 
     with pytest.raises(commands.CommandError) as exc:
         commands.run(profile, "test", tmp_path)
@@ -51,7 +51,7 @@ def test_failed_command_reports_the_tail_of_its_output(tmp_path):
     message = str(exc.value)
     assert message.startswith("test: exit code 3\n")
     assert message.splitlines()[-1] == "boom"
-    assert "\n10\n" not in message
+    assert "\n50\n" not in message
     assert len(message.splitlines()) == commands.OUTPUT_TAIL_LINES + 1
 
 
