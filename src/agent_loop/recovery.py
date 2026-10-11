@@ -22,15 +22,13 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from agent_loop import git, log, step
+from agent_loop import agent, git, log, step
 from agent_loop.store import TASK_TRANSITIONS, Run, Store
 
 logger = logging.getLogger(__name__)
 
 LOCK_FILE = "lock"
 DIED = "died"
-# Time an orphaned session has to exit after SIGTERM before it is killed.
-ORPHAN_GRACE = 10
 
 
 def hold(path: Path) -> TextIO | None:
@@ -64,7 +62,13 @@ def reap(store: Store, home: Path) -> list[str]:
             if store.run(run.id).status != "running":
                 continue
             with log.scope(run=run.id):
-                _pause(store, run)
+                try:
+                    _pause(store, run)
+                except git.GitError as exc:
+                    # Its open steps stay open, so the next `loop` tries again; one broken run
+                    # must not stop every command.
+                    logger.error("cannot save the work in progress, the run stays running: %s", exc)
+                    continue
         reaped.append(run.id)
     return reaped
 
@@ -78,8 +82,15 @@ def _pause(store: Store, run: Run) -> None:
             _terminate(open_step.session_id)
         # The step is finished only after the work is saved: if saving fails, the next `loop`
         # finds the step open and tries again.
+        repo = Path(run.repo)
+        if git.head(repo) != open_step.checkpoint:
+            logger.warning(
+                "HEAD has moved since task %d started, its work in progress goes on top of %s",
+                task.seq,
+                open_step.checkpoint,
+            )
         ref = git.wip_ref(run.id, task.seq)
-        git.save_wip(Path(run.repo), ref, open_step.untracked)
+        git.save_wip(repo, ref, open_step.untracked, open_step.checkpoint)
         logger.info("task %d: work in progress saved in %s", task.seq, ref)
         store.finish_step(open_step.id, "paused", {"reason": DIED})
         # The orchestrator may have died between starting the step and moving the task.
@@ -95,7 +106,7 @@ def _terminate(session_id: str) -> None:
         return
     logger.warning("terminating the orphaned session %s", session_id)
     _signal(groups, signal.SIGTERM)
-    deadline = time.monotonic() + ORPHAN_GRACE
+    deadline = time.monotonic() + agent.ORPHAN_GRACE
     while groups and time.monotonic() < deadline:
         time.sleep(0.1)
         groups = session_groups(session_id)
@@ -103,14 +114,18 @@ def _terminate(session_id: str) -> None:
 
 
 def session_groups(session_id: str) -> set[int]:
-    """Process groups of the CLI processes with this session id in their command line."""
+    """Process groups of the CLI processes with this session id in their command line.
+
+    Only a command that runs `claude` counts: `grep <id>` of the operator is not a session.
+    """
     listing = subprocess.run(
         ["ps", "-A", "-o", "pgid=,command="], capture_output=True, text=True, check=True
     ).stdout
     groups = set()
     for line in listing.splitlines():
         pgid, _, command = line.strip().partition(" ")
-        if session_id in command.split():
+        tokens = command.split()
+        if session_id in tokens and any(Path(t).name == agent.CLAUDE for t in tokens):
             groups.add(int(pgid))
     return groups
 

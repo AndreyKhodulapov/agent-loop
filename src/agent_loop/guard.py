@@ -7,7 +7,8 @@ decided goes to `guard.json`, which tells the loop why the session ended.
 
 Soft stop: the call is denied with an instruction to write the handoff and end the turn; only
 the handoff write and the structured answer pass. Hard stop: `continue: false` ends the session
-after the current call, and the call itself is denied unless it writes the handoff.
+after the current call, and the call itself is denied unless it writes the handoff. A hook that
+fails blocks the call and records `guard_error`: a session must not run without its caps.
 """
 
 from __future__ import annotations
@@ -50,6 +51,12 @@ WHY = {
     "interrupt": "the operator asked to stop",
     "timeout": "the step has run out of time",
 }
+GUARD_ERROR = "guard_error"
+# The exit code of a hook that blocks the call; its stderr goes to the agent.
+BLOCK = 2
+ERROR_INSTRUCTION = (
+    "agent-loop guard failed, every tool call is blocked: {error}. Do not retry, end your turn."
+)
 INSTRUCTION = (
     "agent-loop is pausing this step: {why}. Do not continue the task and do not call other"
     " tools. Write {handoff} for the next session: what is done, what is left, which files are"
@@ -156,6 +163,19 @@ def respond(
 
 def main(argv: list[str]) -> int:
     run_dir = Path(argv[0])
+    try:
+        return _check(run_dir)
+    except Exception as exc:
+        # The CLI runs the call after any exit code but 2: the session would go on without the
+        # context and budget caps, and the loop would not know.
+        error = f"{type(exc).__name__}: {exc}"
+        print(ERROR_INSTRUCTION.format(error=error), file=sys.stderr)
+        state = State(GUARD_ERROR, hard=True, denied=0)
+        write_atomic(run_dir / STATE_FILE, json.dumps(asdict(state)))
+        return BLOCK
+
+
+def _check(run_dir: Path) -> int:
     call = json.load(sys.stdin)
     policy = json.loads((run_dir / POLICY_FILE).read_text(encoding="utf-8"))
     settings = Settings(**policy["settings"])

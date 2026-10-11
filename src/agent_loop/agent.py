@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ CLAUDE = "claude"
 # not passed on.
 ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "TMPDIR")
 STDERR_TAIL_LINES = 20
+# Time a session has to exit after SIGTERM before it is killed.
+ORPHAN_GRACE = 10
 
 
 class AgentError(Exception):
@@ -169,6 +172,9 @@ class Process:
         self.log_path = log_path
         self.stderr_path = log_path.with_suffix(".stderr")
         self._stopped = False
+        # Monotonic time of the last line of the stream, parsed or not: a tool result is a sign
+        # of life too.
+        self.last_output = time.monotonic()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         system_file = None
         if session.system_files:
@@ -200,6 +206,7 @@ class Process:
         has_result = False
         with open(self.log_path, "a", encoding="utf-8") as raw:
             for line in self._proc.stdout:
+                self.last_output = time.monotonic()
                 raw.write(line)
                 raw.flush()
                 event = parse_event(line)
@@ -212,11 +219,25 @@ class Process:
             raise AgentError(f"claude exited with code {code} without a result: {self._tail()}")
 
     def stop(self) -> None:
-        """Terminate the whole process group: the CLI and the commands it started."""
+        """Terminate the whole process group: the CLI and the commands it started.
+
+        A group that has not exited within `ORPHAN_GRACE` is killed, otherwise the reader of the
+        stream would wait for it forever.
+        """
+        self._signal(signal.SIGTERM)
+        try:
+            self._proc.wait(ORPHAN_GRACE)
+        except subprocess.TimeoutExpired:
+            self.kill()
+
+    def kill(self) -> None:
+        self._signal(signal.SIGKILL)
+
+    def _signal(self, signum: int) -> None:
         self._stopped = True
         # The group is gone if the session has already exited.
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(self._proc.pid, signal.SIGTERM)
+            os.killpg(self._proc.pid, signum)
 
     def __enter__(self) -> Process:
         return self

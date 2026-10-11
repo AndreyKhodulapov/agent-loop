@@ -4,7 +4,7 @@ import signal
 from dataclasses import dataclass
 
 import pytest
-from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, read_calls
+from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, USER, read_calls
 
 from agent_loop import agent, budget, guard, log, step
 from agent_loop.agent import Limits, Window
@@ -118,8 +118,10 @@ def test_guard_stop_pauses_the_step(env, fake_claude, scenario, reason, hard):
     assert signal.getsignal(signal.SIGINT) is handler
 
 
-def test_second_ctrl_c_terminates_the_session(env, fake_claude):
-    fake_claude([INIT, ASSISTANT, "interrupt", "interrupt", "sleep", RESULT])
+@pytest.mark.parametrize("ignore_term", [[], ["ignore-term"]], ids=["exits", "ignores SIGTERM"])
+def test_second_ctrl_c_terminates_the_session(env, fake_claude, monkeypatch, ignore_term):
+    fake_claude([INIT, ASSISTANT, *ignore_term, "interrupt", "interrupt", "sleep", RESULT])
+    monkeypatch.setattr(agent, "ORPHAN_GRACE", 0.5)
 
     outcome = env.run()
 
@@ -128,16 +130,30 @@ def test_second_ctrl_c_terminates_the_session(env, fake_claude):
     assert env.step().outcome == "paused"
 
 
-def test_silent_stream_is_terminated(env, fake_claude, monkeypatch):
-    fake_claude([INIT, "sleep", RESULT])
+def set_idle_timeout(env, monkeypatch, seconds):
     settings = json.loads(env.session.settings.read_text())
     settings["env"]["BASH_MAX_TIMEOUT_MS"] = "0"
     env.session.settings.write_text(json.dumps(settings))
-    monkeypatch.setattr(step, "IDLE_MARGIN", 0.2)
+    monkeypatch.setattr(step, "IDLE_MARGIN", seconds)
+
+
+def test_silent_stream_is_terminated(env, fake_claude, monkeypatch):
+    fake_claude([INIT, "sleep", RESULT])
+    set_idle_timeout(env, monkeypatch, 0.2)
 
     outcome = env.run()
 
     assert outcome == step.Outcome("paused", "idle", None, 0)
+
+
+def test_tool_results_keep_the_stream_alive(env, fake_claude, monkeypatch):
+    # Each pause is shorter than the idle timeout, all of them together are longer.
+    fake_claude([INIT, "sleep:0.6", USER, "sleep:0.6", USER, "sleep:0.6", RESULT])
+    set_idle_timeout(env, monkeypatch, 1.2)
+
+    outcome = env.run()
+
+    assert outcome.status == "completed"
 
 
 def test_error_result_fails_the_step(env, fake_claude):
@@ -172,7 +188,7 @@ def test_exit_without_result_fails_the_step_and_raises(env, fake_claude):
 
 # A step of 60 minutes with 12 minutes of allowed silence, started at 0.
 @pytest.mark.parametrize(
-    ("last_event", "stop_requested", "now", "due", "next_check"),
+    ("last_output", "stop_requested", "now", "due", "next_check"),
     [
         (100, None, 600, None, 820),
         (3500, None, 3599, None, 3600),
@@ -192,14 +208,14 @@ def test_exit_without_result_fails_the_step_and_raises(env, fake_claude):
         "stop requested early",
     ],
 )
-def test_deadlines(last_event, stop_requested, now, due, next_check):
-    deadlines = step.Deadlines(3600, 720, 0, last_event, stop_requested)
+def test_deadlines(last_output, stop_requested, now, due, next_check):
+    deadlines = step.Deadlines(3600, 720, 0, last_output, stop_requested)
 
     assert deadlines.due(now) == due
     assert deadlines.next_check() == next_check
 
 
-def ended(outcome, reason, session_id):
+def ended(outcome, reason, session_id, context_tokens=50_000):
     return Step(
         id=1,
         task_id=1,
@@ -207,7 +223,7 @@ def ended(outcome, reason, session_id):
         checkpoint="abc123",
         session_id=session_id,
         outcome=outcome,
-        detail={"reason": reason},
+        detail={"reason": reason, "context_tokens": context_tokens},
         started_at="2026-10-11T10:00:00+00:00",
         finished_at="2026-10-11T10:30:00+00:00",
         untracked=[],
@@ -231,6 +247,11 @@ def ended(outcome, reason, session_id):
             [ended("paused", "context", "s-1"), ended("paused", "context", "s-2")],
             step.Resume("replan"),
         ),
+        ([ended("paused", "interrupt", "s-1", 140_000)], step.Resume("handoff")),
+        (
+            [ended("paused", "context", "s-1"), ended("paused", "timeout", "s-2", 120_000)],
+            step.Resume("replan"),
+        ),
     ],
     ids=[
         "budget",
@@ -238,7 +259,9 @@ def ended(outcome, reason, session_id):
         "first context pause",
         "context pause after a completed step",
         "second context pause",
+        "interrupt past the soft context limit",
+        "timeout past the soft context limit after a context pause",
     ],
 )
 def test_how_to_resume(steps, expected):
-    assert step.how_to_resume(steps) == expected
+    assert step.how_to_resume(steps, SETTINGS.ctx_soft_tokens) == expected

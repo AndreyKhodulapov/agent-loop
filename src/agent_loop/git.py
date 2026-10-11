@@ -1,4 +1,9 @@
-"""Git commands the loop runs in the working repository."""
+"""Git commands the loop runs in the working repository.
+
+Git of the loop runs outside the sandbox, so it never runs hooks or the fsmonitor named in the
+repository config: they could be the agent's code. Today the CLI keeps the agent out of
+`.git/hooks` and `.git/config`, these flags do not depend on that.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 WIP_REFS = "refs/loop/wip"
+SAFE_CONFIG = ("-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false")
 
 
 class GitError(Exception):
@@ -15,7 +21,13 @@ class GitError(Exception):
 
 
 def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
-    proc = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            ["git", *SAFE_CONFIG, *args], cwd=repo, env=env, capture_output=True, text=True
+        )
+    except OSError as exc:
+        # The repository of a run may have been moved or deleted since the run started.
+        raise GitError(f"git {' '.join(args)}: {exc}") from exc
     if proc.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {proc.stderr.strip()}")
     return proc.stdout
@@ -34,25 +46,26 @@ def wip_ref(run_id: str, task_seq: int) -> str:
     return f"{WIP_REFS}/{run_id}/{task_seq}"
 
 
-def save_wip(repo: Path, ref: str, untracked_before: list[str]) -> str:
+def save_wip(repo: Path, ref: str, untracked_before: list[str], base: str) -> str:
     """Keep the uncommitted work of a step in `ref`; returns the commit.
 
-    The commit on top of HEAD holds the changes of tracked files and the untracked files that
-    appeared after `untracked_before` was taken. Files that were untracked before the step are
-    the operator's environment and stay out. The index and the working tree are not touched.
+    The commit on top of `base`, the checkpoint of the step, holds the changes of tracked files
+    and the untracked files that appeared after `untracked_before` was taken. Files that were
+    untracked before the step are the operator's environment and stay out. The index and the
+    working tree are not touched.
     """
     new_files = sorted(set(untracked(repo)) - set(untracked_before))
     with tempfile.TemporaryDirectory() as tmp:
         # A separate index: the real one stays as the agent or the operator left it.
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        git(repo, "read-tree", "HEAD", env=env)
+        git(repo, "read-tree", base, env=env)
         git(repo, "add", "--update", env=env)
         if new_files:
             git(repo, "--literal-pathspecs", "add", "--", *new_files, env=env)
         tree = git(repo, "write-tree", env=env).strip()
     # A signing prompt would hang the loop, and the commit is never published.
     commit = git(
-        repo, "commit-tree", "--no-gpg-sign", tree, "-p", "HEAD", "-m", f"agent-loop wip {ref}"
+        repo, "commit-tree", "--no-gpg-sign", tree, "-p", base, "-m", f"agent-loop wip {ref}"
     ).strip()
     git(repo, "update-ref", ref, commit)
     return commit

@@ -56,7 +56,8 @@ RESULT = {
 # --settings have hooks (if the scenario has it), "new" otherwise. Besides events, it may hold
 # commands: "sleep" (30 s), "sleep:<seconds>", "interrupt" (Ctrl+C to the loop, then wait for its
 # stop file), "tool:<name>" (ask the PreToolUse hook from --settings about a call; its output goes
-# to hooks.jsonl) and "handoff" (write .loop/handoff.md like an agent asked to stop).
+# to hooks.jsonl), "handoff" (write .loop/handoff.md like an agent asked to stop) and
+# "ignore-term" (ignore SIGTERM from now on).
 FAKE_CLAUDE = """#!{python}
 import json, os, signal, subprocess, sys, time
 from pathlib import Path
@@ -94,6 +95,8 @@ for item in scenario[kind]:
         time.sleep(30)
     elif isinstance(item, str) and item.startswith("sleep:"):
         time.sleep(float(item[len("sleep:"):]))
+    elif item == "ignore-term":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     elif item == "handoff":
         Path(".loop").mkdir(exist_ok=True)
         Path(".loop/handoff.md").write_text("done: nothing")

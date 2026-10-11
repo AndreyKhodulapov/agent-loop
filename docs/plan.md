@@ -123,6 +123,12 @@
 **Находки шага 2.5 (2.1.296):**
 - `claude` — нативный бинарник; в `ps -A -o pgid=,command=` его аргументы видны целиком, `session_id` после `--session-id`/`--resume` — отдельный токен. По нему `loop gc` находит осиротевшую сессию; `loop selfcheck` проверяет это на каждом запуске.
 
+**Находки этапа 2а (2.1.296):**
+- Инструментов `Grep` и `Glob` в сессии нет («No such tool available»), поиск идёт через Bash.
+- `Read(./**)` в allow: чтение в рабочем каталоге (в том числе `.venv`) проходит, вне его — отказ, включая `$TMPDIR` оркестратора. У Bash в sandbox свой `TMPDIR=/tmp/claude-<uid>`, запись туда разрешена.
+- Bash в sandbox читает любые файлы, кроме запрещённых правилами `deny`: `cat ~/.ssh/config` прошёл. Правила `Read(~/.ssh/**)` и `Read(~/.docker/config.json)` из `deny` попадают в sandbox так же, как `Read(.env*)` (S7): `Operation not permitted`.
+- Запись в `.git/hooks/*` и `.git/config` закрыта и без наших правил: `Write` отклонён CLI, Bash получает `Operation not permitted` от sandbox. Чтение `.git/config` и `git status` работают.
+
 **S1b** отложен до первого реального прогона: повтор `rate_limit_event` проверим на логах длинной сессии. Пробный вызов, на который можно опереться, если события не повторяются, уже проверен (S1).
 
 ---
@@ -355,7 +361,8 @@ LOOP_KNOWLEDGE_DIR=~/andrey_personal_projects/MY-KNOWLEDGE-DATABASE/USEFUL_JOB_N
 Сейчас: `~/.claude/settings.json` — `defaultMode: bypassPermissions` плюс deny-список (`rm -rf *`, `export *KEY*`, `curl *TOKEN*` и т. п.). Deny-список по шаблонам обходится тривиально: `find -delete`, `python -c "shutil.rmtree(...)"`, `cat .env`, `printenv`. Это защита от случайности, а не от агента, который «решил» что-то сделать.
 
 Для цикла:
-- Отдельный `loop-settings.json` (`--setting-sources project --settings loop-settings.json`, пользовательские настройки не подтягиваются — проверено в S4): allow-список команд (`uv`, `pytest`, `ruff`, `flake8`, `make <цели профиля>`, `git status/diff/log/show`), deny на `git commit/push/reset/checkout/rebase`, `rm -rf`, сетевые утилиты; `sandbox` для Bash (запись только в рабочий каталог и `$TMPDIR`), сеть из sandbox закрыта; `Write`/`Edit` разрешены только в рабочем каталоге, `Read`/`Write`/`Edit` запрещены для `.env*`, `*.pem`, `*.key`; `autoMemoryEnabled: false`.
+- Отдельный `loop-settings.json` (`--setting-sources project --settings loop-settings.json`, пользовательские настройки не подтягиваются — проверено в S4): allow-список команд (`uv`, `pytest`, `ruff`, `flake8`, `make <цели профиля>`, `git status/diff/log/show`), deny на `git commit/push/reset/checkout/rebase`, `rm -rf`, сетевые утилиты; `sandbox` для Bash (запись только в рабочий каталог и `$TMPDIR`), сеть из sandbox закрыта; `Read`, `Write`/`Edit` разрешены только в рабочем каталоге; чтение `.env*`, `*.pem`, `*.key` и каталогов с учётными данными в `$HOME` (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.docker/config.json` и т. п.) запрещено и инструментам, и Bash в sandbox; `autoMemoryEnabled: false`.
+- `.git/` рабочего репозитория: запись в hook'и и конфиг закрыта CLI и sandbox (проверено в этапе 2а), `Edit(.git/**)` в deny. Git оркестратора работает вне sandbox, поэтому сам не исполняет код из репозитория: каждый вызов идёт с `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
 - Чистое окружение: `claude` запускается с `env`, где оставлены только `PATH`, `HOME`, `USER`, `LANG`, `TMPDIR` и переменные из профиля репозитория. Без `USER` OAuth-токен не находится в keychain («Not logged in»). Токены и ключи из shell не наследуются.
 - Инварианты из раздела 7 ловят то, что пропустили настройки.
 
@@ -456,7 +463,7 @@ S1–S6 в разделе 2. S1b проверяется на первом реа
 4. WIP-ref, выбор возобновления (`--resume` или handoff); блокировка прогона, финализатор и доуборка мёртвых прогонов при старте, `loop gc`.
 5. `loop selfcheck` в своём модуле, проверка hook'а на реальном CLI.
 
-### Этап 2а. Правки по ревью этапа 2
+### Этап 2а. Правки по ревью этапа 2 — сделано 2026-10-11
 Находки ревью 2026-10-11, подробности в [progress.md](progress.md). Один шаг, одна ветка.
 1. Таймаут простоя потока считает все строки `stream-json`, а не только разобранные события.
 2. Guard при своём падении блокирует вызов (код 2) и фиксирует причину в `guard.json`, а не отключается молча.

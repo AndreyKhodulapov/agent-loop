@@ -39,7 +39,8 @@ CONTEXT_PAUSES_TO_REPLAN = 2
 class Outcome:
     # completed, paused or failed
     status: str
-    # Why the step paused (context, budget, interrupt, timeout, idle) or what failed.
+    # Why the step paused (context, budget, interrupt, timeout, idle, guard_error) or what
+    # failed.
     reason: str | None
     # None when the session was terminated before its result.
     result: agent.Result | None
@@ -61,13 +62,13 @@ class Deadlines:
     step_timeout: float
     idle_timeout: float
     started: float
-    last_event: float
+    last_output: float
     stop_requested: float | None = None
 
     def due(self, now: float) -> str | None:
         """`timeout` to ask the agent to wrap up, `kill` when it has not done so in time,
         `idle` when the stream is silent too long."""
-        if now - self.last_event >= self.idle_timeout:
+        if now - self.last_output >= self.idle_timeout:
             return "idle"
         if self.stop_requested is not None:
             return "kill" if now - self.stop_requested >= STOP_GRACE else None
@@ -78,7 +79,7 @@ class Deadlines:
             next_stop = self.started + self.step_timeout
         else:
             next_stop = self.stop_requested + STOP_GRACE
-        return min(self.last_event + self.idle_timeout, next_stop)
+        return min(self.last_output + self.idle_timeout, next_stop)
 
 
 def run_dir(home: Path, run_id: str) -> Path:
@@ -108,7 +109,6 @@ def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id:
         watcher.start()
         try:
             for event in process.events():
-                deadlines.last_event = time.monotonic()
                 if isinstance(event, agent.Usage):
                     crossed = event.context_tokens // CTX_LOG_STEP > context_tokens // CTX_LOG_STEP
                     context_tokens = event.context_tokens
@@ -134,22 +134,31 @@ def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id:
     return outcome
 
 
-def how_to_resume(steps: list[Step]) -> Resume:
+def how_to_resume(steps: list[Step], ctx_soft_tokens: int) -> Resume:
     """How to go on with a task whose last step paused; `steps` are all steps of the task.
 
-    The paused session keeps its context, so it is resumed, unless the context itself was the
-    reason: then a new session starts from the handoff, and a task that has filled the context
-    again is too big for one session.
+    The paused session keeps its context, so it is resumed, unless the context was full: then a
+    new session starts from the handoff, and a task that has filled the context again is too big
+    for one session.
     """
     last = steps[-1]
-    if last.detail["reason"] != "context":
+    if not _context_full(last, ctx_soft_tokens):
         return Resume("session", last.session_id)
     context_pauses = sum(
-        1 for s in steps if s.outcome == "paused" and s.detail["reason"] == "context"
+        1 for s in steps if s.outcome == "paused" and _context_full(s, ctx_soft_tokens)
     )
     if context_pauses >= CONTEXT_PAUSES_TO_REPLAN:
         return Resume("replan")
     return Resume("handoff")
+
+
+def _context_full(paused: Step, ctx_soft_tokens: int) -> bool:
+    # A step paused for another reason past the soft limit would be stopped for the context on
+    # the first tool call of the resumed session. A step of a dead run has no context recorded.
+    return (
+        paused.detail["reason"] == "context"
+        or paused.detail.get("context_tokens", 0) >= ctx_soft_tokens
+    )
 
 
 class _Watch:
@@ -169,6 +178,7 @@ class _Watch:
     def run(self) -> None:
         while not self._closed:
             now = time.monotonic()
+            self._deadlines.last_output = self._process.last_output
             due = self._deadlines.due(now)
             if due == "timeout":
                 logger.warning("step timeout: asking the agent to write a handoff and stop")
@@ -193,9 +203,13 @@ class _Watch:
                 "Ctrl+C: the agent writes a handoff and stops, press Ctrl+C again to stop it now"
             )
             self._request_stop("interrupt", time.monotonic())
-        else:
+        elif self._interrupts == 2:
             logger.warning("Ctrl+C again: terminating the session")
             self._kill("interrupt")
+        else:
+            # The second Ctrl+C is still waiting for the session to exit after SIGTERM.
+            logger.warning("Ctrl+C once more: killing the session")
+            self._process.kill()
 
     def close(self) -> None:
         self._closed = True

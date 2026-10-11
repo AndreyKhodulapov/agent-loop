@@ -129,8 +129,14 @@ def test_exit_without_result_reports_stderr(tmp_path, fake_claude):
         list(process.events())
 
 
-def test_stopped_session_ends_without_error(tmp_path, fake_claude):
-    fake_claude([INIT, "sleep", RESULT])
+@pytest.mark.parametrize(
+    "scenario",
+    [[INIT, "sleep", RESULT], ["ignore-term", INIT, "sleep", RESULT]],
+    ids=["exits on SIGTERM", "ignores SIGTERM"],
+)
+def test_stopped_session_ends_without_error(tmp_path, fake_claude, monkeypatch, scenario):
+    fake_claude(scenario)
+    monkeypatch.setattr(agent, "ORPHAN_GRACE", 0.5)
 
     with agent.Process(session(tmp_path), tmp_path / "s.jsonl") as process:
         events = []

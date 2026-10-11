@@ -8,6 +8,7 @@ import uuid
 import pytest
 
 from agent_loop import git, recovery, step
+from agent_loop.config import Settings
 from agent_loop.store import Store
 
 ORPHAN = "import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(60)"
@@ -38,21 +39,33 @@ def lock_path(home, run_id):
     return step.run_dir(home, run_id) / recovery.LOCK_FILE
 
 
-@pytest.fixture
-def orphan(tmp_path):
-    """Start a process that looks like a session left by a dead loop; returns its session id."""
-    session_id = str(uuid.uuid4())
-    ready = tmp_path / "orphan-ready"
-    proc = subprocess.Popen(
-        [sys.executable, "-c", ORPHAN, ready, "--session-id", session_id], process_group=0
-    )
+def start(command, ready, *args):
+    proc = subprocess.Popen([*command, ready, *args], process_group=0)
     deadline = time.monotonic() + 10
     while not ready.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    yield session_id, proc
-    if proc.poll() is None:
-        proc.kill()
-        proc.wait()
+    return proc
+
+
+@pytest.fixture
+def orphan(tmp_path):
+    """Start a process that looks like a session left by a dead loop and another one that has
+    the same session id in its command line but is not a session; returns the session id and
+    both processes."""
+    session_id = str(uuid.uuid4())
+    script = tmp_path / "orphan" / "claude"
+    script.parent.mkdir()
+    script.write_text(f"#!{sys.executable}\n{ORPHAN}\n")
+    script.chmod(0o755)
+    procs = [
+        start([script], tmp_path / "orphan-ready", "--session-id", session_id),
+        start([sys.executable, "-c", ORPHAN], tmp_path / "bystander-ready", session_id),
+    ]
+    yield session_id, *procs
+    for proc in procs:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
 
 def test_hold_is_exclusive_and_released_on_close(tmp_path):
@@ -69,7 +82,7 @@ def test_hold_is_exclusive_and_released_on_close(tmp_path):
 
 
 def test_dead_run_is_paused_with_its_session_stopped_and_work_saved(home, db, repo, orphan):
-    session_id, proc = orphan
+    session_id, proc, bystander = orphan
     run_id, task_id = running_run(db, repo)
     (repo / "notes.txt").write_text("operator's\n")
     db.start_step(task_id, "implement", git.head(repo), git.untracked(repo), session_id)
@@ -79,9 +92,12 @@ def test_dead_run_is_paused_with_its_session_stopped_and_work_saved(home, db, re
     assert recovery.reap(db, home) == [run_id]
 
     assert proc.wait(timeout=5) == -signal.SIGTERM
+    assert bystander.poll() is None
     [paused] = db.steps(task_id)
     assert (paused.outcome, paused.detail) == ("paused", {"reason": "died"})
-    assert step.how_to_resume([paused]) == step.Resume("session", session_id)
+    assert step.how_to_resume([paused], Settings().ctx_soft_tokens) == step.Resume(
+        "session", session_id
+    )
     [task] = db.tasks(run_id)
     assert (task.status, task.reason) == ("paused", "died")
     run = db.run(run_id)
@@ -101,4 +117,21 @@ def test_live_run_is_left_alone(home, db, repo):
     lock.close()
     assert recovery.reap(db, home) == [run_id]
     assert recovery.reap(db, home) == []
+    assert db.run(run_id).status == "paused"
+
+
+def test_broken_run_does_not_block_the_others(home, db, repo, tmp_path):
+    gone = tmp_path / "moved-away"
+    gone.mkdir()
+    broken_id, broken_task = running_run(db, gone)
+    db.start_step(broken_task, "implement", "abc123", [])
+    gone.rmdir()
+    run_id, task_id = running_run(db, repo)
+    db.start_step(task_id, "implement", git.head(repo), [])
+
+    assert recovery.reap(db, home) == [run_id]
+
+    assert db.run(broken_id).status == "running"
+    [still_open] = db.steps(broken_task)
+    assert still_open.outcome is None
     assert db.run(run_id).status == "paused"

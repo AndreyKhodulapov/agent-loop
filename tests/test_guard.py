@@ -124,7 +124,7 @@ def run_dir(tmp_path):
     return run_dir
 
 
-def hook(run_dir, tool="Read", tool_input=None, cwd=None):
+def run_hook(run_dir, tool="Read", tool_input=None, cwd=None):
     """Run the hook the way the CLI does: a new process with the call on stdin."""
     workdir = run_dir.parents[2] / "repo"
     call = {
@@ -135,15 +135,20 @@ def hook(run_dir, tool="Read", tool_input=None, cwd=None):
         "cwd": str(cwd or workdir),
     }
     [entry] = json.loads((run_dir / guard.SETTINGS_FILE).read_text())["hooks"]["PreToolUse"]
-    proc = subprocess.run(
+    return subprocess.run(
         entry["hooks"][0]["command"],
         shell=True,
         input=json.dumps(call),
         capture_output=True,
         text=True,
         cwd=workdir,
-        check=True,
     )
+
+
+def hook(run_dir, tool="Read", tool_input=None, cwd=None):
+    """The output of a hook that has exited normally."""
+    proc = run_hook(run_dir, tool, tool_input, cwd)
+    assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout) if proc.stdout else None
 
 
@@ -210,3 +215,14 @@ def test_hook_does_not_import_from_the_working_directory(run_dir):
     (workdir / "json.py").write_text("raise SystemExit('shadowed')\n")
 
     assert hook(run_dir) is None
+
+
+def test_failing_hook_blocks_the_call_and_pauses_the_step(run_dir):
+    (run_dir / guard.LIVE_FILE).unlink()
+
+    proc = run_hook(run_dir)
+
+    assert proc.returncode == guard.BLOCK
+    assert "guard failed, every tool call is blocked" in proc.stderr
+    assert guard.LIVE_FILE in proc.stderr
+    assert guard.outcome(run_dir) == guard.State(guard.GUARD_ERROR, hard=True, denied=0)
