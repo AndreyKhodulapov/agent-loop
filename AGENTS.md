@@ -4,6 +4,7 @@ Apply to every project. Where the project's own rules (CLAUDE.md, context file) 
 
 ## Scope
 
+- One task is one commit of at most ~1000 changed lines including tests. If the task does not fit, stop and propose how to split it into separate tasks instead of writing more code.
 - Change only what the task needs. Do not reformat neighbouring code or add type hints, renames or cleanups along the way.
 - Reuse what the project already has: logger, import style, utilities, fixtures. Search before writing a new helper.
 - Follow the idioms of the language and the conventions already used in the repository.
