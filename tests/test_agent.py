@@ -1,118 +1,13 @@
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
+from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, SUBAGENT, USER, read_calls
 
 from agent_loop import agent
 
-# Shapes taken from a real `claude -p --output-format stream-json --verbose` run on 2.1.296.
-INIT = {
-    "type": "system",
-    "subtype": "init",
-    "session_id": "{session_id}",
-    "model": "claude-haiku-5-5",
-    "claude_code_version": "2.1.296",
-    "permissionMode": "dontAsk",
-    "tools": ["Bash", "Read"],
-}
-ASSISTANT = {
-    "type": "assistant",
-    "parent_tool_use_id": None,
-    "session_id": "{session_id}",
-    "message": {
-        "content": [{"type": "text", "text": "pong"}],
-        "usage": {
-            "input_tokens": 4,
-            "cache_creation_input_tokens": 5232,
-            "cache_read_input_tokens": 13060,
-            "output_tokens": 5,
-        },
-    },
-}
-SUBAGENT = {**ASSISTANT, "parent_tool_use_id": "toolu_01"}
-RATE_LIMIT = {
-    "type": "rate_limit_event",
-    "session_id": "{session_id}",
-    "rate_limit_info": {
-        "status": "allowed",
-        "rateLimitType": "five_hour",
-        "unifiedWindows": {
-            "five_hour": {"utilization": 0.03, "resetsAt": 1791734400},
-            "seven_day": {"utilization": 0.64, "resetsAt": 1791813600},
-        },
-    },
-}
-USER = {"type": "user", "session_id": "{session_id}", "message": {"content": []}}
-RESULT = {
-    "type": "result",
-    "subtype": "success",
-    "is_error": False,
-    "terminal_reason": "completed",
-    "result": "pong",
-    "num_turns": 3,
-    "total_cost_usd": 0.0049,
-    "permission_denials": [],
-    "session_id": "{session_id}",
-}
 WORDS = {"project_word": "Maple.", "appended_word": "copper", "second_word": "willow"}
-
-FAKE_CLAUDE = """#!{python}
-import json, os, sys, time
-from pathlib import Path
-
-here = Path(__file__).parent
-argv = sys.argv[1:]
-if argv == ["--version"]:
-    print("2.1.296 (Claude Code)")
-    sys.exit(0)
-flag = "--resume" if "--resume" in argv else "--session-id"
-session_id = argv[argv.index(flag) + 1]
-call = {
-    "argv": argv,
-    "prompt": sys.stdin.read(),
-    "env": dict(os.environ),
-    "cwd": os.getcwd(),
-    "pid": os.getpid(),
-    "pgid": os.getpgid(0),
-}
-if "--append-system-prompt-file" in argv:
-    call["system"] = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text()
-with open(here / "calls.jsonl", "a") as calls:
-    calls.write(json.dumps(call) + "\\n")
-scenario = json.loads((here / "scenario.json").read_text())
-print(scenario.get("stderr", ""), file=sys.stderr)
-for item in scenario["resume" if flag == "--resume" else "new"]:
-    if item == "sleep":
-        time.sleep(30)
-        continue
-    print(json.dumps(item).replace("{session_id}", session_id), flush=True)
-sys.exit(scenario.get("exit", 0))
-"""
-
-
-@pytest.fixture
-def fake_claude(tmp_path, monkeypatch):
-    """Put a fake `claude` first in PATH; returns a function that sets what it prints."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "claude"
-    script.write_text(FAKE_CLAUDE.replace("{python}", sys.executable))
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-
-    def configure(new, resume=(), stderr="", exit_code=0):
-        (bin_dir / "scenario.json").write_text(
-            json.dumps({"new": new, "resume": list(resume), "stderr": stderr, "exit": exit_code})
-        )
-        return bin_dir / "calls.jsonl"
-
-    return configure
-
-
-def read_calls(path):
-    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 def session(tmp_path, **kwargs):

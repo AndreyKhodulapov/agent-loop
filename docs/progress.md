@@ -117,4 +117,23 @@ uv run pytest -q            # 126 тестов
 uv run ruff check . && uv run ruff format --check .
 ```
 
-Дальше: 2.3 — Ctrl+C и таймауты: двухступенчатая остановка (первый Ctrl+C — `guard.request_stop(run_dir, "interrupt")`, второй — `Process.stop()`), таймаут шага через stop-файл и жёсткая остановка через 5 мин, таймаут простоя потока, WIP-ref `refs/loop/wip/<run>/<task>`, возобновление через `--resume` и через handoff, финализатор и доуборка мёртвых прогонов при старте, `loop gc`, `pid` прогона в `store`. Плюс проверка hook в `loop selfcheck` (см. выше).
+### 2.3 Шаг под контролем: события, таймауты, Ctrl+C — готово 2026-10-11
+
+Ветка `guard-n-budget`. Исходный шаг 2.3 не влезал в ~1000 строк и разбит на три: 2.3 (этот), 2.4 (WIP и возобновление), 2.5 (selfcheck); в плане, раздел 14, то же.
+
+Сделано:
+- `src/agent_loop/step.py`, `step.run(session, cfg, store, run_id, step_id) -> Outcome` — одна сессия шага. Каталог прогона — `step.run_dir(home, run_id)` (`~/.agent-loop/runs/<run>/`); вызывающий перед этим делает `guard.prepare` и кладёт возвращённый файл настроек в `Session.settings`. Сырой поток — `runs/<run>/step-<step_id>.jsonl`.
+  - События: `Usage` → `guard.write_live`; `Limits` → `budget.save_limits` (общий `limits.json`) и `store.record_limits` со ссылкой на шаг. Строка лога `ctx 18k/150k · 5h 3%/…` — на каждом `Limits` и при пересечении очередных 10k контекста.
+  - Таймауты (`Deadlines`, монотонное время, отдельный поток): шаг дольше `step_timeout_min` → `guard.request_stop("timeout")`; агент не свернулся за `STOP_GRACE` (5 мин) после просьбы → SIGTERM группе. Поток молчит дольше `BASH_MAX_TIMEOUT_MS` из настроек сессии + 2 мин → SIGTERM, причина `idle`.
+  - Ctrl+C: на время сессии свой обработчик SIGINT. Первый — `request_stop("interrupt")` и отсчёт `STOP_GRACE`, второй — SIGTERM. После шага прежний обработчик возвращается.
+  - Итог `Outcome(status, reason, result, context_tokens)`: `paused` с причиной из `guard.json`, если guard вмешался (она важнее способа завершения: после паузы по контексту нужна новая сессия), иначе с причиной нашего SIGTERM; `failed` при `is_error`; иначе `completed`. Шаг завершается в `store` с `detail`: причина, контекст, `terminal_reason`, ходы, стоимость и ответ по схеме (`answer`) — ответ исполнителя переживёт падение оркестратора между сессией и коммитом. CLI вышел без `result` — шаг `failed` с текстом ошибки, `AgentError` летит дальше.
+- Тесты: поддельный `claude` и формы событий вынесены из `test_agent.py` в `tests/fakes.py` и `tests/conftest.py`. Подделка умеет посылать Ctrl+C родителю (`"interrupt"`, ждёт stop-файл) и спрашивать настоящий hook из `--settings` (`"tool:<имя>"`). Проверены: запись `live.json`/`limits.json`/снимков, мягкая остановка по Ctrl+C и жёсткая по контексту через настоящий hook, второй Ctrl+C, молчащий поток, ошибка API, выход без результата, решения `Deadlines` на границах.
+- Чего нет: прогона на реальном CLI (на этом шаге его не запускали). Проверить — короткой сессией на `haiku` через `guard.prepare` + `step.run` в пустом каталоге: должен прийти `completed`, в `runs/<run>/` — `live.json` и поток, в БД — снимок лимитов.
+
+Проверка:
+```
+uv run pytest -q            # 140 тестов
+uv run ruff check . && uv run ruff format --check .
+```
+
+Дальше: 2.4 — WIP-ref `refs/loop/wip/<run>/<task>` через временный индекс (`git stash create` не берёт новые неотслеживаемые файлы; брать отслеживаемые изменения и неотслеживаемые файлы, появившиеся за шаг), выбор способа возобновления по `Outcome.reason` (`--resume` для budget/interrupt/timeout/idle, новая сессия с handoff для context, вторая пауза по контексту на задаче — `replan`), `session_id` в `store.start_step` (сейчас пишется только в `finish_step`, а `kill -9` посреди сессии его потеряет), pid прогона и pgid сессии в `store` (миграция 3), доуборка мёртвых прогонов при старте `loop`, `loop gc`. Потом 2.5 — selfcheck в своём модуле и третья сессия с hook (см. «Чего нет» в 2.2).
