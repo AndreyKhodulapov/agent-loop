@@ -278,43 +278,39 @@ uv run loop selfcheck       # Skill в deny не ломает сессии
 
 Предлагаемое сообщение коммита 3.0 (если ещё не закоммичено): `fix(step): apply guard-n-budget review findings before stage 3`.
 
-## Дальше: переход на `--restricted` (обсуждение 2026-10-11)
+### 3.1а Спайк `--restricted` — готово 2026-10-11, зелёный
 
-Решение человека: переходим на `--restricted`, если выигрыш подтвердится спайком. CLAUDE.md в большинстве его репозиториев нет, контекст проекта идёт через `context_file`, так что потеря нативной загрузки CLAUDE.md почти ничего не стоит.
+Решение человека (обсуждение 2026-10-11): переходим на `--restricted`, если выигрыш подтвердится спайком. CLAUDE.md в большинстве его репозиториев нет, контекст проекта идёт через `context_file`, так что потеря нативной загрузки CLAUDE.md почти ничего не стоит. Выигрыш: проектные настройки игнорируются целиком, а не по списку путей; работа в репозиториях с проектными hook'ами; в сессии 4 инструмента вместо ~22; уходит `--setting-sources project`.
 
-Зачем (текущая схема уже держит — спайк 3.0, — выигрыш в простоте и запасе):
-- Проектные настройки игнорируются целиком, а не по нашему списку путей (`settings*.json`, `hooks`, `skills`, `agents`, `commands`, `.mcp.json`), который уже дважды дополняли по ревью (2b, 3.0). Закрываются и плагины из `enabledPlugins` проектных настроек.
-- Можно работать в репозиториях с проектными hook'ами: отказ `ProjectHooksError` уходит.
-- В сессии только инструменты из `--tools`; сейчас их ~22 (`Workflow`, `Cron*`, `RemoteTrigger`, `SendMessage` и т. п.): `dontAsk` их отклоняет, но описания едят контекст, а агент пробует их вызывать.
-- Уходит `--setting-sources project`.
+Сделано (кода в репозитории нет, только план):
+- Спайк на реальном CLI (2.1.296, `haiku`, effort `low`): `guard.prepare` + `agent.Process` с подменённой `agent.command` — `--restricted --tools Bash,Read,Edit,Write` вместо `--setting-sources project`. Скрипт лежал в scratchpad сессии и не сохранится; восстанавливается по этому описанию: рабочий каталог — git-репозиторий с набором конфигов, `.env`, `.claude/skills`, `.claude/rules`, `.mcp.json` с сервером, пишущим маркер; агента просят выполнить список действий и ответить по схеме `{results: [{item, ok, output}]}`; сверка — `git status`, `permission_denials`, вызовы инструментов из потока.
+- Находки — в плане, раздел 2, «Находки шага 3.1а». Коротко:
+  - блокера нет: `Edit` правит `pyproject.toml`, `requirements*.txt`, линтеры, `Makefile`, `Dockerfile`, CI, `.gitignore`, `conftest.py`;
+  - закрыты для `Edit` только конфиги менеджеров git-hook'ов и IDE: `.pre-commit-config.yaml`, `.husky/*`, `lefthook.yml`, `.devcontainer/*`, `.idea/*`, `.vscode/settings.json`, `.npmrc`; `allow` из нашего hook'а запрет не снимает;
+  - Bash в sandbox их пишет (кроме `.vscode`, `.idea`) — в обеих схемах. Подложенный `.pre-commit-config.yaml`/`.husky`/`lefthook.yml` выполнит код при `git commit` человека: в план добавлен риск (раздел 10) и проверка gates (раздел 7, раздел 14 шаг 3);
+  - `StructuredOutput` при `--json-schema` добавляется сам; `TodoWrite` в 2.1.296 нет вообще;
+  - deny из `--settings` (`.env*`, `~/.ssh`, абсолютный путь), сеть наружу закрыта, localhost открыт, `git status`/`diff`/`log` работают, `git commit` отклонён;
+  - игнорируются проектные skills, rules, CLAUDE.md, `.mcp.json`; без `--strict-mcp-config` подключаются коннекторы claude.ai — флаг остаётся.
+- План: раздел 2 (находки), раздел 3 (строка «Переход на `--restricted`»), раздел 7 (строка «Hook'и человека»), раздел 10 (риск), раздел 14 (3.1а сделан, gates).
 
-### Шаг 3.1а. Спайк `--restricted` (без кода в репозитории)
+Проверка: тестов и кода нет; `uv run pytest -q` — по-прежнему 184 теста.
 
-Скрипт спайка 3.0 был в scratchpad прошлой сессии и не сохранился; основа — `guard.prepare` + `agent.command` с добавленными флагами, запуск `claude` с окружением `agent.ENV_KEYS`, разбор `init` (`tools`), `tool_use`/`tool_result`, `permission_denials`. Модель `haiku`, effort `low`. Флаги: `--restricted --tools <список>` к нашему `--settings` и `--strict-mcp-config`.
+Предлагаемое сообщение коммита 3.1а: `docs(plan): record the --restricted spike and switch to it in 3.1b`.
 
-Проверить:
-1. **Блокер, если подтвердится**: по `--help`, запись в «settings, git and tool-configuration files» в этом режиме разрешает только человек или обработчик разрешений. Может ли агент через `Edit`/`Write` править `pyproject.toml`, `requirements.txt`, `ruff.toml`, `setup.cfg`, `.pre-commit-config.yaml`, `Makefile`, `.gitignore`, `Dockerfile`, `.github/workflows/*.yml`. Если `pyproject.toml` и подобные закрыты — остаёмся на текущей схеме (агент вносит зависимости правкой `pyproject.toml`, раздел 3 плана).
-2. `--json-schema`: приходит ли `structured_output`, нужно ли называть `StructuredOutput` в `--tools`; то же для `TodoWrite`.
-3. Правила из `--settings` в этом режиме: deny на `.env` и `~/.ssh` (и для `Read`, и для Bash в sandbox), сеть наружу из Bash закрыта, localhost открыт, `git status`/`git diff`/`git log` из Bash работают, `git commit` отклонён.
-4. Что ещё игнорируется: проектные `.claude/skills` (виден ли skill в `init.skills`), `.claude/rules`, `.mcp.json` без `--strict-mcp-config`.
+## Дальше
 
-Уже проверено в 3.0 (план, раздел 2): hook из `--settings` работает, sandbox действует, `--resume` работает, hook из `.claude/settings.json` репозитория не выполняется, CLAUDE.md рабочего каталога **не** подхватывается.
+### Шаг 3.1б. Переход на `--restricted`, ~200–300 строк
 
-Итог спайка — в план: находки в раздел 2, решение в раздел 3 (строка «Проектные hook'и» и «Изоляция сессий цикла»), раздел 10.
-
-### Шаг 3.1б. Переход (если спайк зелёный), ~200–300 строк
-
-- `agent.command`: `--restricted --tools <список>` вместо `--setting-sources project`; `--strict-mcp-config` остаётся. Список инструментов — из спайка (`Bash,Read,Edit,Write` и, возможно, `StructuredOutput`, `TodoWrite`); `--disallowed-tools Agent` становится лишним.
-- CLAUDE.md репозитория передаётся сами: `CLAUDE.md` и `.claude/CLAUDE.md` из корня, если есть, добавляются к файлам правил (адаптер уже склеивает их в один `--append-system-prompt-file`). `@path`-импорты разворачиваются сами, только для файлов внутри репозитория (иначе `@~/.ssh/config` затянет секрет в промпт), с ограничением глубины. CLAUDE.md вложенных каталогов и `.claude/rules` с `paths:` не повторяем — в промпте исполнителя (3.3) строка «если в каталоге, где работаешь, есть CLAUDE.md, прочитай его».
+- `agent.command`: `--restricted --tools Bash,Read,Edit,Write` вместо `--setting-sources project`; `--strict-mcp-config` остаётся (без него подключаются коннекторы claude.ai). `StructuredOutput` называть не нужно — CLI добавляет его сам при `--json-schema`. `--disallowed-tools Agent` становится лишним: `Session.disallowed_tools` и его передачу из `selfcheck` убрать, если не останется второго применения.
+- CLAUDE.md репозитория передаётся сами: `CLAUDE.md` и `.claude/CLAUDE.md` из корня, если есть, добавляются к файлам правил (адаптер уже склеивает их в один `--append-system-prompt-file`). `@path`-импорты разворачиваются сами, только для файлов внутри репозитория (иначе `@~/.ssh/config` затянет секрет в промпт), с ограничением глубины. CLAUDE.md вложенных каталогов и `.claude/rules` с `paths:` не повторяем — в промпте исполнителя (3.4) строка «если в каталоге, где работаешь, есть CLAUDE.md, прочитай его».
 - `selfcheck`: первая сессия по-прежнему проверяет слово из CLAUDE.md рабочего каталога — теперь это проверка нашей передачи; добавить проверку, что проектный hook не выполнился.
 - `protected`: убрать отказ `ProjectHooksError` (и тесты на него). `protected.restore` **оставить**: он защищает уже не сессии цикла, а следующую интерактивную сессию человека в этом репозитории — подложенный hook в `.claude/settings.local.json` сработал бы у него вне sandbox, а этот файл обычно в gitignore и в дифф не попадает.
-- `loop-settings.json`: пересмотреть deny, ставшие лишними (`Skill`, если инструмента нет в `--tools`; `Edit(.claude/**)`, `Edit(.mcp.json)` оставить — это защита человека, см. выше).
+- `loop-settings.json`: `TodoWrite` из allow убрать (инструмента в 2.1.296 нет); `Skill` в deny стал лишним (его нет в `--tools`); `Edit(.claude/**)`, `Edit(.mcp.json)` оставить — это защита человека, см. выше.
+- Промпт исполнителя (3.4) должен знать, что `Edit` на `.pre-commit-config.yaml`, `.husky`, `.devcontainer`, `.npmrc` отклоняется: это файлы человека, обходить через Bash нельзя — сообщить в ответе.
 - План: раздел 3 (решение), раздел 10, раздел 14 (нумерация этапа 3).
-
-Если спайк красный — записать находки и причину отказа в план, 3.1б пропустить.
 
 ### Потом
 
-Бывший шаг 3.1 сдвигается: 3.2 — профиль репозитория (`loop.toml`: `[commands]`, `[timeouts]`, `[env]`, `deps_files`, `secret_patterns`, проверка неизвестных ключей), lock рабочего каталога `.git/agent-loop.lock` через `recovery.hold`, `down` профиля в финализаторе и в `reap`; 3.3 — `gates` (`install` по изменению зависимостей, команды с таймаутами, перезапуск упавших тестов, инварианты ветки/HEAD, числа тестов, размера диффа, секретов, `protected.restore`). Дальше по плану: сборка промпта и цикл fixer, коммит кодом. Учесть пробелы из вводной к этапу 3 в плане (handoff после жёсткой остановки, счётчик пауз `timeout`/`guard_error`, `how_to_resume` только после `paused`, абсолютный `LOOP_HOME`).
+Бывший шаг 3.1 сдвигается: 3.2 — профиль репозитория (`loop.toml`: `[commands]`, `[timeouts]`, `[env]`, `deps_files`, `secret_patterns`, проверка неизвестных ключей), lock рабочего каталога `.git/agent-loop.lock` через `recovery.hold`, `down` профиля в финализаторе и в `reap`; 3.3 — `gates` (`install` по изменению зависимостей, команды с таймаутами, перезапуск упавших тестов, инварианты ветки/HEAD, числа тестов, размера диффа, секретов, `protected.restore`, изменённых конфигов менеджеров git-hook'ов → `needs_human`). Дальше по плану: сборка промпта и цикл fixer, коммит кодом. Учесть пробелы из вводной к этапу 3 в плане (handoff после жёсткой остановки, счётчик пауз `timeout`/`guard_error`, `how_to_resume` только после `paused`, абсолютный `LOOP_HOME`).
 
 Все шаги этапа 3 — коммиты в ветке `implementation-loop`.
