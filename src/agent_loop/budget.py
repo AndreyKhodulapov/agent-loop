@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent_loop.agent import Limits, Window
 from agent_loop.config import Settings
+from agent_loop.files import write_atomic
 
 LIMITS_FILE = "limits.json"
 DAY = 24 * 3600
@@ -63,6 +63,19 @@ def check(limits: Limits, now: float, settings: Settings) -> Verdict:
     return Verdict(not waits, max(waits) if waits else None, summary)
 
 
+def overrun(limits: Limits, now: float, settings: Settings) -> float | None:
+    """How far utilization is above its cap in the worse window, negative while under it;
+    None when no window is active."""
+    overruns = []
+    five_hour = _active(limits.five_hour, now)
+    if five_hour:
+        overruns.append(five_hour.utilization - cap_5h(five_hour, now, settings))
+    seven_day = _active(limits.seven_day, now)
+    if seven_day:
+        overruns.append(seven_day.utilization - cap_7d(seven_day, now, settings))
+    return max(overruns, default=None)
+
+
 def save_limits(path: Path, limits: Limits) -> None:
     """Write the latest limits for every loop on this machine; the file is replaced atomically."""
     previous = load_limits(path)
@@ -71,10 +84,7 @@ def save_limits(path: Path, limits: Limits) -> None:
         limits = Limits(
             limits.five_hour or previous.five_hour, limits.seven_day or previous.seven_day
         )
-    # The pid keeps temporary files of concurrent loops apart.
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(asdict(limits)), encoding="utf-8")
-    os.replace(tmp, path)
+    write_atomic(path, json.dumps(asdict(limits)))
 
 
 def load_limits(path: Path) -> Limits | None:

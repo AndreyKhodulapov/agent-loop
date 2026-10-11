@@ -148,3 +148,13 @@ def test_event_without_a_window_keeps_the_known_one(tmp_path):
     budget.save_limits(path, Limits(five(0.35), None))
 
     assert budget.load_limits(path) == Limits(five(0.35), seven(0.52))
+
+
+def test_overrun_is_taken_from_the_worse_window():
+    now = FIVE_START + 2 * HOUR
+
+    # 5h: 0.4 - 0.5; 7d on day 1: 0.2 - (1/7 - 0.05)
+    assert budget.overrun(Limits(five(0.4), seven(0.2)), now, SETTINGS) == pytest.approx(
+        0.2 - 1 / 7 + 0.05
+    )
+    assert budget.overrun(Limits(None, Window(0.9, WEEK_START)), now, SETTINGS) is None

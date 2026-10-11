@@ -89,4 +89,32 @@ uv run pytest -q            # 99 тестов
 uv run ruff check . && uv run ruff format --check .
 ```
 
-Дальше: 2.2 — `guard`: hook-скрипт `PreToolUse` (контекст и лимиты из `runs/<run>/live.json`, stop-файл; мягкая граница — `deny` с инструкцией записать `.loop/handoff.md`, жёсткая — `continue: false`; `StructuredOutput` пропускается всегда), `loop-settings.json` (allow-список, sandbox для Bash, `Write`/`Edit` только в рабочем каталоге, запрет `.env*`/`*.pem`/`*.key`, `autoMemoryEnabled: false`), спайк S7. Потолки лимитов — `budget.cap_5h` / `budget.cap_7d`.
+### 2.2 `guard`: hook `PreToolUse`, `loop-settings.json`, спайк S7 — готово 2026-10-11
+
+Ветка `guard-n-budget` (та же, что 2.1).
+
+Сделано:
+- `src/agent_loop/guard.py` — hook, который CLI вызывает перед каждым инструментом: `python -I -m agent_loop.guard <run_dir>` интерпретатором цикла (`-I`: модули рабочего репозитория не подменяют наши). Всё, что hook знает, лежит в каталоге прогона `runs/<run>/`:
+  - `policy.json` — пороги контекста и лимитов из `Settings`, путь к общему `limits.json`, абсолютный путь handoff;
+  - `live.json` — заполнение контекста, оркестратор пишет его из событий `Usage` (`write_live`);
+  - `stop` — просьба оркестратора свернуться: `interrupt` или `timeout` (`request_stop`);
+  - `guard.json` — что hook решил (`outcome` → `State(reason, hard, denied)`); по нему оркестратор узнаёт причину паузы.
+- `prepare(run_dir, home, settings, workdir)` перед каждой сессией, в том числе `--resume`: пишет `settings.json` (база `loop-settings.json` + hook), `policy.json`, обнуляет `live.json`, удаляет `stop` и `guard.json` прошлой сессии. Возвращает путь для `Session.settings`.
+- Решение (`pressure` + `respond`): сначала жёсткие причины — контекст ≥ `ctx_hard_tokens`, лимит выше потолка на 2% и больше; затем мягкие — stop-файл, контекст ≥ `ctx_soft_tokens`, лимит на потолке. Мягкая — `deny` с инструкцией записать `.loop/handoff.md` и завершить ход; запись handoff (`Write`/`Edit`) и `StructuredOutput` проходят. После 3 отклонённых вызовов — жёсткая. Жёсткая — `continue: false` и `deny`; запись handoff и `StructuredOutput` не отклоняются, сессия завершается после них.
+- `budget.overrun` — насколько расход выше потолка в худшем окне; `files.write_atomic` — атомарная запись, общая для `limits.json`, `live.json`, `stop`, `guard.json`.
+- `src/agent_loop/loop-settings.json`: `dontAsk`, без auto-memory; allow — `Read`, `Glob`, `Grep`, `Edit(./**)` (покрывает `Write`), `TodoWrite`; deny — `WebFetch`, `WebSearch`, чтение `.env*`/`*.pem`/`*.key`, `git commit/push/reset/checkout/switch/rebase/merge/stash/clean`, `rm -rf`, `curl`, `wget`; sandbox для Bash без выхода из него (`allowUnsandboxedCommands: false`, `failIfUnavailable: true`), localhost открыт (`allowLocalBinding`); таймауты Bash 2/10 мин.
+- Спайк S7 — в плане, раздел 2: сеть наружу закрыта, localhost открыт, `cat .env` блокирует sandbox, guard останавливает реальную сессию мягко и жёстко. Скрипт спайка в репозиторий не входит.
+- Тесты: решения guard на границах, подсчёт отказов между вызовами, handoff по относительному пути, чтение общего `limits.json`, очистка состояния прошлой сессии, запуск hook отдельным процессом из каталога с `json.py`.
+- Чего нет:
+  - Проверки hook в `loop selfcheck`: дрейф формата hook'а CLI сейчас не ловится. Нужна третья сессия selfcheck с `guard.prepare`; мешает циклический импорт (`selfcheck` в `agent`, `guard` импортирует `agent`) — selfcheck стоит вынести в свой модуль. Предлагаю сделать в 2.3.
+  - Allow-списка команд профиля (`make <цели>`): Bash в sandbox и так разрешён целиком (`autoAllowBashIfSandboxed`), deny-правила действуют. Команды профиля — 3.1.
+  - Записи `live.json` и `limits.json` из потока событий и реакции на `guard.outcome` — это цикл шага (2.3).
+  - `live.json` после `prepare` равен 0, поэтому в возобновлённой сессии первый вызов инструмента может пройти до того, как оркестратор запишет свежий контекст; запас между мягкой и жёсткой границей (30k) это покрывает.
+
+Проверка:
+```
+uv run pytest -q            # 126 тестов
+uv run ruff check . && uv run ruff format --check .
+```
+
+Дальше: 2.3 — Ctrl+C и таймауты: двухступенчатая остановка (первый Ctrl+C — `guard.request_stop(run_dir, "interrupt")`, второй — `Process.stop()`), таймаут шага через stop-файл и жёсткая остановка через 5 мин, таймаут простоя потока, WIP-ref `refs/loop/wip/<run>/<task>`, возобновление через `--resume` и через handoff, финализатор и доуборка мёртвых прогонов при старте, `loop gc`, `pid` прогона в `store`. Плюс проверка hook в `loop selfcheck` (см. выше).
