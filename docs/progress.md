@@ -414,28 +414,47 @@ uv run ruff check . && uv run ruff format --check .
 
 Предлагаемое сообщение коммита 3.3б: `feat(gates): run install, fmt, lint, collect and test of the profile, rerun failed tests once`.
 
+### 3.3в Sandbox для gate-команд — готово 2026-10-11
+
+Спайк (скрипты в scratchpad, итог — план, раздел 2, «Находки шага 3.3в»): `sandbox-exec` работает, но набросок от `(allow default)` дырявый — `(local ip "localhost:*")` открывал всю сеть, `open -a` запускал приложения вне sandbox, `defaults write` писал чужие настройки через `cfprefsd`, `mv`/`ln` обходили запрет чтения внутри репозитория, запись в `.git/hooks` не была закрыта. Профиль от `(deny default)` по образцу `@anthropic-ai/sandbox-runtime` 0.0.79 (sandbox CLI) закрыл всё это; Postgres из docker на localhost, `ruff`, 240 из 244 тестов agent-loop на нём зелёные.
+
+Решения человека (2026-10-11, после спайка; план, раздел 3): свой профиль от `(deny default)` без node/srt; `.env*` gate-командам открыт, значения маскируются и ищутся в диффе; окружение sandbox-команд — как у сессий.
+
+Сделано:
+1. `commands`:
+   - `SANDBOXED` (`fmt`, `lint`, `collect`, `test`, `test_full`, `smoke`) идут через `sandbox-exec -p <профиль> /bin/sh -c <команда>`; окружение — `agent.ENV_KEYS` плюс `[env]`, `TMPDIR` — свой временный каталог на команду, удаляется после неё (иначе следующая сессия агента прочитала бы оставленное). `install`, `up`, `down` — как раньше: без обёртки, всё окружение.
+   - `_sandbox(repo, tmp)` — `SANDBOX_BASE` (из srt: процессы, список mach-служб, sysctl, iokit; сеть — bind/inbound везде, outbound только `localhost`) плюс файлы: чтение всего, кроме `HOME_SECRETS` (как `Read(~/...)` в `loop-settings.json`, плюс `Library/Keychains`) и `REPO_SECRETS` (`*.pem`, `*.key` на любой глубине); запись — репозиторий, `tmp`, `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/*`, кроме `OPERATOR_FILES` (`.git`, `protected.PATHS`, `protected.HOOK_CONFIGS`, `.vscode`, `.idea`, `.devcontainer`) и `REPO_SECRETS` + `.env*`. Имена — регулярками `[Cc][Ll]...` (`(?i)` seatbelt не понимает): на регистронезависимой ФС новый `.CLAUDE` — это `.claude`. Пути — строками JSON с `ensure_ascii=False` (`\uXXXX` seatbelt не читает: кириллица в пути ломала разрешение записи).
+2. `protected.HOOK_CONFIGS` — список переехал из `gates` (нужен и sandbox, а `gates` импортирует `commands`).
+3. `gates`:
+   - `_env_secrets(repo)` — значения ключей с `KEY|TOKEN|SECRET|PASS|PWD|CREDENTIAL|AUTH|DSN|PRIVATE` в имени и длиной от 8 из всех `.env*` репозитория (`git ls-files --cached --others ':(glob,icase)**/.env*'`, игнорируемые тоже), `export` и кавычки снимаются;
+   - после команд дифф снимается заново (команды могли записать прочитанное в работу): значение в добавленной строке — `needs_human(secret_in_diff)` с именами ключей; иначе находки идут через `_mask` — значение заменяется на `<DB_PASSWORD of .env>`;
+   - `_is_hook_config` сравнивает без учёта регистра (`.PRE-COMMIT-CONFIG.YAML` раньше проходил мимо).
+4. `selfcheck._check_gate_sandbox`: sandbox-команда должна создать файл в своём репозитории и не создать рядом; `sandbox-exec` нет — проблема в отчёте.
+5. План: раздел 2 (находки), 3 (решение), 7 (строка «Значения из `.env*`»), 9 (окружение sandbox-команд, `uv run --no-sync --no-cache`, кэши через `$TMPDIR`), 10 (правила sandbox, остаток риска), 14 (шаг 3 (в) сделан).
+
+Тесты: в `test_commands` — 11 отказов sandbox (запись рядом и в `~`, чтение `~/.ssh` и `*.pem`, `mv` секрета и `.env`, `.git/hooks`, `.CLAUDE/settings.local.json`, `.Pre-Commit-Config.yaml`, `.vscode`, соединение с `192.0.2.1`), каждый по «Operation not permitted»: без sandbox запись проходит, а сеть даёт таймаут; разрешённое (чтение `.env`, запись в репозиторий и `$TMPDIR`, удаление `$TMPDIR` после команды, соединение с localhost, окружение без `GITHUB_TOKEN`); `install` вне sandbox с полным окружением; `HOME_SECRETS` покрывает `Read(~/...)` из `loop-settings.json`. В `test_gates` — маскирование (ключ с `export` и кавычками, `.env.test` в подкаталоге, короткое значение и несекретный ключ не трогаются), `secret_in_diff`, `.PRE-COMMIT-CONFIG.YAML` в параметрах теста конфигов git-hook'ов; журнал вызовов команд (`calls`) переехал в репозиторий, в `.git/info/exclude`: вне репозитория sandbox писать не даёт. В `test_selfcheck` — запись рядом при выключенном sandbox попадает в список проблем.
+
+Чего нет:
+- Не macOS — `sandbox-exec` не найден, `FileNotFoundError` из `commands.run`. Отказ на старте прогона — в команде `run` (3.4–3.5): звать `selfcheck` или проверять `sandbox-exec` там.
+- Тесты agent-loop, которые сами запускают `sandbox-exec` (`test_commands`, `test_gates`, `test_selfcheck`), под gate не пройдут: вложенный sandbox запрещён. Ещё 4 теста падают под sandbox из-за `ps` (setuid-бинарник) и `.env.example` (закрыт и сессиям). Цикл на самом agent-loop пока не пускать.
+- Файлы, созданные gate-командами (отчёты, артефакты не из `.gitignore`), выглядят как новые файлы шага. Коммит кодом (3.5) должен брать список файлов с учётом этого.
+- Значение `.env` может дойти до модели закодированным или через игнорируемый файл, который gate-команда оставит в репозитории (риск в разделе 10).
+- `install` без sandbox по-прежнему исполняет build-скрипты; `docker-compose*.yml` и `[build-system]` → `needs_human` — кандидат, не сделано.
+
+Проверка:
+```
+uv run pytest -q            # 261 тест
+uv run ruff check . && uv run ruff format --check .
+```
+
+Предлагаемое сообщение коммита 3.3в: `feat(commands): run gate commands under sandbox-exec, mask .env values in findings`.
+
 ## Дальше
 
-### Шаг 3.3в. Sandbox для gate-команд
-
-Решение человека (2026-10-11): пробуем `sandbox-exec`, дальше смотрим по результату; записано в плане — разделы 3, 7, 10, 14. Код — в следующей сессии.
-
-Что делать:
-1. **Спайк** (скрипт в scratchpad, итог — в план, раздел 2, «Находки шага 3.3в»). Профиль seatbelt, набросок: `(allow default)`, `(deny file-write*)` + `(allow file-write* (subpath <repo>) (subpath <tmp прогона>) /dev/null /dev/tty)`, `(deny network*)` + `(allow network* (remote ip "localhost:*"))`, `(deny file-read* ...)` для `~/.ssh`, `~/.aws`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh` и т. п. Проверить на этой машине (Darwin 25):
-   - `sandbox-exec` ещё есть и работает (deprecated, но им пользуется сам CLI);
-   - `uv run pytest -q` и `uv run ruff check .` в agent-loop: что пишет uv вне репозитория (`~/.cache/uv`, `~/.local/share/uv`) — открыть запись в кэш или запускать с `UV_NO_SYNC=1`/`--frozen` (синхронизирует `install` до gate); запись в кэш — отравление кэша для других проектов;
-   - тест с Postgres из `up` на `{free_port}` (localhost открыт);
-   - testcontainers / docker socket: доступ к сокету — полный выход из sandbox (`docker run -v /:/host`), значит закрыт; такие тесты под gate не пойдут — понять, есть ли они в рабочих репозиториях;
-   - `.env*` репозитория: агенту читать нельзя, а тесты (например, cms) читают его для настроек. Если открыть его gate-командам, наружу код агента его не отправит (сеть закрыта), но может переписать содержимое в отслеживаемый файл, а проверка секретов смотрит только имена новых файлов. Решить по спайку: закрыть и требовать тестовые настройки в `[env]` профиля или открыть и искать значения из `.env` в диффе;
-   - `killpg` по таймауту убивает дерево под `sandbox-exec`;
-   - негативные проверки: запись в `~/x`, `curl https://example.com`, чтение `~/.ssh/config` из `conftest.py` — отказ.
-2. **Код** (если спайк зелёный): обёртка в `commands.run` для `fmt`, `lint`, `collect`, `test`, `test_full`, `smoke` (список — константа в `commands`); профиль seatbelt генерируется в `runs/<run>/`; не macOS — отказ на старте прогона (решить в спайке). `selfcheck` проверяет, что `sandbox-exec` есть и закрывает запись вне каталога. Тесты: команда под обёрткой не пишет вне репозитория и не ходит в сеть; `install` пишет.
-3. Красный спайк — вернуться к человеку: вариант (а), риск в раздел 10.
-
-Остаток после 3.3в (записан в плане, раздел 10): `install` без обёртки исполняет build-скрипты и локальный build-backend, `up` — правленый агентом `docker-compose.yml`. Кандидат — `needs_human` на изменение `docker-compose*.yml` и `[build-system]`, как для конфигов git-hook'ов; обсудить после спайка.
-
-### Потом
+### Шаг 3.4 и после
 
 3.4 — сборка промпта и цикл fixer; промпт исполнителя должен сказать: `Edit` на `.pre-commit-config.yaml`, `.husky`, `.devcontainer`, `.npmrc` отклоняется — это файлы человека, обходить через Bash нельзя, сообщить в ответе; если в каталоге, где идёт работа, есть свой CLAUDE.md — прочитать его. В 3.4 цикл перед первым шагом задачи делает `store.set_tests(task.id, gates.count_tests(profile, repo))` (если не `None`), после шага — `gates.check(..., tests_before=task.tests)`; `findings` идут fixer'у, `pass` с `flaky_tests` — в отчёт и в задачу для планировщика. 3.5 — коммит кодом. Команда `run` — по контрактам из 3.2. Учесть пробелы из вводной к этапу 3 в плане (handoff после жёсткой остановки, счётчик пауз `timeout`/`guard_error`, `how_to_resume` только после `paused`, абсолютный `LOOP_HOME`).
+
+Из 3.3в: команда `run` отказывает на старте, если `sandbox-exec` нет (не macOS); коммит (3.5) не должен забирать файлы, созданные gate-командами; профили рабочих репозиториев писать с `uv run --no-sync --no-cache`. Открыто к обсуждению: `needs_human` на изменение `docker-compose*.yml` и `[build-system]` (остаток риска `install`/`up`, раздел 10).
 
 Все шаги этапа 3 — коммиты в ветке `implementation-loop`.

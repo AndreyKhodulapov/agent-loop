@@ -6,6 +6,9 @@ the size of one task, add a file with secrets. The work is the changes of tracke
 the checkpoint of the step and the files the step has added. Once the work keeps these
 invariants, the commands of the repository profile check that it installs, is formatted, passes
 the linter and the tests.
+
+The commands read `.env*` of the repository, the agent does not: the values of its secret keys
+are masked in what goes to the fixer, and a value in the diff stops the work for the operator.
 """
 
 from __future__ import annotations
@@ -31,20 +34,9 @@ HOOK_CONFIG = "hook_config"
 DIFF_TOO_BIG = "diff_too_big"
 WEAKENED_TESTS = "weakened_tests"
 FLAKY_TESTS = "flaky_tests"
+SECRET_IN_DIFF = "secret_in_diff"
 
 SECRET_PATTERNS = (".env*", "*.pem", "*.key", "*credentials*")
-# Configs of git hook managers: their hooks run outside the sandbox on the operator's commit.
-HOOK_CONFIGS = (
-    ".pre-commit-config.yaml",
-    ".pre-commit-config.yml",
-    ".husky",
-    "lefthook.yml",
-    "lefthook.yaml",
-    ".lefthook.yml",
-    ".lefthook.yaml",
-    "lefthook-local.yml",
-    "lefthook-local.yaml",
-)
 TEST_DIRS = {"test", "tests", "__tests__"}
 TEST_NAME = re.compile(r"^test_|_test\.|\.(test|spec)\.")
 # pytest, unittest, Go and JavaScript test frameworks.
@@ -53,6 +45,7 @@ SKIP = re.compile(
     r"|t\.Skip\w*|xit|xdescribe|xtest|(it|test|describe)\.skip)\b"
 )
 ASSERT = re.compile(r"\b(assert\w*|expect\(|require\.|t\.(Error|Fatal)\w*)")
+SECRET_KEY = re.compile(r"KEY|TOKEN|SECRET|PASS|PWD|CREDENTIAL|AUTH|DSN|PRIVATE", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -135,6 +128,21 @@ def check(
         logger.warning("weakened tests: %s", "; ".join(findings))
         return Verdict("fixing", WEAKENED_TESTS, tuple(findings), secrets, lines)
     status, reason, findings = _run_commands(repo, profile, list(numstat), tests_before)
+    env_secrets = _env_secrets(repo)
+    if env_secrets:
+        # Taken again: the commands could write what they read into the work.
+        added = git.new_files(repo, step.checkpoint, step.untracked)
+        work = [path for path in added if not _matches(path, patterns)]
+        patch = git.diff(repo, step.checkpoint, work, "-U0")
+        added_lines = [line for line in patch.splitlines() if line.startswith("+")]
+        leaked = sorted(
+            {key for value, key in env_secrets.items() if any(value in x for x in added_lines)}
+        )
+        if leaked:
+            finding = "values from .env* are in the diff: " + ", ".join(leaked)
+            logger.error("a human has to look: %s", finding)
+            return Verdict("needs_human", SECRET_IN_DIFF, (finding,), secrets, lines)
+    findings = tuple(_mask(finding, env_secrets) for finding in findings)
     return Verdict(status, reason, findings, secrets, lines)
 
 
@@ -242,6 +250,30 @@ def _run_commands(
     return "pass", None, ()
 
 
+def _env_secrets(repo: Path) -> dict[str, str]:
+    """Values of the secret keys in the `.env*` files of the repository, ignored ones included,
+    each with its key and file.
+
+    Values shorter than 8 characters are left out: `true` or `admin` would be found everywhere.
+    """
+    listed = git.git(repo, "ls-files", "-z", "--cached", "--others", ":(glob,icase)**/.env*")
+    env_secrets = {}
+    for path in listed.split("\0")[:-1]:
+        for line in (repo / path).read_text(encoding="utf-8", errors="replace").splitlines():
+            key, sep, value = line.removeprefix("export ").partition("=")
+            value = value.strip().strip("\"'")
+            if sep and SECRET_KEY.search(key) and len(value) >= 8:
+                env_secrets[value] = f"{key.strip()} of {path}"
+    return env_secrets
+
+
+def _mask(text: str, env_secrets: dict[str, str]) -> str:
+    # The longest first: a value may contain another one.
+    for value in sorted(env_secrets, key=len, reverse=True):
+        text = text.replace(value, f"<{env_secrets[value]}>")
+    return text
+
+
 def _numstat(output: str) -> dict[str, int]:
     """Lines added and removed by path; a binary file counts as no lines."""
     lines = {}
@@ -294,7 +326,9 @@ def _matches(path: str, patterns: tuple[str, ...]) -> bool:
 
 
 def _is_hook_config(path: str) -> bool:
-    return any(path == name or path.startswith(f"{name}/") for name in HOOK_CONFIGS)
+    # The file system ignores the case, so does the hook manager.
+    path = path.lower()
+    return any(path == name or path.startswith(f"{name}/") for name in protected.HOOK_CONFIGS)
 
 
 def _is_test(path: str) -> bool:

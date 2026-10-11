@@ -2,7 +2,8 @@
 
 The first session uses every flag of the adapter, the second one resumes it, the third one runs
 under the guard hook with a stop request, the way a step is paused. The working directory has
-project settings with hooks that none of the sessions may run.
+project settings with hooks that none of the sessions may run. A gate command checks the
+sandbox of the gate: `sandbox-exec` is deprecated and a macOS update may change it.
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent_loop import agent, guard, recovery
-from agent_loop.config import Settings
+from agent_loop import agent, commands, guard, recovery
+from agent_loop.config import Profile, Settings
 
 MODEL = "haiku"
 DIR = "selfcheck"
@@ -80,6 +81,7 @@ def run(home: Path) -> str:
         problems.append(f"resumed: resumed session lost the context: {result.text}")
 
     problems += _check_guard(workdir)
+    problems += _check_gate_sandbox(workdir)
     if marker.exists():
         problems.append("a hook from the project settings ran: --restricted no longer ignores them")
     if problems:
@@ -125,6 +127,27 @@ def _check_guard(workdir: Path) -> list[str]:
     if result is not None and result.structured_output is None:
         problems.append(f"guard: no structured answer after the stop: {result.text}")
     return problems
+
+
+def _check_gate_sandbox(workdir: Path) -> list[str]:
+    """A sandboxed command has to write in its repository and fail to write next to it."""
+    repo = workdir / "gate"
+    repo.mkdir(exist_ok=True)
+    inside = repo / "inside"
+    outside = workdir / "outside"
+    for path in (inside, outside):
+        path.unlink(missing_ok=True)
+    command = f"touch {shlex.quote(str(inside))} {shlex.quote(str(outside))}"
+    try:
+        commands.run(Profile(commands={"test": command}), "test", repo)
+    except commands.CommandError as exc:
+        if not inside.exists() or "Operation not permitted" not in str(exc):
+            return [f"gate: the sandbox does not work: {exc}"]
+    except OSError as exc:
+        return [f"gate: sandbox-exec cannot run: {exc}"]
+    if outside.exists():
+        return ["gate: a sandboxed command wrote outside its repository"]
+    return []
 
 
 def _check_session(

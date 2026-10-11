@@ -1,9 +1,10 @@
 import json
 import os
+import sys
 
 import pytest
 
-from agent_loop import commands
+from agent_loop import commands, guard
 from agent_loop.config import Profile
 
 
@@ -40,6 +41,82 @@ def test_run_passes_the_profile_env_and_returns_output(tmp_path):
     output = commands.run(profile, "lint", tmp_path)
 
     assert output.splitlines() == ["1", str(tmp_path.resolve())]
+
+
+@pytest.fixture
+def sandboxed(tmp_path, monkeypatch):
+    """A repository with the operator's files and a home directory with keys; returns the
+    repository."""
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "config").write_text("Host *\n")
+    monkeypatch.setenv("HOME", str(home))
+    repo = tmp_path / "repo"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    (repo / "deploy").mkdir()
+    (repo / "deploy" / "server.pem").write_text("key\n")
+    (repo / ".env").write_text("DB_PASSWORD=x\n")
+    return repo
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "touch ../outside",
+        "touch ~/outside",
+        "cat ~/.ssh/config",
+        "cat deploy/server.pem",
+        "mv deploy/server.pem server.txt",
+        "touch .git/hooks/pre-commit",
+        "mkdir -p .CLAUDE && touch .CLAUDE/settings.local.json",
+        "touch .Pre-Commit-Config.yaml",
+        "mkdir .vscode",
+        "mv .env env.txt",
+        f"{sys.executable} -c 'import socket; socket.create_connection((\"192.0.2.1\", 80), 5)'",
+    ],
+)
+def test_sandboxed_command_is_kept_within_the_repository(sandboxed, command):
+    with pytest.raises(commands.CommandError, match="Operation not permitted"):
+        commands.run(Profile(commands={"test": command}), "test", sandboxed)
+
+
+def test_sandboxed_command_writes_the_repository_and_its_own_temporary_directory(
+    sandboxed, monkeypatch
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "1")
+    server = "import socket; s = socket.create_server(('127.0.0.1', 0)); "
+    server += "socket.create_connection(s.getsockname()).close()"
+    profile = Profile(
+        commands={
+            "test": f'cat .env; touch built.txt $TMPDIR/cache; {sys.executable} -c "{server}";'
+            " echo $TMPDIR; env"
+        },
+        env={"POSTGRES_PORT": "5433"},
+    )
+
+    output = commands.run(profile, "test", sandboxed).splitlines()
+
+    assert output[0] == "DB_PASSWORD=x"
+    assert (sandboxed / "built.txt").is_file()
+    assert not os.path.exists(output[1])
+    names = {line.split("=", 1)[0] for line in output[2:]}
+    assert {"HOME", "TMPDIR", "POSTGRES_PORT"} <= names
+    assert "GITHUB_TOKEN" not in names
+
+
+def test_install_runs_outside_the_sandbox_with_the_whole_environment(sandboxed, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "1")
+    profile = Profile(commands={"install": "touch ~/installed; echo $GITHUB_TOKEN"})
+
+    assert commands.run(profile, "install", sandboxed) == "1\n"
+    assert (sandboxed.parent / "home" / "installed").is_file()
+
+
+def test_sandbox_keeps_the_home_paths_the_sessions_cannot_read():
+    deny = json.loads(guard.BASE_SETTINGS.read_text())["permissions"]["deny"]
+    home = {r[len("Read(~/") : -1].removesuffix("/**") for r in deny if r.startswith("Read(~/")}
+
+    assert home <= set(commands.HOME_SECRETS)
 
 
 def test_failed_command_reports_the_tail_of_its_output(tmp_path):

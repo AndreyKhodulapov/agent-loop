@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, read_calls
 
-from agent_loop import agent, budget, guard, recovery, selfcheck
+from agent_loop import agent, budget, commands, guard, recovery, selfcheck
 
 WORDS = {"project_word": "Maple.", "appended_word": "copper", "second_word": "willow"}
 FIRST = [INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "structured_output": WORDS}]
@@ -55,6 +55,7 @@ def test_selfcheck_lists_every_problem(tmp_path, fake_claude, monkeypatch):
         hooked=[INIT, ASSISTANT, RATE_LIMIT, RESULT],
     )
     monkeypatch.setattr(recovery, "session_groups", lambda session_id: set())
+    monkeypatch.setattr(commands, "SANDBOXED", ())
     home = tmp_path / "home"
 
     with pytest.raises(agent.AgentError) as exc:
@@ -69,6 +70,7 @@ def test_selfcheck_lists_every_problem(tmp_path, fake_claude, monkeypatch):
     assert f"guard: the agent has not written {guard.HANDOFF}" in message
     assert "guard: no structured answer" in message
     assert "a hook from the project settings ran" in message
+    assert "gate: a sandboxed command wrote outside its repository" in message
     assert not (home / selfcheck.RESULT_FILE).exists()
 
 

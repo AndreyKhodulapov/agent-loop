@@ -31,6 +31,19 @@ PATHS = (
     ".claude/commands",
     ".mcp.json",
 )
+# Configs of git hook managers: their hooks run outside the sandbox on the operator's commit.
+# They are not put back: the gate sends a change of them to the operator.
+HOOK_CONFIGS = (
+    ".pre-commit-config.yaml",
+    ".pre-commit-config.yml",
+    ".husky",
+    "lefthook.yml",
+    "lefthook.yaml",
+    ".lefthook.yml",
+    ".lefthook.yaml",
+    "lefthook-local.yml",
+    "lefthook-local.yaml",
+)
 COPY_DIR = "protected"
 
 

