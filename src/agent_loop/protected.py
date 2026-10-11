@@ -9,11 +9,15 @@ copy taken when the run started and puts the copy back.
 
 Files are compared by content, not by `git diff`: `settings.local.json` and `.mcp.json` are
 usually ignored by git.
+
+The loop does not run in a repository whose settings have hooks: a hook of the operator that
+runs a formatter, tests or `make` would run the files the agent writes outside the sandbox.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -27,11 +31,24 @@ PATHS = (
     ".claude/hooks",
     ".mcp.json",
 )
+SETTINGS_FILES = (".claude/settings.json", ".claude/settings.local.json")
 COPY_DIR = "protected"
 
 
+class ProjectHooksError(Exception):
+    pass
+
+
 def save(repo: Path, run_dir: Path) -> None:
-    """Copy the protected files as they are at the start of the run."""
+    """Copy the protected files as they are at the start of the run; a repository whose settings
+    have hooks raises `ProjectHooksError`."""
+    for name in SETTINGS_FILES:
+        path = repo / name
+        if path.is_file() and json.loads(path.read_text(encoding="utf-8")).get("hooks"):
+            raise ProjectHooksError(
+                f"{path} has hooks: they run outside the sandbox and may run the files the agent"
+                " writes; agent-loop does not run in such a repository"
+            )
     copy = run_dir / COPY_DIR
     # Missing files are missing from the copy, so the directory itself is the record of them.
     copy.mkdir(parents=True)

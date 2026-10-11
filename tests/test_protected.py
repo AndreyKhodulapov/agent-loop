@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -110,6 +111,29 @@ def test_symlink_of_the_operator_is_kept(tmp_path):
     (repo / ".claude" / "settings.json").unlink()
     assert protected.restore(repo, tmp_path / "run") == [".claude/settings.json"]
     assert os.readlink(repo / ".claude" / "settings.json") == str(tmp_path / "shared.json")
+
+
+@pytest.mark.parametrize("name", protected.SETTINGS_FILES)
+def test_repository_with_project_hooks_is_refused(tmp_path, name):
+    hook = {"type": "command", "command": "make fmt"}
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / name).write_text(
+        json.dumps({"hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [hook]}]}})
+    )
+
+    with pytest.raises(protected.ProjectHooksError, match="has hooks"):
+        protected.save(tmp_path, tmp_path / "run")
+
+    assert not (tmp_path / "run").exists()
+
+
+def test_empty_hooks_are_allowed(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text('{"hooks": {}}')
+
+    protected.save(tmp_path, tmp_path / "run")
+
+    assert protected.restore(tmp_path, tmp_path / "run") == []
 
 
 def test_restore_without_a_copy_fails(tmp_path):
