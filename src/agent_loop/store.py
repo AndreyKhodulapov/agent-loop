@@ -1,0 +1,311 @@
+"""Live state of runs on this machine: runs, tasks, steps and status transitions in SQLite.
+
+A status change is checked against the transition table and written together with its
+transition record in one transaction, so a crash or Ctrl+C leaves either the old state or the
+new one. Several loops and `loop status` may open the same file at once: writes take the lock
+before reading the current status, readers are not blocked thanks to WAL.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import secrets
+import sqlite3
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+RUN_TRANSITIONS = {
+    "planning": {"approved"},
+    "approved": {"running"},
+    "running": {"paused", "done"},
+    "paused": {"running"},
+    "done": set(),
+}
+
+# Pause comes from any stage that runs a session or a long command; the orchestrator resumes
+# into the stage of the step that was paused, its kind is in `steps`.
+TASK_TRANSITIONS = {
+    "pending": {"implementing", "dropped"},
+    "implementing": {"gating", "paused", "needs_human", "replan"},
+    "gating": {"committed", "fixing", "implementing", "paused", "needs_human", "replan"},
+    "fixing": {"gating", "paused", "needs_human", "replan"},
+    "committed": {"reviewing", "done"},
+    "reviewing": {"fixing", "done", "paused"},
+    "paused": {"implementing", "gating", "fixing", "reviewing"},
+    "needs_human": {"implementing"},
+    "replan": {"pending", "dropped"},
+    "done": set(),
+    "dropped": set(),
+}
+
+# Applied in order; `PRAGMA user_version` holds how many are applied. Never edit a released one,
+# append a new script instead.
+MIGRATIONS = [
+    """
+    CREATE TABLE runs (
+        id TEXT PRIMARY KEY,
+        repo TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE tasks (
+        id INTEGER PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs (id),
+        seq INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        card TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (run_id, seq)
+    );
+    CREATE TABLE steps (
+        id INTEGER PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES tasks (id),
+        kind TEXT NOT NULL,
+        checkpoint TEXT NOT NULL,
+        session_id TEXT,
+        outcome TEXT,
+        detail TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+    );
+    CREATE INDEX steps_task ON steps (task_id);
+    CREATE TABLE transitions (
+        id INTEGER PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs (id),
+        task_id INTEGER REFERENCES tasks (id),
+        src TEXT NOT NULL,
+        dst TEXT NOT NULL,
+        reason TEXT,
+        at TEXT NOT NULL
+    );
+    CREATE INDEX transitions_run ON transitions (run_id);
+    """,
+]
+
+
+class StoreError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Run:
+    id: str
+    repo: str
+    branch: str
+    status: str
+    reason: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class Task:
+    id: int
+    run_id: str
+    seq: int
+    title: str
+    card: dict
+    status: str
+    reason: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class Step:
+    id: int
+    task_id: int
+    kind: str
+    checkpoint: str
+    session_id: str | None
+    outcome: str | None
+    detail: dict | None
+    started_at: str
+    finished_at: str | None
+
+
+@dataclass(frozen=True)
+class Transition:
+    id: int
+    run_id: str
+    task_id: int | None
+    src: str
+    dst: str
+    reason: str | None
+    at: str
+
+
+class Store:
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # autocommit=True: transactions are opened only by `_transaction`, and executescript
+        # does not commit a migration halfway.
+        self._conn = sqlite3.connect(path, autocommit=True)
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._migrate()
+        except BaseException:
+            self._conn.close()
+            raise
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def create_run(self, repo: Path, branch: str) -> str:
+        run_id = secrets.token_hex(4)
+        now = _now()
+        self._conn.execute(
+            "INSERT INTO runs (id, repo, branch, status, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'planning', ?, ?)",
+            (run_id, str(repo), branch, now, now),
+        )
+        return run_id
+
+    def add_task(self, run_id: str, title: str, card: dict) -> int:
+        now = _now()
+        cursor = self._conn.execute(
+            "INSERT INTO tasks (run_id, seq, title, card, status, created_at, updated_at)"
+            " SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, 'pending', ?, ? FROM tasks"
+            " WHERE run_id = ?",
+            (run_id, title, json.dumps(card, ensure_ascii=False), now, now, run_id),
+        )
+        return cursor.lastrowid
+
+    def move_run(self, run_id: str, dst: str, reason: str | None = None) -> None:
+        """Change the run status; `reason` is kept until the next move and cleared by it."""
+        with self._transaction():
+            row = self._conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise StoreError(f"run {run_id} not found")
+            _check(RUN_TRANSITIONS, f"run {run_id}", row["status"], dst)
+            now = _now()
+            self._conn.execute(
+                "UPDATE runs SET status = ?, reason = ?, updated_at = ? WHERE id = ?",
+                (dst, reason, now, run_id),
+            )
+            self._record(run_id, None, row["status"], dst, reason, now)
+
+    def move_task(self, task_id: int, dst: str, reason: str | None = None) -> None:
+        """Change the task status; `reason` is kept until the next move and cleared by it."""
+        with self._transaction():
+            row = self._conn.execute(
+                "SELECT run_id, status FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise StoreError(f"task {task_id} not found")
+            _check(TASK_TRANSITIONS, f"task {task_id}", row["status"], dst)
+            now = _now()
+            self._conn.execute(
+                "UPDATE tasks SET status = ?, reason = ?, updated_at = ? WHERE id = ?",
+                (dst, reason, now, task_id),
+            )
+            self._record(row["run_id"], task_id, row["status"], dst, reason, now)
+
+    def start_step(self, task_id: int, kind: str, checkpoint: str) -> int:
+        """Record a step before it runs; `checkpoint` is HEAD to roll back to if it never ends."""
+        cursor = self._conn.execute(
+            "INSERT INTO steps (task_id, kind, checkpoint, started_at) VALUES (?, ?, ?, ?)",
+            (task_id, kind, checkpoint, _now()),
+        )
+        return cursor.lastrowid
+
+    def finish_step(
+        self,
+        step_id: int,
+        outcome: str,
+        session_id: str | None = None,
+        detail: dict | None = None,
+    ) -> None:
+        cursor = self._conn.execute(
+            "UPDATE steps SET outcome = ?, session_id = ?, detail = ?, finished_at = ?"
+            " WHERE id = ? AND finished_at IS NULL",
+            (
+                outcome,
+                session_id,
+                None if detail is None else json.dumps(detail, ensure_ascii=False),
+                _now(),
+                step_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise StoreError(f"step {step_id} is already finished or does not exist")
+
+    def run(self, run_id: str) -> Run:
+        row = self._conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise StoreError(f"run {run_id} not found")
+        return Run(**row)
+
+    def tasks(self, run_id: str) -> list[Task]:
+        rows = self._conn.execute(
+            "SELECT * FROM tasks WHERE run_id = ? ORDER BY seq", (run_id,)
+        ).fetchall()
+        return [Task(**{**row, "card": json.loads(row["card"])}) for row in rows]
+
+    def steps(self, task_id: int) -> list[Step]:
+        rows = self._conn.execute(
+            "SELECT * FROM steps WHERE task_id = ? ORDER BY id", (task_id,)
+        ).fetchall()
+        return [
+            Step(**{**row, "detail": None if row["detail"] is None else json.loads(row["detail"])})
+            for row in rows
+        ]
+
+    def transitions(self, run_id: str) -> list[Transition]:
+        rows = self._conn.execute(
+            "SELECT * FROM transitions WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
+        return [Transition(**row) for row in rows]
+
+    @contextlib.contextmanager
+    def _transaction(self) -> Iterator[None]:
+        # IMMEDIATE takes the write lock up front, so a concurrent writer cannot change the
+        # status between our read and our update.
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
+
+    def _record(
+        self, run_id: str, task_id: int | None, src: str, dst: str, reason: str | None, at: str
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO transitions (run_id, task_id, src, dst, reason, at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, task_id, src, dst, reason, at),
+        )
+
+    def _migrate(self) -> None:
+        with self._transaction():
+            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > len(MIGRATIONS):
+                raise StoreError(
+                    f"database schema v{version} is newer than this agent-loop"
+                    f" (v{len(MIGRATIONS)}), update agent-loop"
+                )
+            for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
+                self._conn.executescript(script)
+                self._conn.execute(f"PRAGMA user_version = {number}")
+
+
+def _check(allowed: dict[str, set[str]], what: str, src: str, dst: str) -> None:
+    if dst not in allowed[src]:
+        raise StoreError(f"{what}: {src} -> {dst} is not allowed")
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
