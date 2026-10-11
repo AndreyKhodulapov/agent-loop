@@ -129,6 +129,9 @@
 - Bash в sandbox читает любые файлы, кроме запрещённых правилами `deny`: `cat ~/.ssh/config` прошёл. Правила `Read(~/.ssh/**)` и `Read(~/.docker/config.json)` из `deny` попадают в sandbox так же, как `Read(.env*)` (S7): `Operation not permitted`.
 - Запись в `.git/hooks/*` и `.git/config` закрыта и без наших правил: `Write` отклонён CLI, Bash получает `Operation not permitted` от sandbox. Чтение `.git/config` и `git status` работают.
 
+**Находки этапа 2b (2.1.296, по `--help`, на реальном CLI не проверялось):**
+- Есть флаг `--restricted`: убирает Bash и другие инструменты, исполняющие код, если их не назвать в `--tools`; игнорирует пользовательские, проектные и локальные файлы настроек (`--settings` действует, MCP отключается вместе с `--strict-mcp-config`); запись в настройки, git и конфигурацию инструментов разрешает только человек или обработчик разрешений. Может заменить `--setting-sources project` и сверку хешей; нужен спайк: подхватывается ли CLAUDE.md, работают ли hook'и из `--settings`, sandbox и `--resume`.
+
 **S1b** отложен до первого реального прогона: повтор `rate_limit_event` проверим на логах длинной сессии. Пробный вызов, на который можно опереться, если события не повторяются, уже проверен (S1).
 
 ---
@@ -362,7 +365,8 @@ LOOP_KNOWLEDGE_DIR=~/andrey_personal_projects/MY-KNOWLEDGE-DATABASE/USEFUL_JOB_N
 
 Для цикла:
 - Отдельный `loop-settings.json` (`--setting-sources project --settings loop-settings.json`, пользовательские настройки не подтягиваются — проверено в S4): allow-список команд (`uv`, `pytest`, `ruff`, `flake8`, `make <цели профиля>`, `git status/diff/log/show`), deny на `git commit/push/reset/checkout/rebase`, `rm -rf`, сетевые утилиты; `sandbox` для Bash (запись только в рабочий каталог и `$TMPDIR`), сеть из sandbox закрыта; `Read`, `Write`/`Edit` разрешены только в рабочем каталоге; чтение `.env*`, `*.pem`, `*.key` и каталогов с учётными данными в `$HOME` (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.docker/config.json` и т. п.) запрещено и инструментам, и Bash в sandbox; `autoMemoryEnabled: false`.
-- `.git/` рабочего репозитория: запись в hook'и и конфиг закрыта CLI и sandbox (проверено в этапе 2а), `Edit(.git/**)` в deny. Git оркестратора работает вне sandbox, поэтому сам не исполняет код из репозитория: каждый вызов идёт с `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
+- `.git/` рабочего репозитория: запись в hook'и и конфиг закрыта CLI и sandbox (проверено в этапе 2а), `Edit(.git/**)` в deny.
+- Настройки CLI в репозитории (`.claude/settings*.json`, `.claude/rules`, `.claude/hooks`, `.mcp.json`) принадлежат человеку: `Edit` на них в deny, MCP только из `--mcp-config` (`--strict-mcp-config`), перед каждой сессией оркестратор сверяет их с копией со старта прогона и откатывает (этап 2b). Не закрыто: проектный hook, который запускает файлы репозитория вне `.claude/hooks` (форматтер, `pytest`, `make`), исполнит код агента вне sandbox. Git оркестратора работает вне sandbox, поэтому сам не исполняет код из репозитория: каждый вызов идёт с `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
 - Чистое окружение: `claude` запускается с `env`, где оставлены только `PATH`, `HOME`, `USER`, `LANG`, `TMPDIR` и переменные из профиля репозитория. Без `USER` OAuth-токен не находится в keychain («Not logged in»). Токены и ключи из shell не наследуются.
 - Инварианты из раздела 7 ловят то, что пропустили настройки.
 
@@ -472,11 +476,11 @@ S1–S6 в разделе 2. S1b проверяется на первом реа
 5. Git оркестратора не исполняет hook'и и `fsmonitor` из `.git` репозитория; `Edit(.git/**)` в deny.
 6. Мелочи: `how_to_resume` учитывает контекст выше мягкой границы; WIP в `reap` от `checkpoint` шага; `Read(./**)` вместо `Read`; `session_groups` требует `claude` в команде.
 
-### Этап 2b. Настройки проекта не принадлежат агенту
+### Этап 2b. Настройки проекта не принадлежат агенту — сделано 2026-10-11
 Находка ревью 2026-10-11 (по документации Claude Code, на реальном CLI не воспроизводилось). С `--setting-sources project` CLI подгружает из рабочего репозитория `.claude/settings.json`, `.claude/settings.local.json` и `.mcp.json`: hook'и из всех источников сливаются с нашим `--settings` и выполняются вне sandbox, серверы проектного `.mcp.json` в `-p` подключаются без подтверждения, списки `permissions` и `additionalDirectories` сливаются. Агент может записать эти файлы (`Edit(./**)`, Bash в sandbox пишет в рабочий каталог), и в следующей сессии (`--resume`, fixer, следующая задача) его команда выполнится вне sandbox, с сетью и `$HOME`. Та же дыра, что закрыта для `.git/hooks` в 2а. Один шаг, одна ветка.
 1. Адаптер: `--strict-mcp-config` (действуют только серверы из `--mcp-config`, то есть никакие).
 2. `loop-settings.json`: `Edit(.claude/**)` и `Edit(.mcp.json)` в deny, первая линия.
-3. Проверка кодом, потому что Bash в sandbox deny на `Edit` не остановит: перед каждой сессией сверять хеши `.claude/settings.json`, `.claude/settings.local.json`, `.claude/rules/**`, `.mcp.json` с состоянием на чекпоинте (по хешам файлов, а не по `git diff`: `settings.local.json` и `.mcp.json` обычно в gitignore). Расхождение - откат файла, инцидент в лог, `needs_human`. `disableAllHooks` не подходит: отключит и guard. Та же проверка входит в gates (3.1).
+3. Проверка кодом, потому что Bash в sandbox deny на `Edit` не остановит: перед каждой сессией сверять хеши `.claude/settings.json`, `.claude/settings.local.json`, `.claude/rules/**`, `.claude/hooks/**` (обычное место скриптов проектных hook'ов), `.mcp.json` с копией, снятой при старте прогона (по хешам файлов, а не по `git diff`: `settings.local.json` и `.mcp.json` обычно в gitignore). Копия — от старта прогона, а не от чекпоинта шага: правка агента в прерванной сессии стала бы эталоном для `--resume`. Расхождение - откат файла, инцидент в лог, `needs_human`. `disableAllHooks` не подходит: отключит и guard. Та же проверка входит в gates (3.1).
 4. Тест на подделке `claude`: сессия с hook'ом в `.claude/settings.json` репозитория не стартует. Правки `CLAUDE.md` и `.claude/rules` - инъекция в промпт следующих сессий; они попадают в дифф и ревью, отдельной защиты не нужно.
 
 ### Этап 3. Цикл реализации

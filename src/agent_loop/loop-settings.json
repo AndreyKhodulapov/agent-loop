@@ -25,6 +25,8 @@
       "Read(~/.pypirc)",
       "Read(~/.npmrc)",
       "Edit(.git/**)",
+      "Edit(.claude/**)",
+      "Edit(.mcp.json)",
       "Bash(git commit *)",
       "Bash(git push *)",
       "Bash(git reset *)",

@@ -105,6 +105,9 @@ def command(session: Session, system_file: Path | None = None) -> list[str]:
         str(session.settings),
         "--permission-prompts",
         "none",
+        # Only servers from --mcp-config, that is none: the `.mcp.json` of the repository is
+        # the agent's to write, and its servers would run outside the sandbox.
+        "--strict-mcp-config",
         "--model",
         session.model,
     ]

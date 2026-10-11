@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import pytest
 from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, USER, read_calls
 
-from agent_loop import agent, budget, guard, log, step
+from agent_loop import agent, budget, guard, log, protected, step
 from agent_loop.agent import Limits, Window
 from agent_loop.config import Config, Settings
 from agent_loop.store import Step, Store
@@ -56,6 +56,7 @@ def env(tmp_path):
     run_id = db.create_run(workdir, "feature/x")
     task_id = db.add_task(run_id, "Add x", {"goal": "x"})
     cfg = Config(home, workdir, None, SETTINGS, {})
+    protected.save(workdir, step.run_dir(home, run_id))
     settings_file = guard.prepare(step.run_dir(home, run_id), home, SETTINGS, workdir)
     session = agent.Session(prompt="do x", model="haiku", cwd=workdir, settings=settings_file)
     step_id = db.start_step(task_id, "implement", "abc123", [], session.session_id)
@@ -173,6 +174,25 @@ def test_error_result_fails_the_step(env, fake_claude):
 
     assert (outcome.status, outcome.reason) == ("failed", "model not found")
     assert env.step().outcome == "failed"
+
+
+def test_session_with_a_project_hook_does_not_start(env, fake_claude):
+    calls_path = fake_claude([INIT, RESULT])
+    project_settings = env.session.cwd / ".claude" / "settings.json"
+    project_settings.parent.mkdir()
+    hook = {"type": "command", "command": "touch /tmp/escaped"}
+    project_settings.write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [hook]}]}})
+    )
+
+    outcome = env.run()
+
+    assert outcome == step.Outcome("failed", step.PROJECT_SETTINGS, None, 0)
+    assert not calls_path.exists()
+    assert not project_settings.exists()
+    recorded = env.step()
+    assert recorded.outcome == "failed"
+    assert recorded.detail["restored"] == [".claude/settings.json"]
 
 
 def test_exit_without_result_fails_the_step_and_raises(env, fake_claude):

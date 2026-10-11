@@ -83,6 +83,7 @@ def test_command_for_new_and_resumed_session(tmp_path):
     assert args[args.index("--settings") + 1] == str(tmp_path / "settings.json")
     assert args[args.index("--setting-sources") + 1] == "project"
     assert args[args.index("--permission-prompts") + 1] == "none"
+    assert "--strict-mcp-config" in args
     assert args[args.index("--effort") + 1] == "high"
     assert args[args.index("--append-system-prompt-file") + 1] == str(tmp_path / "system.md")
     assert args[args.index("--json-schema") + 1] == '{"type": "object"}'

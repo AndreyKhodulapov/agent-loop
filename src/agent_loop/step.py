@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_loop import agent, budget, guard
+from agent_loop import agent, budget, guard, protected
 from agent_loop.config import Config
 from agent_loop.store import Step, Store
 
@@ -33,6 +33,8 @@ IDLE_MARGIN = 2 * 60
 CTX_LOG_STEP = 10_000
 # A task that fills the context this many times does not fit one session.
 CONTEXT_PAUSES_TO_REPLAN = 2
+# The step did not start: the CLI settings of the project changed, a human has to look.
+PROJECT_SETTINGS = "project_settings"
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,7 @@ class Outcome:
     # completed, paused or failed
     status: str
     # Why the step paused (context, budget, interrupt, timeout, idle, guard_error) or what
-    # failed.
+    # failed (project_settings or the error of the CLI).
     reason: str | None
     # None when the session was terminated before its result.
     result: agent.Result | None
@@ -89,11 +91,22 @@ def run_dir(home: Path, run_id: str) -> Path:
 def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id: int) -> Outcome:
     """Run the session of a step and record how it ended in the store.
 
-    The caller starts the step in the store with the session id, gets the run directory ready
-    with `guard.prepare` and passes the settings file it returns in the session. A CLI that
-    exits without a result fails the step and raises.
+    The caller saves the protected files with `protected.save` when the run starts; before each
+    step it starts the step in the store with the session id, gets the run directory ready with
+    `guard.prepare` and passes the settings file it returns in the session. A CLI that exits
+    without a result fails the step and raises. If the protected files have changed since the
+    run started, they are put back and the step fails with `PROJECT_SETTINGS` without a session.
     """
     directory = run_dir(cfg.home, run_id)
+    restored = protected.restore(session.cwd, directory)
+    if restored:
+        logger.error(
+            "the CLI settings of the project have changed during the run, put back: %s",
+            ", ".join(restored),
+        )
+        outcome = Outcome("failed", PROJECT_SETTINGS, None, 0)
+        store.finish_step(step_id, outcome.status, _detail(outcome) | {"restored": restored})
+        return outcome
     log_path = directory / f"step-{step_id}.jsonl"
     started = time.monotonic()
     deadlines = Deadlines(
