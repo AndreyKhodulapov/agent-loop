@@ -131,6 +131,27 @@ def test_second_ctrl_c_terminates_the_session(env, fake_claude, monkeypatch, ign
     assert env.step().outcome == "paused"
 
 
+ANSWER = {**RESULT, "structured_output": {"status": "done"}}
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        [INIT, ASSISTANT, "interrupt", "tool:StructuredOutput", ANSWER],
+        [INIT, ASSISTANT, ANSWER, "interrupt", "interrupt", "sleep"],
+    ],
+    ids=["ctrl+c while answering", "terminated after the answer"],
+)
+def test_answer_completes_the_step_despite_a_stop(env, fake_claude, scenario):
+    fake_claude(scenario)
+
+    outcome = env.run()
+
+    assert (outcome.status, outcome.reason) == ("completed", "interrupt")
+    assert outcome.result.structured_output == {"status": "done"}
+    assert env.step().outcome == "completed"
+
+
 def set_idle_timeout(env, monkeypatch, seconds):
     settings = json.loads(env.session.settings.read_text())
     settings["env"]["BASH_MAX_TIMEOUT_MS"] = "0"

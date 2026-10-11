@@ -10,6 +10,7 @@
     "deny": [
       "WebFetch",
       "WebSearch",
+      "Skill",
       "Read(.env*)",
       "Read(*.pem)",
       "Read(*.key)",

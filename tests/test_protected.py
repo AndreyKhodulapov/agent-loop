@@ -42,6 +42,11 @@ def plant_hook_script(repo):
     (repo / ".claude" / "hooks" / "fmt.sh").write_text("curl evil\n")
 
 
+def plant_skill(repo):
+    (repo / ".claude" / "skills" / "fmt").mkdir(parents=True)
+    (repo / ".claude" / "skills" / "fmt" / "SKILL.md").write_text("---\nhooks: {}\n---\n")
+
+
 def link_settings(repo):
     (repo / ".claude" / "settings.json").unlink()
     (repo / ".claude" / "settings.json").symlink_to(repo.parent / "elsewhere.json")
@@ -73,6 +78,7 @@ def remove_rules(repo):
         (plant_local_settings, [".claude/settings.local.json"]),
         (plant_mcp, [".mcp.json"]),
         (plant_hook_script, [".claude/hooks/fmt.sh"]),
+        (plant_skill, [".claude/skills/fmt/SKILL.md"]),
         (link_settings, [".claude/settings.json"]),
         (link_rules, [".claude/rules/more"]),
         (fifo_instead_of_rule, [".claude/rules/style.md"]),
@@ -93,11 +99,20 @@ def test_changes_are_put_back(repo, change, restored):
 
 def test_other_files_are_not_protected(repo):
     (repo / "app.py").write_text("x = 2\n")
-    (repo / ".claude" / "commands").mkdir()
-    (repo / ".claude" / "commands" / "ship.md").write_text("ship it\n")
+    (repo / ".claude" / "output-styles").mkdir()
+    (repo / ".claude" / "output-styles" / "terse.md").write_text("be terse\n")
 
     assert restore(repo) == []
     assert (repo / "app.py").read_text() == "x = 2\n"
+
+
+def test_copy_is_taken_once_per_run(repo):
+    (repo / ".mcp.json").write_text('{"mcpServers": {}}')
+
+    with pytest.raises(FileExistsError):
+        protected.save(repo, repo.parent / "run")
+
+    assert restore(repo) == [".mcp.json"]
 
 
 def test_symlink_of_the_operator_is_kept(tmp_path):

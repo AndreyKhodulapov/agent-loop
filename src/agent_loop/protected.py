@@ -24,11 +24,15 @@ import stat
 from pathlib import Path
 
 # `hooks` is where the scripts of project hooks usually live: they run outside the sandbox too.
+# Skills, subagents and commands may declare hooks in their frontmatter.
 PATHS = (
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".claude/rules",
     ".claude/hooks",
+    ".claude/skills",
+    ".claude/agents",
+    ".claude/commands",
     ".mcp.json",
 )
 SETTINGS_FILES = (".claude/settings.json", ".claude/settings.local.json")
@@ -41,7 +45,11 @@ class ProjectHooksError(Exception):
 
 def save(repo: Path, run_dir: Path) -> None:
     """Copy the protected files as they are at the start of the run; a repository whose settings
-    have hooks raises `ProjectHooksError`."""
+    have hooks raises `ProjectHooksError`.
+
+    Called once per run: a second call raises `FileExistsError`. `loop resume` keeps the copy,
+    since one taken later would take in what the agent of an interrupted session has written.
+    """
     for name in SETTINGS_FILES:
         path = repo / name
         if path.is_file() and json.loads(path.read_text(encoding="utf-8")).get("hooks"):
