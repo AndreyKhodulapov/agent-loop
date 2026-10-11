@@ -515,20 +515,51 @@ uv run ruff check . && uv run ruff format --check .
 
 Предлагаемое сообщение коммита 3.4б: `feat(implement): take a task through the implementer, gate and fixer`.
 
+### 3.4в Продолжение остановленной задачи — готово 2026-10-11
+
+Сделано:
+1. `implement.resume(cfg, store, run, task, total, profile, previous)` рядом со `start`; оба возвращают `Stop | None`: `Stop("interrupt")` (Ctrl+C, пока агент отвечал) или `Stop("budget", resume_at)`, задача при этом остаётся в своём статусе. Общий цикл `_loop`: сессия → разбор её конца → gate → fixer. Продолжение идёт от последнего шага задачи:
+   - шагов нет (прогон встал до первой сессии) — исполнитель с обычным промптом;
+   - последний шаг `paused`, а задача ещё не `paused` (прогон встал между шагом и задачей) — сначала `_pause` (WIP и `paused`), дальше как ниже;
+   - приостановленный gate (`died`, `branch_changed` после того, как человек вернул ветку) — gate заново;
+   - приостановленная сессия — `step.how_to_resume`: `session` — `--resume` той же сессии с `prompts.RESUMED`; `handoff` — новая сессия: исполнитель с handoff и WIP-диффом, fixer — с вердиктом последнего gate из `detail`, диффом работы и handoff; `replan` — задача `paused → replan` с причиной `context_pauses` или `stall_pauses`;
+   - завершённый gate при `gating` — вердикт применяется заново (`pass` — ждать коммита), при `fixing` — fixer;
+   - завершённая сессия при `implementing`/`fixing` — её конец разбирается из `detail` шага (`failed` с `{"error": ...}` от `AgentError` → `needs_human(session_failed)`), при `gating` — gate.
+2. Задача переходит в стадию следующего шага (`pending`/`paused` → `implementing`/`fixing`/`gating`) только после проверки бюджета, перед самим шагом: при `budget` задача в `pending` остаётся `pending`, в `paused` — `paused`.
+3. Бюджет перед каждой сессией: `budget.load_limits` + `budget.check`; нет `limits.json` — сессия разрешена. В лог — сводка и время возобновления.
+4. Handoff `.loop/handoff.md`: `.loop/` добавляется в `.git/info/exclude` (`git.exclude`, через `rev-parse --git-path`) при создании `_Task` — handoff не попадает ни в gate, ни в WIP, ни в будущий коммит. Перед каждой сессией файл удаляется (устаревший от прошлой задачи или уже переданный в промпт); для новой сессии после паузы по контексту он сначала читается.
+5. `step.how_to_resume`: `ValueError`, если последний шаг не `paused`; паузы `timeout`/`idle`/`guard_error` считаются на задачу, третья (`STALL_PAUSES_TO_REPLAN = 3`) — `Resume("replan", reason="stall_pauses")`; у `Resume` новое поле `reason`.
+6. `store.TASK_TRANSITIONS`: `paused → replan`.
+7. `gates.secret_files(paths, profile)` — общий отбор файлов-секретов для `check` и для диффа в промпте (теперь и в промпте исполнителя после паузы).
+8. `prompts.fixer(..., handoff=None)` — раздел «Resuming the fix» с handoff остановленного fixer'а (без handoff — обычный промпт fixer'а: работа уже в диффе); `prompts.RESUMED` — промпт `--resume`.
+9. Счётчик эталона тестов при продолжении — из `task.tests`, чекпоинт и неотслеживаемые файлы — из первого шага задачи.
+
+Решения шага (принял агент, можно пересмотреть): порог застреваний 3 (у контекста 2) — `idle` бывает от разового зависания CLI; `guard_error` тоже ведёт в `replan`, как сказано во вводной к этапу, хотя причина обычно не в размере задачи; fixer после паузы по контексту получает handoff — иначе записанный им handoff пропадал бы.
+
+Чего нет:
+- Ветка и HEAD перед продолжением не сверяются: это сделает команда `run` на старте прогона (3.5), иначе — gate после сессии.
+- Рабочее дерево перед продолжением не сверяется с WIP-ref и не восстанавливается из него: считается, что работа осталась в дереве (пауза его не трогает).
+- `resume` для `pending` не считает эталон тестов — для `pending` звать `start`. Открытый шаг (без `outcome`) не разбирается: перед `resume` прогона нужен `reap`.
+- Убыль тестов по `collect` за упавшими `fmt`/`lint` по-прежнему не считается повтором ослабления (из 3.4б).
+
+Тесты: `test_implement` — `--resume` приостановленной сессии (тот же `session_id`, промпт `RESUMED`, переходы); новая сессия после паузы по контексту с handoff, WIP-диффом и сводкой прошлых задач, handoff удалён; fixer после паузы по контексту с находками gate и handoff; приостановленный gate после возврата HEAD; gate после `interrupt`; бюджет кончился после gate → `Stop("budget")`, задача в `fixing`, продолжение даёт fixer; бюджета нет на старте → задача `pending`, шагов нет; неразобранный конец шага (ответ, ошибка CLI, пауза, вердикт gate); три застревания → `replan(stall_pauses)`; устаревший handoff удаляется перед первой сессией; WIP без handoff. `test_step` — застревания и `ValueError`, если последний шаг не приостановлен; `test_git` — `exclude`; `test_prompts` — handoff в промпте fixer'а.
+
+Проверка:
+```
+uv run pytest -q            # 303 теста
+uv run ruff check . && uv run ruff format --check .
+```
+
+Предлагаемое сообщение коммита 3.4в: `feat(implement): resume a stopped task, check the budget before each session`.
+
 ## Дальше
 
-### Шаг 3.4в и после
+### Шаг 3.5 и после
 
-3.4в — продолжение остановленной задачи в `implement` (например, `resume(...)` рядом со `start`), по статусу задачи и её последнему шагу:
-- `paused` — `step.how_to_resume` только при `steps[-1].outcome == "paused"` (проверкой, пробел из вводной к этапу 3); разобрать `kind` шага: `implement`/`fix` — `--resume` сессии (`Session(resume=True, session_id=...)`) или новая сессия с handoff и WIP-диффом (`prompts.implementer(..., handoff, work)`; для `fix` — снова `prompts.fixer` с вердиктом последнего шага gate из `detail`); `gate` — gate заново (`died` или `branch_changed` после того, как человек вернул ветку);
-- `gating` без шага gate после последней сессии — gate; `implementing`/`fixing` с завершённым последним шагом — разобрать сохранённый `detail.answer`; `fixing` после gate — fixer с вердиктом из `detail` шага gate;
-- эталон тестов — из `task.tests`, не заново;
-- handoff `.loop/handoff.md`: прочитать для новой сессии и удалить; не считать работой задачи (в `gates.check` и в WIP); нет handoff — по одному WIP-диффу; устаревший удалять перед первой сессией задачи;
-- счётчик пауз `timeout`/`idle`/`guard_error` на задачу в `how_to_resume`, после исчерпания — `replan` (как `CONTEXT_PAUSES_TO_REPLAN`);
-- бюджет перед каждой сессией (`budget.load_limits` + `budget.check`): нельзя — задача остаётся в статусе, `start`/`resume` возвращают `budget` с `resume_at` для прогона.
+3.5 — коммит кодом с валидацией сообщения; детерминированные проверки стиля. Команда `run` — по контрактам из 3.2: на старте `reap`, сверка ветки и HEAD, отказ без `sandbox-exec`; задачи по очереди через `implement.start` (`pending`) и `implement.resume` (остальные незавершённые); `Stop("budget", resume_at)` — прогон в `paused(budget)` до `resume_at`, `Stop("interrupt")` — прогон в `paused(interrupt)`; `AgentError` из `step.run` и `ConfigError` из `count_tests`/gate — решить, что с ними делать.
 
-3.5 — коммит кодом с валидацией сообщения; детерминированные проверки стиля. Команда `run` — по контрактам из 3.2.
+Коммит (3.5): задача после gate остаётся в `gating`; сообщение — `commit_message` из `detail.answer` последнего шага сессии, файлы-секреты — `secrets` из `detail` последнего шага gate, предупреждение `flaky_tests` — там же. Коммит не должен забирать файлы, созданные gate-командами.
 
-Из 3.3в: команда `run` отказывает на старте, если `sandbox-exec` нет (не macOS); коммит (3.5) не должен забирать файлы, созданные gate-командами; профили рабочих репозиториев писать с `uv run --no-sync --no-cache`. Открыто к обсуждению: `needs_human` на изменение `docker-compose*.yml` и `[build-system]` (остаток риска `install`/`up`, раздел 10).
+Из 3.3в: профили рабочих репозиториев писать с `uv run --no-sync --no-cache`. Открыто к обсуждению: `needs_human` на изменение `docker-compose*.yml` и `[build-system]` (остаток риска `install`/`up`, раздел 10).
 
 Все шаги этапа 3 — коммиты в ветке `implementation-loop`.

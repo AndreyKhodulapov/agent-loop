@@ -1,7 +1,7 @@
 import json
 import logging
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, USER, read_calls
@@ -286,12 +286,25 @@ def ended(outcome, reason, session_id, context_tokens=50_000):
         ),
         (
             [ended("paused", "context", "s-1"), ended("paused", "context", "s-2")],
-            step.Resume("replan"),
+            step.Resume("replan", reason="context_pauses"),
         ),
         ([ended("paused", "interrupt", "s-1", 140_000)], step.Resume("handoff")),
         (
             [ended("paused", "context", "s-1"), ended("paused", "timeout", "s-2", 120_000)],
-            step.Resume("replan"),
+            step.Resume("replan", reason="context_pauses"),
+        ),
+        (
+            [ended("paused", "timeout", "s-1"), ended("paused", "idle", "s-1")],
+            step.Resume("session", "s-1"),
+        ),
+        (
+            [
+                ended("paused", "timeout", "s-1"),
+                ended("paused", "interrupt", "s-1"),
+                ended("paused", "idle", "s-1"),
+                ended("paused", "guard_error", "s-1"),
+            ],
+            step.Resume("replan", reason="stall_pauses"),
         ),
     ],
     ids=[
@@ -302,7 +315,16 @@ def ended(outcome, reason, session_id, context_tokens=50_000):
         "second context pause",
         "interrupt past the soft context limit",
         "timeout past the soft context limit after a context pause",
+        "second stall",
+        "third stall",
     ],
 )
 def test_how_to_resume(steps, expected):
     assert step.how_to_resume(steps, SETTINGS.ctx_soft_tokens) == expected
+
+
+def test_how_to_resume_takes_only_a_paused_step():
+    failed = replace(ended("failed", None, "s-1"), detail={"error": "no result"})
+
+    with pytest.raises(ValueError, match="has not paused, it is failed"):
+        step.how_to_resume([failed], SETTINGS.ctx_soft_tokens)

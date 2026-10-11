@@ -1,10 +1,12 @@
 import subprocess
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass
 
 import pytest
 
-from agent_loop import agent, git, implement, prompts, protected, step
+from agent_loop import agent, budget, git, guard, implement, prompts, protected, step
 from agent_loop.config import Config, Profile, Settings
+from agent_loop.gates import Verdict
 from agent_loop.store import Store
 
 SETTINGS = Settings(fix_attempts=2)
@@ -48,6 +50,18 @@ def commit(repo):
     subprocess.run(["git", "commit", "-q", "-am", "by hand"], cwd=repo, check=True)
 
 
+def both(*actions):
+    def action(repo):
+        for each in actions:
+            each(repo)
+
+    return action
+
+
+def paused(reason, context_tokens=1000):
+    return step.Outcome("paused", reason, None, context_tokens)
+
+
 @dataclass
 class Env:
     cfg: Config
@@ -59,8 +73,11 @@ class Env:
 
     def start(self, profile=PROFILE, previous=""):
         run = self.store.run(self.run_id)
-        [task] = self.store.tasks(self.run_id)
-        return implement.start(self.cfg, self.store, run, task, 1, profile, previous)
+        return implement.start(self.cfg, self.store, run, self.task(), 1, profile, previous)
+
+    def resume(self, previous=""):
+        run = self.store.run(self.run_id)
+        return implement.resume(self.cfg, self.store, run, self.task(), 1, PROFILE, previous)
 
     def task(self):
         [task] = self.store.tasks(self.run_id)
@@ -82,7 +99,9 @@ class Env:
             if action is not None:
                 action(session.cwd)
             self.sessions.append(session)
-            store.finish_step(step_id, outcome.status, {"reason": outcome.reason})
+            answer = outcome.result and outcome.result.structured_output
+            detail = {"reason": outcome.reason, "context_tokens": outcome.context_tokens}
+            store.finish_step(step_id, outcome.status, detail | {"answer": answer})
             return outcome
 
         monkeypatch.setattr(step, "run", run)
@@ -104,6 +123,7 @@ def env(repo, tmp_path):
 
 
 def test_done_work_that_passes_the_gate_waits_for_the_commit(env, monkeypatch):
+    write(guard.HANDOFF, "stale")(env.repo)
     env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered()))
 
     assert env.start(previous="M app.py") is None
@@ -128,6 +148,8 @@ def test_done_work_that_passes_the_gate_waits_for_the_commit(env, monkeypatch):
     assert session.cwd == env.repo
     assert "Make x fixed" in session.prompt
     assert "M app.py" in session.prompt
+    assert not session.resume
+    assert not (env.repo / guard.HANDOFF).exists()
 
 
 def test_fixer_gets_the_findings_and_the_work(env, monkeypatch):
@@ -215,13 +237,23 @@ def test_task_without_done_work_skips_the_gate(env, monkeypatch, outcome, status
 def test_paused_session_keeps_the_work_in_progress(env, monkeypatch):
     env.script(
         monkeypatch,
-        (write("new.py", "y = 1\n"), step.Outcome("paused", "context", None, 130_000)),
+        (
+            both(write("new.py", "y = 1\n"), write(guard.HANDOFF, "new.py is half done")),
+            paused("context", 130_000),
+        ),
     )
 
     assert env.start() is None
 
     assert (env.task().status, env.task().reason) == ("paused", "context")
     ref = git.wip_ref(env.run_id, 1)
+    # The handoff is for the next session, not the work of the task.
+    assert git.git(env.repo, "ls-tree", "-r", "--name-only", ref).split() == [
+        "app.py",
+        "new.py",
+        "old.py",
+        "tests/test_app.py",
+    ]
     assert git.git(env.repo, "show", f"{ref}:new.py") == "y = 1\n"
     assert git.git(env.repo, "rev-parse", f"{ref}^").strip() == env.steps()[0].checkpoint
 
@@ -229,7 +261,7 @@ def test_paused_session_keeps_the_work_in_progress(env, monkeypatch):
 def test_interrupt_while_answering_stops_before_the_gate(env, monkeypatch):
     env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered(reason="interrupt")))
 
-    assert env.start() == "interrupt"
+    assert env.start() == implement.Stop("interrupt")
 
     assert env.task().status == "gating"
     assert [s.kind for s in env.steps()] == ["implement"]
@@ -247,3 +279,191 @@ def test_moved_branch_pauses_the_task_at_the_gate(env, monkeypatch):
     assert (env.task().status, env.task().reason) == ("paused", "branch_changed")
     gate = env.steps()[-1]
     assert (gate.kind, gate.outcome, gate.detail["reason"]) == ("gate", "paused", "branch_changed")
+
+
+def test_paused_session_goes_on_with_its_context(env, monkeypatch):
+    env.script(monkeypatch, (write("new.py", "y = 1\n"), paused("interrupt")))
+    env.start()
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered()))
+
+    assert env.resume() is None
+
+    assert env.task().status == "gating"
+    assert env.moves() == [
+        ("implementing", None),
+        ("paused", "interrupt"),
+        ("implementing", None),
+        ("gating", None),
+    ]
+    assert [s.kind for s in env.steps()] == ["implement", "implement", "gate"]
+    stopped, resumed = env.sessions
+    assert resumed.resume
+    assert resumed.session_id == stopped.session_id == env.steps()[1].session_id
+    assert resumed.prompt == prompts.RESUMED
+    assert resumed.system_files == prompts.system_files("implementer", SETTINGS)
+
+
+def test_session_with_a_full_context_goes_on_from_the_handoff(env, monkeypatch):
+    env.script(
+        monkeypatch,
+        (
+            both(write("new.py", "y = 1\n"), write(guard.HANDOFF, "new.py is half done")),
+            paused("context", 130_000),
+        ),
+    )
+    env.start()
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered()))
+
+    env.resume(previous="M old.py")
+
+    assert env.task().status == "gating"
+    session = env.sessions[-1]
+    assert not session.resume
+    assert "Make x fixed" in session.prompt
+    assert "M old.py" in session.prompt
+    assert "new.py is half done" in session.prompt
+    assert "+y = 1" in session.prompt
+    assert not (env.repo / guard.HANDOFF).exists()
+
+
+def test_fixer_with_a_full_context_goes_on_from_the_findings_and_the_handoff(env, monkeypatch):
+    env.script(
+        monkeypatch,
+        (None, answered()),
+        (write(guard.HANDOFF, "app.py is next"), paused("context", 130_000)),
+    )
+    env.start()
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered()))
+
+    env.resume()
+
+    assert env.task().status == "gating"
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "fix", "fix", "gate"]
+    fixer = env.sessions[-1]
+    assert fixer.system_files == prompts.system_files("fixer", SETTINGS)
+    assert "x is not fixed" in fixer.prompt
+    assert "app.py is next" in fixer.prompt
+
+
+def test_gate_paused_on_a_moved_branch_runs_again(env, monkeypatch):
+    def work_and_commit(repo):
+        write("app.py", "x = 'fixed'\n")(repo)
+        commit(repo)
+
+    env.script(monkeypatch, (work_and_commit, answered()))
+    env.start()
+    # The operator takes the commit back, the work stays in the working tree.
+    subprocess.run(["git", "reset", "-q", "--soft", "HEAD~1"], cwd=env.repo, check=True)
+
+    env.resume()
+
+    assert env.moves()[-2:] == [("paused", "branch_changed"), ("gating", None)]
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "gate"]
+    assert env.steps()[-1].detail["status"] == "pass"
+
+
+def test_task_stopped_after_the_answer_goes_to_the_gate(env, monkeypatch):
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered(reason="interrupt")))
+    env.start()
+
+    assert env.resume() is None
+
+    assert env.task().status == "gating"
+    assert [s.kind for s in env.steps()] == ["implement", "gate"]
+
+
+def test_task_stopped_before_its_fixer_gets_one(env, monkeypatch):
+    limits = budget.LIMITS_FILE
+    resets_at = int(time.time()) + 3600
+
+    def run_out_of_limits(repo):
+        window = agent.Window(0.99, resets_at)
+        budget.save_limits(env.cfg.home / limits, agent.Limits(window, None))
+
+    env.script(monkeypatch, (run_out_of_limits, answered()))
+
+    assert env.start() == implement.Stop("budget", resets_at)
+
+    assert env.task().status == "fixing"
+    assert [s.kind for s in env.steps()] == ["implement", "gate"]
+    (env.cfg.home / limits).unlink()
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered()))
+
+    env.resume()
+
+    assert env.task().status == "gating"
+    assert "x is not fixed" in env.sessions[-1].prompt
+
+
+def test_no_room_in_the_limits_leaves_the_task_as_it_is(env, monkeypatch):
+    resets_at = int(time.time()) + 3600
+    window = agent.Window(0.99, resets_at)
+    budget.save_limits(env.cfg.home / budget.LIMITS_FILE, agent.Limits(window, None))
+    env.script(monkeypatch)
+
+    assert env.start() == implement.Stop("budget", resets_at)
+
+    assert env.task().status == "pending"
+    assert env.steps() == []
+
+
+@pytest.mark.parametrize(
+    ("path", "kind", "outcome", "detail", "moves"),
+    [
+        (
+            ["implementing"],
+            "implement",
+            "completed",
+            {"reason": None, "answer": answered().result.structured_output},
+            [("gating", None)],
+        ),
+        (
+            ["implementing"],
+            "implement",
+            "failed",
+            {"error": "the CLI has exited without a result"},
+            [("needs_human", "session_failed")],
+        ),
+        (
+            ["implementing"],
+            "implement",
+            "paused",
+            {"reason": "budget"},
+            [("paused", "budget"), ("implementing", None), ("gating", None)],
+        ),
+        (
+            ["implementing", "gating"],
+            "gate",
+            "completed",
+            asdict(Verdict("fixing", "test_failed", ("x is not fixed",))),
+            [("fixing", "test_failed"), ("gating", None)],
+        ),
+    ],
+    ids=["answer not taken", "error of the CLI", "pause not taken", "verdict not taken"],
+)
+def test_end_of_a_step_not_taken_is_taken_on_resume(
+    env, monkeypatch, path, kind, outcome, detail, moves
+):
+    for status in path:
+        env.store.move_task(env.task_id, status)
+    step_id = env.store.start_step(env.task_id, kind, git.head(env.repo), [], "s-1")
+    write("app.py", "x = 'fixed'\n")(env.repo)
+    env.store.finish_step(step_id, outcome, detail)
+    env.script(monkeypatch, (None, answered()))
+
+    env.resume()
+
+    assert env.moves()[len(path) :] == moves
+
+
+def test_task_that_keeps_stalling_goes_back_to_the_planner(env, monkeypatch):
+    env.script(monkeypatch, (None, paused("timeout")))
+    env.start()
+    for reason in ("idle", "guard_error"):
+        env.script(monkeypatch, (None, paused(reason)))
+        env.resume()
+
+    assert env.resume() is None
+
+    assert (env.task().status, env.task().reason) == ("replan", "stall_pauses")
+    assert len(env.sessions) == 3

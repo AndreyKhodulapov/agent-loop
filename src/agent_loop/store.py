@@ -32,7 +32,8 @@ RUN_TRANSITIONS = {
 }
 
 # Pause comes from any stage that runs a session or a long command; the orchestrator resumes
-# into the stage of the step that was paused, its kind is in `steps`.
+# into the stage of the step that was paused, its kind is in `steps`, or sends a task that keeps
+# pausing back to the planner.
 TASK_TRANSITIONS = {
     "pending": {"implementing", "dropped"},
     "implementing": {"gating", "paused", "needs_human", "replan"},
@@ -40,7 +41,7 @@ TASK_TRANSITIONS = {
     "fixing": {"gating", "paused", "needs_human", "replan"},
     "committed": {"reviewing", "done"},
     "reviewing": {"fixing", "done", "paused"},
-    "paused": {"implementing", "gating", "fixing", "reviewing"},
+    "paused": {"implementing", "gating", "fixing", "reviewing", "replan"},
     "needs_human": {"implementing"},
     "replan": {"pending", "dropped"},
     "done": set(),

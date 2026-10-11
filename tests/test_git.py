@@ -25,6 +25,19 @@ def test_untracked_lists_new_files_but_not_ignored_ones(repo):
     assert sorted(git.untracked(repo)) == [".gitignore", "pkg/new file.py"]
 
 
+def test_exclude_adds_a_pattern_once(repo):
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text("*.tmp")
+    (repo / ".loop").mkdir()
+    (repo / ".loop" / "handoff.md").write_text("")
+
+    git.exclude(repo, "/.loop/")
+    git.exclude(repo, "/.loop/")
+
+    assert exclude.read_text() == "*.tmp\n/.loop/\n"
+    assert git.untracked(repo) == []
+
+
 def test_save_wip_keeps_the_step_work_and_leaves_the_tree_alone(repo):
     (repo / ".env").write_text("TOKEN=1\n")
     before = git.untracked(repo)

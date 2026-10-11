@@ -6,6 +6,11 @@ through implementing, gating and fixing until its work passes the gate, which le
 gating for the commit, or until it goes to a human, back to the planner or pauses. A paused step
 leaves the work in progress in the WIP ref of the task.
 
+A stopped task goes on from its status and its last step: a paused session is resumed or
+replaced by a new one that starts from the handoff, a step whose end the loop has not taken yet
+is taken. Before each session the loop checks the subscription limits: when they leave no room,
+the task keeps its status and the run waits.
+
 All steps of a task share the checkpoint and the untracked files of its start: until the commit,
 the work of the task is its work against that checkpoint, whichever session has done it.
 """
@@ -13,12 +18,13 @@ the work of the task is its work against that checkpoint, whichever session has 
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
+import time
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-from agent_loop import agent, gates, git, guard, log, prompts, step
+from agent_loop import agent, budget, gates, git, guard, log, prompts, step
 from agent_loop.config import Config, Profile
-from agent_loop.store import Run, Store, Task
+from agent_loop.store import Run, Step, Store, Task
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +32,7 @@ IMPLEMENT = "implement"
 GATE = "gate"
 FIX = "fix"
 INTERRUPT = "interrupt"
+BUDGET = "budget"
 NO_ANSWER = "no_answer"
 SESSION_FAILED = "session_failed"
 FIX_ATTEMPTS = "fix_attempts"
@@ -37,19 +44,58 @@ ANSWERS = {
 }
 
 
+@dataclass(frozen=True)
+class Stop:
+    """Why the run stops before the task is through; the task keeps its status."""
+
+    # interrupt: the operator has stopped the run while a session was answering, the answer is
+    # taken; budget: the subscription limits leave no room for the next session.
+    reason: str
+    # Unix seconds when the limits are expected to leave room, for a budget stop.
+    resume_at: int | None = None
+
+
+@dataclass(frozen=True)
+class _Session:
+    """A session the task is about to run."""
+
+    kind: str
+    prompt: str
+    # The paused session to go on with --resume; None starts a new one.
+    session_id: str | None = None
+
+    @property
+    def role(self) -> str:
+        return "implementer" if self.kind == IMPLEMENT else "fixer"
+
+    @property
+    def stage(self) -> str:
+        return "implementing" if self.kind == IMPLEMENT else "fixing"
+
+
 def start(
     cfg: Config, store: Store, run: Run, task: Task, total: int, profile: Profile, previous: str
-) -> str | None:
+) -> Stop | None:
     """Take a pending `task`, one of `total` tasks of `run`, through the loop.
 
     `profile` is the frozen profile of the run, `previous` is what `prompts.previous_tasks` tells
-    about the tasks before this one. Returns `interrupt` when the operator has stopped the run
-    while a session was answering: the answer is taken, the task keeps the status it has moved
-    to and the run stops before the next step. Otherwise returns None, and the status of the task
-    tells where it is.
+    about the tasks before this one. Returns why the run has to stop before the task is through;
+    otherwise None, and the status of the task tells where it is.
     """
     with log.scope(task=f"{task.seq}/{total}"):
         return _Task(cfg, store, run, task, total, profile).start(previous)
+
+
+def resume(
+    cfg: Config, store: Store, run: Run, task: Task, total: int, profile: Profile, previous: str
+) -> Stop | None:
+    """Go on with a `task` that has stopped before it was through; the rest is as in `start`.
+
+    The task is paused, or it is implementing, gating or fixing after the run stopped between
+    its steps. All its steps are finished: `recovery.reap` finishes the steps of a dead run.
+    """
+    with log.scope(task=f"{task.seq}/{total}"):
+        return _Task(cfg, store, run, task, total, profile).resume(previous)
 
 
 class _Task:
@@ -60,72 +106,159 @@ class _Task:
         self.store = store
         self.run = run
         self.task = task
+        self.status = task.status
         self.total = total
         self.profile = profile
         self.repo = Path(run.repo)
         self.run_dir = step.run_dir(cfg.home, run.id)
-        self.checkpoint = git.head(self.repo)
-        self.untracked = git.untracked(self.repo)
-        self.tests: int | None = None
+        self.handoff = self.repo / guard.HANDOFF
+        # The handoff is for the next session, it is not the work of the task.
+        git.exclude(self.repo, f"/{guard.HANDOFF.parent}/")
+        steps = store.steps(task.id)
+        self.checkpoint = steps[0].checkpoint if steps else git.head(self.repo)
+        self.untracked = steps[0].untracked if steps else git.untracked(self.repo)
+        self.tests = task.tests
 
-    def start(self, previous: str) -> str | None:
+    def start(self, previous: str) -> Stop | None:
         self.tests = gates.count_tests(self.profile, self.repo)
         if self.tests is not None:
             self.store.set_tests(self.task.id, self.tests)
-        self._move("implementing")
-        kind, role = IMPLEMENT, "implementer"
-        prompt = prompts.implementer(self.task, self.total, self.cfg.settings, previous)
+        return self._loop(self._implementer(previous))
+
+    def resume(self, previous: str) -> Stop | None:
+        steps = self.store.steps(self.task.id)
+        if not steps:
+            # The run stopped before the first session of the task.
+            return self._loop(self._implementer(previous))
+        last = steps[-1]
+        if last.outcome == "paused":
+            if self.status != "paused":
+                # The run stopped between pausing the step and pausing the task.
+                self._pause(last.detail["reason"])
+            return self._resume_paused(steps, previous)
+        if last.kind == GATE:
+            verdict = _verdict(last.detail)
+            # Still gating: the verdict has passed, or the run stopped before it moved the task.
+            if self.status == "gating":
+                verdict = self._after_gate(verdict)
+            return None if verdict is None else self._loop(self._fixer(verdict))
+        # After a session the task is gating once its end is taken.
+        if self.status != "gating" and not self._take(last):
+            return None
+        return self._loop(None)
+
+    def _resume_paused(self, steps: list[Step], previous: str) -> Stop | None:
+        last = steps[-1]
+        if last.kind == GATE:
+            return self._loop(None)
+        how = step.how_to_resume(steps, self.cfg.settings.ctx_soft_tokens)
+        if how.mode == "replan":
+            logger.error("the task keeps pausing (%s), it goes back to the planner", how.reason)
+            self._move("replan", how.reason)
+            return None
+        if how.mode == "session":
+            return self._loop(_Session(last.kind, prompts.RESUMED, how.session_id))
+        # A session stopped hard has not written the handoff: the work in progress tells enough.
+        handoff = self.handoff.read_text(encoding="utf-8") if self.handoff.is_file() else None
+        if last.kind == IMPLEMENT:
+            return self._loop(self._implementer(previous, handoff, self._work()))
+        gate = next(s for s in reversed(steps) if s.kind == GATE)
+        return self._loop(self._fixer(_verdict(gate.detail), handoff))
+
+    def _loop(self, upcoming: _Session | None) -> Stop | None:
+        """Run the `upcoming` session, or the gate if it is None, and go on until the task is
+        through with the loop or the run has to stop."""
         while True:
-            outcome = self._session(kind, role, prompt)
-            to_gate = self._take(outcome)
-            if outcome.status == "completed" and outcome.reason == INTERRUPT:
-                logger.warning("stopped by the operator after the answer of the session")
-                return INTERRUPT
-            if not to_gate:
-                return None
-            verdict = self._gate()
+            if upcoming is not None:
+                stop = self._budget()
+                if stop is not None:
+                    return stop
+                self._enter(upcoming.stage)
+                outcome = self._session(upcoming)
+                to_gate = self._take(self.store.steps(self.task.id)[-1])
+                if outcome.status == "completed" and outcome.reason == INTERRUPT:
+                    logger.warning("stopped by the operator after the answer of the session")
+                    return Stop(INTERRUPT)
+                if not to_gate:
+                    return None
+            self._enter("gating")
+            verdict = self._after_gate(self._gate())
             if verdict is None:
                 return None
-            # Files that look like secrets stay out of the prompt as they stay out of the commit.
-            added = git.new_files(self.repo, self.checkpoint, self.untracked)
-            work = git.diff(
-                self.repo, self.checkpoint, [path for path in added if path not in verdict.secrets]
-            )
-            kind, role = FIX, "fixer"
-            prompt = prompts.fixer(self.task, self.total, self.cfg.settings, verdict, work)
+            upcoming = self._fixer(verdict)
 
-    def _session(self, kind: str, role: str, prompt: str) -> step.Outcome:
+    def _implementer(
+        self, previous: str, handoff: str | None = None, work: str | None = None
+    ) -> _Session:
         settings = self.cfg.settings
+        prompt = prompts.implementer(self.task, self.total, settings, previous, handoff, work)
+        return _Session(IMPLEMENT, prompt)
+
+    def _fixer(self, verdict: gates.Verdict, handoff: str | None = None) -> _Session:
+        settings = self.cfg.settings
+        prompt = prompts.fixer(self.task, self.total, settings, verdict, self._work(), handoff)
+        return _Session(FIX, prompt)
+
+    def _work(self) -> str:
+        """The diff of the task against its checkpoint for a prompt. New files that look like
+        secrets stay out of it as they stay out of the commit."""
+        added = git.new_files(self.repo, self.checkpoint, self.untracked)
+        secrets = gates.secret_files(added, self.profile)
+        return git.diff(self.repo, self.checkpoint, [path for path in added if path not in secrets])
+
+    def _budget(self) -> Stop | None:
+        limits = budget.load_limits(self.cfg.home / budget.LIMITS_FILE)
+        if limits is None:
+            return None
+        verdict = budget.check(limits, time.time(), self.cfg.settings)
+        if verdict.allowed:
+            return None
+        resume_at = time.strftime("%Y-%m-%d %H:%M", time.localtime(verdict.resume_at))
+        logger.warning(
+            "no room for a session in the limits (%s) until %s", verdict.summary, resume_at
+        )
+        return Stop(BUDGET, verdict.resume_at)
+
+    def _session(self, upcoming: _Session) -> step.Outcome:
+        settings = self.cfg.settings
+        # The handoff of the previous session is in the prompt or in the resumed context; a stale
+        # one would be taken for the handoff of this session.
+        self.handoff.unlink(missing_ok=True)
         session = agent.Session(
-            prompt=prompt,
+            prompt=upcoming.prompt,
             model=settings.model_implementer,
             cwd=self.repo,
             settings=guard.prepare(self.run_dir, self.cfg.home, settings, self.repo),
             effort=settings.effort_implementer,
-            system_files=prompts.system_files(role, settings),
+            system_files=prompts.system_files(upcoming.role, settings),
             schema=prompts.ANSWER_SCHEMA,
             env=self.profile.env,
         )
+        if upcoming.session_id is not None:
+            session = replace(session, session_id=upcoming.session_id, resume=True)
         step_id = self.store.start_step(
-            self.task.id, kind, self.checkpoint, self.untracked, session.session_id
+            self.task.id, upcoming.kind, self.checkpoint, self.untracked, session.session_id
         )
-        with log.scope(stage=kind):
+        with log.scope(stage=upcoming.kind):
             return step.run(session, self.cfg, self.store, self.run.id, step_id)
 
-    def _take(self, outcome: step.Outcome) -> bool:
-        """Move the task by how the session has ended; True when its work goes to the gate."""
-        if outcome.status == "paused":
-            self._pause(outcome.reason)
+    def _take(self, session_step: Step) -> bool:
+        """Move the task by how its session has ended; True when its work goes to the gate."""
+        # A step failed by an error of the CLI has the error in its detail and no reason.
+        reason = session_step.detail.get("reason")
+        if session_step.outcome == "paused":
+            self._pause(reason)
             return False
-        if outcome.status == "failed":
-            settings_changed = outcome.reason == step.PROJECT_SETTINGS
+        if session_step.outcome == "failed":
+            settings_changed = reason == step.PROJECT_SETTINGS
             self._move("needs_human", step.PROJECT_SETTINGS if settings_changed else SESSION_FAILED)
             return False
-        if outcome.result.structured_output is None:
+        output = session_step.detail.get("answer")
+        if output is None:
             logger.error("the session has ended without an answer")
             self._move("needs_human", NO_ANSWER)
             return False
-        answer = prompts.answer(outcome.result.structured_output)
+        answer = prompts.answer(output)
         if answer.status == "done":
             self._move("gating")
             return True
@@ -134,23 +267,26 @@ class _Task:
         self._move(status, reason)
         return False
 
-    def _gate(self) -> gates.Verdict | None:
-        """Check the work; returns the verdict for the fixer, None when the task is through
-        with the gate one way or another."""
+    def _gate(self) -> gates.Verdict:
+        """Check the work of the task; the verdict is kept in the detail of a gate step."""
         step_id = self.store.start_step(self.task.id, GATE, self.checkpoint, self.untracked)
-        steps = self.store.steps(self.task.id)
         with log.scope(stage=GATE):
             verdict = gates.check(
                 self.repo,
                 self.run_dir,
                 self.run.branch,
-                steps[-1],
+                self.store.steps(self.task.id)[-1],
                 self.profile,
                 self.cfg.settings,
                 self.tests,
             )
         outcome = "paused" if verdict.status == "paused" else "completed"
         self.store.finish_step(step_id, outcome, asdict(verdict))
+        return verdict
+
+    def _after_gate(self, verdict: gates.Verdict) -> gates.Verdict | None:
+        """Move the task by the verdict of its last step, the gate; returns the verdict for the
+        fixer, None when the task is through with the gate one way or another."""
         if verdict.status == "pass":
             return None
         if verdict.status == "paused":
@@ -158,6 +294,7 @@ class _Task:
             return None
         status, reason = verdict.status, verdict.reason
         if status == "fixing":
+            steps = self.store.steps(self.task.id)
             weakened = [
                 s
                 for s in steps[:-1]
@@ -179,5 +316,19 @@ class _Task:
         logger.info("work in progress saved in %s", ref)
         self._move("paused", reason)
 
+    def _enter(self, stage: str) -> None:
+        # A pending or paused task moves into the stage of its next step; otherwise the move to
+        # the stage has come with the end of the previous step.
+        if self.status != stage:
+            self._move(stage)
+
     def _move(self, status: str, reason: str | None = None) -> None:
         self.store.move_task(self.task.id, status, reason)
+        self.status = status
+
+
+def _verdict(detail: dict) -> gates.Verdict:
+    """The verdict a gate step keeps in its detail."""
+    return gates.Verdict(
+        **detail | {"findings": tuple(detail["findings"]), "secrets": tuple(detail["secrets"])}
+    )

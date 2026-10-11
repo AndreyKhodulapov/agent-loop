@@ -84,8 +84,7 @@ def check(
     # Put back before the diff is taken: the restored files are not the work of the step.
     restored = protected.restore(repo, run_dir)
     added = git.new_files(repo, step.checkpoint, step.untracked)
-    patterns = SECRET_PATTERNS + profile.secret_patterns
-    secrets = tuple(path for path in added if _matches(path, patterns))
+    secrets = secret_files(added, profile)
     if secrets:
         logger.warning("left out of the commit, may hold secrets: %s", ", ".join(secrets))
     work = [path for path in added if path not in secrets]
@@ -132,7 +131,8 @@ def check(
     if env_secrets:
         # Taken again: the commands could write what they read into the work.
         added = git.new_files(repo, step.checkpoint, step.untracked)
-        work = [path for path in added if not _matches(path, patterns)]
+        added_secrets = secret_files(added, profile)
+        work = [path for path in added if path not in added_secrets]
         patch = git.diff(repo, step.checkpoint, work, "-U0")
         added_lines = [line for line in patch.splitlines() if line.startswith("+")]
         leaked = sorted(
@@ -144,6 +144,12 @@ def check(
             return Verdict("needs_human", SECRET_IN_DIFF, (finding,), secrets, lines)
     findings = tuple(_mask(finding, env_secrets) for finding in findings)
     return Verdict(status, reason, findings, secrets, lines)
+
+
+def secret_files(paths: list[str], profile: Profile) -> tuple[str, ...]:
+    """The new files of `paths` that look like secrets: they stay out of commits and prompts."""
+    patterns = SECRET_PATTERNS + profile.secret_patterns
+    return tuple(path for path in paths if _matches(path, patterns))
 
 
 def count_tests(profile: Profile, repo: Path) -> int | None:

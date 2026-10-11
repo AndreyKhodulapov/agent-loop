@@ -35,6 +35,11 @@ ANSWER_SCHEMA = {
     "required": ["status", "summary", "commit_message", "notes_for_next"],
     "additionalProperties": False,
 }
+# The prompt of a paused session resumed with --resume: its context holds the task.
+RESUMED = (
+    "agent-loop has resumed this session after a pause. Go on with the task from where you"
+    " stopped and answer as before."
+)
 
 
 @dataclass(frozen=True)
@@ -96,9 +101,20 @@ def implementer(
     return "\n\n".join(sections)
 
 
-def fixer(task: Task, total: int, settings: Settings, verdict: Verdict, work: str) -> str:
+def fixer(
+    task: Task,
+    total: int,
+    settings: Settings,
+    verdict: Verdict,
+    work: str,
+    handoff: str | None = None,
+) -> str:
     """The prompt of the fixer of `task` after the gate has returned `verdict` on `work`, the
-    diff of the task against its checkpoint."""
+    diff of the task against its checkpoint.
+
+    A fix resumed in a new session passes the handoff of the stopped fixer, if it wrote one; its
+    work is already in `work`.
+    """
     sections = _card(task, total) + _rules(settings)
     sections += [
         "## Work of the task against its start",
@@ -106,6 +122,14 @@ def fixer(task: Task, total: int, settings: Settings, verdict: Verdict, work: st
         f"## Findings of the checks: {verdict.reason}",
         *(_fenced(finding) for finding in verdict.findings),
     ]
+    if handoff is not None:
+        sections += [
+            "## Resuming the fix",
+            "A previous fixer session stopped before it finished. Its work is in the working"
+            " tree and in the diff above: continue it.",
+            "### Handoff of the previous session",
+            handoff,
+        ]
     return "\n\n".join(sections)
 
 

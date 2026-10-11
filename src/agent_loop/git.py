@@ -49,6 +49,16 @@ def untracked(repo: Path) -> list[str]:
     return git(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0")[:-1]
 
 
+def exclude(repo: Path, pattern: str) -> None:
+    """Add `pattern` to `info/exclude` of the repository unless it is there already."""
+    path = repo / git(repo, "rev-parse", "--git-path", "info/exclude").strip()
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    if pattern in lines:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(f"{line}\n" for line in [*lines, pattern]), encoding="utf-8")
+
+
 def wip_ref(run_id: str, task_seq: int) -> str:
     return f"{WIP_REFS}/{run_id}/{task_seq}"
 

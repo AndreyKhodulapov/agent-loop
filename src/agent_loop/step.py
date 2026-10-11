@@ -33,6 +33,10 @@ IDLE_MARGIN = 2 * 60
 CTX_LOG_STEP = 10_000
 # A task that fills the context this many times does not fit one session.
 CONTEXT_PAUSES_TO_REPLAN = 2
+# Pauses of a session that has run out of time, hung or lost its guard. Each resume may run into
+# the same wall again, so a task that stalls this many times goes back to the planner.
+STALL_REASONS = ("timeout", "idle", guard.GUARD_ERROR)
+STALL_PAUSES_TO_REPLAN = 3
 # The step did not start: the CLI settings of the project changed, a human has to look.
 PROJECT_SETTINGS = "project_settings"
 
@@ -57,6 +61,8 @@ class Resume:
     # the handoff and the work in progress; replan: the task goes back to the planner.
     mode: str
     session_id: str | None = None
+    # Why the task goes back to the planner: context_pauses or stall_pauses.
+    reason: str | None = None
 
 
 @dataclass
@@ -154,16 +160,21 @@ def how_to_resume(steps: list[Step], ctx_soft_tokens: int) -> Resume:
 
     The paused session keeps its context, so it is resumed, unless the context was full: then a
     new session starts from the handoff, and a task that has filled the context again is too big
-    for one session.
+    for one session. A task that stalls again and again goes back to the planner too.
     """
     last = steps[-1]
+    if last.outcome != "paused":
+        raise ValueError(f"step {last.id} has not paused, it is {last.outcome}")
+    stalls = sum(1 for s in steps if s.outcome == "paused" and s.detail["reason"] in STALL_REASONS)
+    if stalls >= STALL_PAUSES_TO_REPLAN:
+        return Resume("replan", reason="stall_pauses")
     if not _context_full(last, ctx_soft_tokens):
         return Resume("session", last.session_id)
     context_pauses = sum(
         1 for s in steps if s.outcome == "paused" and _context_full(s, ctx_soft_tokens)
     )
     if context_pauses >= CONTEXT_PAUSES_TO_REPLAN:
-        return Resume("replan")
+        return Resume("replan", reason="context_pauses")
     return Resume("handoff")
 
 

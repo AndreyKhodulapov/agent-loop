@@ -134,6 +134,19 @@ def test_fixer_prompt_has_the_work_and_the_findings():
     )
 
 
+def test_resumed_fixer_gets_the_handoff():
+    verdict = Verdict("fixing", "test_failed", ("test: exit 1",))
+
+    prompt = prompts.fixer(TASK, 5, SETTINGS, verdict, "+x = 1\n", "Fixed x, y is left.")
+
+    assert prompt.endswith(
+        "```\ntest: exit 1\n```\n\n"
+        "## Resuming the fix\n\nA previous fixer session stopped before it finished. Its work"
+        " is in the working tree and in the diff above: continue it.\n\n"
+        "### Handoff of the previous session\n\nFixed x, y is left."
+    )
+
+
 def test_previous_tasks_list_files_with_new_public_names(repo):
     base = git.head(repo)
     (repo / "app.py").write_text("x = 1\n\n\ndef run():\n    pass\n\n\ndef _helper():\n    pass\n")
