@@ -164,4 +164,23 @@ uv run ruff check . && uv run ruff format --check .
 uv run loop gc
 ```
 
-Дальше: 2.5 — selfcheck в своём модуле (`agent.selfcheck` → `selfcheck.py`, снимает циклический импорт с `guard`) и третья сессия selfcheck с `guard.prepare`: hook на реальном CLI мягко останавливает сессию по stop-файлу; там же проверить на реальном CLI поиск сессии по `session_id` из 2.4 (см. «Чего нет»). После 2.5 этап 2 закрыт; этап 3 начинается с 3.1 (профиль, gates, lock рабочего каталога).
+### 2.5 `loop selfcheck` в своём модуле, проверка guard на реальном CLI — готово 2026-10-11
+
+Ветка `guard-n-budget`.
+
+Сделано:
+- `src/agent_loop/selfcheck.py` — selfcheck вынесен из `agent` (`agent.selfcheck` → `selfcheck.run`, `SELFCHECK_MODEL` → `selfcheck.MODEL`, `SELFCHECK_FILE` → `selfcheck.RESULT_FILE`). Циклического импорта больше нет: `selfcheck` стоит над `agent`, `guard` и `recovery`.
+- Третья сессия `guard`: `guard.prepare` (настройки цикла, sandbox и hook) и stop-файл `interrupt` до старта; агента просят прочитать файл. Проверяется: hook остановил сессию по stop-файлу (`guard.json`, причина `interrupt`), агент записал `.loop/handoff.md`, ответ по схеме пришёл (`StructuredOutput` пропущен), на `init` сессия находится в `ps` по `session_id` (`recovery.session_groups`, бывшая `_groups`). Файл лимитов для этой сессии — в каталоге selfcheck и не существует: реальный расход не превращает просьбу остановиться в остановку по бюджету.
+- Общие проверки каждой сессии (`init` с нашим id, usage, `rate_limit_event`, нет ошибки) — в `_check_session`, проверки ответа — у каждой сессии свои.
+- Подделка `claude`: сценарий `hooked` для новой сессии с hook в `--settings`, команды `sleep:<секунды>` и `handoff`. Тесты selfcheck — в `tests/test_selfcheck.py`: успешный прогон (hook отклонил `Read` и пропустил `StructuredOutput`), список всех проблем, включая три проблемы guard и ненайденную в `ps` сессию, независимость от реального `limits.json`.
+- На реальном CLI (2.1.296, `haiku`), 20 с: все три сессии зелёные. В потоке `guard`: `Read` отклонён hook'ом, `Write` handoff, `StructuredOutput`, `terminal_reason: completed`, `guard.json` — `interrupt`, мягко, 1 отказ. Этим закрыта проверка из 2.4: сессия реального `claude` находится в `ps` по `session_id` (находка — в плане, раздел 2).
+- Там же вручную проверен `step.run` из 2.3 на реальном CLI (скрипт вне репозитория, отдельный `home`): `completed`, `live.json` с контекстом 21k, `limits.json` и снимок лимитов в БД, `detail` шага заполнен.
+
+Проверка:
+```
+uv run pytest -q            # 154 теста
+uv run ruff check . && uv run ruff format --check .
+uv run loop selfcheck       # ~20 с, реальный claude на haiku, три сессии
+```
+
+Этап 2 закрыт. Дальше — этап 3, шаг 3.1: профиль репозитория (`loop.toml`: `[commands]`, `[timeouts]`, `[env]`, `deps_files`, `secret_patterns`, проверка неизвестных ключей), `gates` (`install` по изменению зависимостей, команды с таймаутами, перезапуск упавших тестов, инварианты ветки/HEAD, числа тестов, размера диффа, секретов), lock рабочего каталога `.git/agent-loop.lock` через `recovery.hold`, `down` профиля в финализаторе и в `reap`. Скорее всего, не влезет в ~1000 строк — разбить при старте (например, профиль + lock + `down` отдельно от gates). Новая ветка от `main` после мержа `guard-n-budget`.

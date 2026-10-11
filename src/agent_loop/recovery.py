@@ -90,7 +90,7 @@ def _pause(store: Store, run: Run) -> None:
 
 def _terminate(session_id: str) -> None:
     """Stop an orphaned session: the CLI runs in its own process group and outlives the loop."""
-    groups = _groups(session_id)
+    groups = session_groups(session_id)
     if not groups:
         return
     logger.warning("terminating the orphaned session %s", session_id)
@@ -98,11 +98,11 @@ def _terminate(session_id: str) -> None:
     deadline = time.monotonic() + ORPHAN_GRACE
     while groups and time.monotonic() < deadline:
         time.sleep(0.1)
-        groups = _groups(session_id)
+        groups = session_groups(session_id)
     _signal(groups, signal.SIGKILL)
 
 
-def _groups(session_id: str) -> set[int]:
+def session_groups(session_id: str) -> set[int]:
     """Process groups of the CLI processes with this session id in their command line."""
     listing = subprocess.run(
         ["ps", "-A", "-o", "pgid=,command="], capture_output=True, text=True, check=True

@@ -7,7 +7,7 @@ import signal
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_loop import agent, config, log, recovery
+from agent_loop import agent, config, log, recovery, selfcheck
 from agent_loop.store import DB_FILE, Store
 
 logger = logging.getLogger(__name__)
@@ -107,12 +107,12 @@ def _show_config(args: argparse.Namespace, cfg: config.Config) -> int:
 def _selfcheck(args: argparse.Namespace, cfg: config.Config) -> int:
     with log.scope(stage="selfcheck"):
         logger.info(
-            "two short sessions on %s, raw streams in %s",
-            agent.SELFCHECK_MODEL,
-            cfg.home / "selfcheck",
+            "three short sessions on %s, raw streams in %s",
+            selfcheck.MODEL,
+            cfg.home / selfcheck.DIR,
         )
         try:
-            version = agent.selfcheck(cfg.home)
+            version = selfcheck.run(cfg.home)
         except agent.AgentError as exc:
             logger.error("failed: %s", exc)
             return 1

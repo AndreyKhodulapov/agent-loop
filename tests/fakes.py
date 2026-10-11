@@ -52,9 +52,11 @@ RESULT = {
     "session_id": "{session_id}",
 }
 
-# Besides events, a scenario may hold commands: "sleep" (30 s), "interrupt" (Ctrl+C to the loop,
-# then wait for its stop file) and "tool:<name>" (ask the PreToolUse hook from --settings about
-# a call; its output goes to hooks.jsonl).
+# A scenario is chosen by the session: "resume" for --resume, "hooked" for a new session whose
+# --settings have hooks (if the scenario has it), "new" otherwise. Besides events, it may hold
+# commands: "sleep" (30 s), "sleep:<seconds>", "interrupt" (Ctrl+C to the loop, then wait for its
+# stop file), "tool:<name>" (ask the PreToolUse hook from --settings about a call; its output goes
+# to hooks.jsonl) and "handoff" (write .loop/handoff.md like an agent asked to stop).
 FAKE_CLAUDE = """#!{python}
 import json, os, signal, subprocess, sys, time
 from pathlib import Path
@@ -81,9 +83,20 @@ with open(here / "calls.jsonl", "a") as calls:
     calls.write(json.dumps(call) + "\\n")
 scenario = json.loads((here / "scenario.json").read_text())
 print(scenario.get("stderr", ""), file=sys.stderr)
-for item in scenario["resume" if flag == "--resume" else "new"]:
+if flag == "--resume":
+    kind = "resume"
+elif "hooked" in scenario and "hooks" in json.loads(settings.read_text()):
+    kind = "hooked"
+else:
+    kind = "new"
+for item in scenario[kind]:
     if item == "sleep":
         time.sleep(30)
+    elif isinstance(item, str) and item.startswith("sleep:"):
+        time.sleep(float(item[len("sleep:"):]))
+    elif item == "handoff":
+        Path(".loop").mkdir(exist_ok=True)
+        Path(".loop/handoff.md").write_text("done: nothing")
     elif item == "interrupt":
         os.kill(os.getppid(), signal.SIGINT)
         stop = settings.parent / "stop"

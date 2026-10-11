@@ -1,13 +1,10 @@
 import json
 import os
-from pathlib import Path
 
 import pytest
 from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, SUBAGENT, USER, read_calls
 
 from agent_loop import agent
-
-WORDS = {"project_word": "Maple.", "appended_word": "copper", "second_word": "willow"}
 
 
 def session(tmp_path, **kwargs):
@@ -153,44 +150,3 @@ def test_leaving_the_block_kills_the_session(tmp_path, fake_claude):
     [call] = read_calls(calls_path)
     with pytest.raises(ProcessLookupError):
         os.kill(call["pid"], 0)
-
-
-def test_selfcheck_passes_and_records_version(tmp_path, fake_claude):
-    calls_path = fake_claude(
-        new=[INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "structured_output": WORDS}],
-        resume=[INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "result": "It is **copper**."}],
-    )
-    home = tmp_path / "home"
-
-    assert agent.selfcheck(home) == "2.1.296"
-
-    assert json.loads((home / agent.SELFCHECK_FILE).read_text())["version"] == "2.1.296"
-    first, resumed = read_calls(calls_path)
-    session_id = first["argv"][first["argv"].index("--session-id") + 1]
-    assert resumed["argv"][-2:] == ["--resume", session_id]
-    assert "maple" in (Path(first["cwd"]) / "CLAUDE.md").read_text()
-    assert "copper" in first["system"] and "willow" in first["system"]
-
-
-def test_selfcheck_lists_every_problem(tmp_path, fake_claude):
-    fake_claude(
-        new=[INIT, ASSISTANT, {**RESULT, "structured_output": {**WORDS, "second_word": "oak"}}],
-        resume=[INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "result": "I do not know."}],
-    )
-    home = tmp_path / "home"
-
-    with pytest.raises(agent.AgentError) as exc:
-        agent.selfcheck(home)
-
-    message = str(exc.value)
-    assert "first: no rate_limit_event" in message
-    assert "first: expected" in message and "'oak'" in message
-    assert "resumed: resumed session lost the context" in message
-    assert not (home / agent.SELFCHECK_FILE).exists()
-
-
-def test_selfcheck_without_claude(tmp_path, monkeypatch):
-    monkeypatch.setenv("PATH", str(tmp_path))
-
-    with pytest.raises(agent.AgentError, match="claude is not found"):
-        agent.selfcheck(tmp_path / "home")

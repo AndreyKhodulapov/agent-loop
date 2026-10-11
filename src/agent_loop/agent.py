@@ -16,7 +16,6 @@ import subprocess
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 
 CLAUDE = "claude"
@@ -240,94 +239,3 @@ def version() -> str:
         raise AgentError(f"{CLAUDE} is not found in PATH") from exc
     # "2.1.296 (Claude Code)"
     return proc.stdout.split()[0]
-
-
-SELFCHECK_MODEL = "haiku"
-SELFCHECK_FILE = "selfcheck.json"
-_WORDS = {"project_word": "maple", "appended_word": "copper", "second_word": "willow"}
-_SELFCHECK_SETTINGS = {"autoMemoryEnabled": False, "permissions": {"defaultMode": "dontAsk"}}
-
-
-def selfcheck(home: Path) -> str:
-    """Run two short sessions that use every flag of the adapter and check the event shapes.
-
-    The first one checks that CLAUDE.md of the working directory and both appended files reach
-    the model, the second one resumes it. On success the CLI version is written to
-    `<home>/selfcheck.json`; returns the version.
-    """
-    cli_version = version()
-    workdir = home / "selfcheck"
-    workdir.mkdir(parents=True, exist_ok=True)
-    (workdir / "CLAUDE.md").write_text(f"The project word is: {_WORDS['project_word']}.\n")
-    appended = workdir / "appended.md"
-    appended.write_text(f"The appended word is: {_WORDS['appended_word']}.\n")
-    second = workdir / "second.md"
-    second.write_text(f"The second word is: {_WORDS['second_word']}.\n")
-    settings = workdir / "settings.json"
-    settings.write_text(json.dumps(_SELFCHECK_SETTINGS))
-
-    first = Session(
-        prompt="Report the project word, the appended word and the second word"
-        " from your instructions.",
-        model=SELFCHECK_MODEL,
-        cwd=workdir,
-        settings=settings,
-        effort="low",
-        system_files=(appended, second),
-        schema={
-            "type": "object",
-            "properties": {name: {"type": "string"} for name in _WORDS},
-            "required": list(_WORDS),
-        },
-        disallowed_tools=("Agent",),
-    )
-    problems = _check_session(first, workdir / "first.jsonl")
-    resumed = Session(
-        prompt="Repeat the appended word.",
-        model=SELFCHECK_MODEL,
-        cwd=workdir,
-        settings=settings,
-        session_id=first.session_id,
-        resume=True,
-    )
-    problems += _check_session(resumed, workdir / "resumed.jsonl")
-    if problems:
-        raise AgentError("; ".join(problems))
-    (home / SELFCHECK_FILE).write_text(
-        json.dumps(
-            {"version": cli_version, "checked_at": datetime.now(UTC).isoformat(timespec="seconds")}
-        )
-    )
-    return cli_version
-
-
-def _check_session(session: Session, log_path: Path) -> list[str]:
-    # Logs are appended to, keep only the last check.
-    log_path.unlink(missing_ok=True)
-    log_path.with_suffix(".stderr").unlink(missing_ok=True)
-    with Process(session, log_path) as process:
-        events = list(process.events())
-    name = log_path.stem
-    problems = []
-    inits = [e for e in events if isinstance(e, Init)]
-    if [e.session_id for e in inits] != [session.session_id]:
-        problems.append(f"{name}: expected one init of session {session.session_id}, got {inits}")
-    if not any(isinstance(e, Usage) and e.context_tokens > 0 for e in events):
-        problems.append(f"{name}: no assistant message with usage")
-    if not any(isinstance(e, Limits) and (e.five_hour or e.seven_day) for e in events):
-        problems.append(f"{name}: no rate_limit_event with windows")
-    result = next(e for e in events if isinstance(e, Result))
-    if result.is_error:
-        problems.append(f"{name}: error result: {result.text}")
-    elif session.schema is not None and _normalized(result.structured_output) != _WORDS:
-        problems.append(f"{name}: expected {_WORDS}, got {result.structured_output}")
-    elif session.schema is None and _WORDS["appended_word"] not in (result.text or "").lower():
-        problems.append(f"{name}: resumed session lost the context: {result.text}")
-    return problems
-
-
-def _normalized(words: dict | None) -> dict | None:
-    # The model may capitalize a word or keep the period after it.
-    if words is None:
-        return None
-    return {k: str(v).strip().rstrip(".").lower() for k, v in words.items()}

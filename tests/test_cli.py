@@ -7,7 +7,7 @@ import time
 import pytest
 from fakes import INIT, RESULT, read_calls
 
-from agent_loop import agent, cli
+from agent_loop import agent, cli, selfcheck
 
 
 @pytest.fixture(autouse=True)
@@ -49,14 +49,14 @@ def test_command_is_required(capsys):
 
 
 def test_selfcheck_reports_result(monkeypatch, capsys):
-    monkeypatch.setattr(agent, "selfcheck", lambda home: "2.1.296")
+    monkeypatch.setattr(selfcheck, "run", lambda home: "2.1.296")
     assert cli.main(["selfcheck"]) == 0
     assert "ok, claude 2.1.296" in capsys.readouterr().err
 
     def broken(home):
         raise agent.AgentError("first: no rate_limit_event with windows")
 
-    monkeypatch.setattr(agent, "selfcheck", broken)
+    monkeypatch.setattr(selfcheck, "run", broken)
     assert cli.main(["selfcheck"]) == 1
     assert "failed: first: no rate_limit_event" in capsys.readouterr().err
 

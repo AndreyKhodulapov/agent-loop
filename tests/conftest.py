@@ -17,10 +17,11 @@ def fake_claude(tmp_path, monkeypatch):
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
-    def configure(new, resume=(), stderr="", exit_code=0):
-        (bin_dir / "scenario.json").write_text(
-            json.dumps({"new": new, "resume": list(resume), "stderr": stderr, "exit": exit_code})
-        )
+    def configure(new, resume=(), hooked=None, stderr="", exit_code=0):
+        scenario = {"new": new, "resume": list(resume), "stderr": stderr, "exit": exit_code}
+        if hooked is not None:
+            scenario["hooked"] = hooked
+        (bin_dir / "scenario.json").write_text(json.dumps(scenario))
         return bin_dir / "calls.jsonl"
 
     return configure
