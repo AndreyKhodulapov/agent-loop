@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 
 import pytest
@@ -23,3 +24,23 @@ def fake_claude(tmp_path, monkeypatch):
         return bin_dir / "calls.jsonl"
 
     return configure
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A git repository with one commit, isolated from the global and system git config."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    path = tmp_path / "repo"
+    path.mkdir()
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.name", "Test"],
+        ["config", "user.email", "test@example.com"],
+    ):
+        subprocess.run(["git", *args], cwd=path, check=True)
+    (path / "app.py").write_text("x = 1\n")
+    (path / "old.py").write_text("y = 2\n")
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=path, check=True)
+    return path

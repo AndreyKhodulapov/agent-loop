@@ -1,4 +1,11 @@
+import os
+import signal
+import subprocess
+import sys
+import time
+
 import pytest
+from fakes import INIT, RESULT, read_calls
 
 from agent_loop import agent, cli
 
@@ -52,3 +59,27 @@ def test_selfcheck_reports_result(monkeypatch, capsys):
     monkeypatch.setattr(agent, "selfcheck", broken)
     assert cli.main(["selfcheck"]) == 1
     assert "failed: first: no rate_limit_event" in capsys.readouterr().err
+
+
+def test_gc_without_dead_runs(capsys):
+    assert cli.main(["gc"]) == 0
+    assert "no dead runs" in capsys.readouterr().err
+
+
+def test_terminated_loop_stops_its_session(isolated, tmp_path, fake_claude):
+    calls_path = fake_claude([INIT, "sleep", RESULT])
+    raw_stream = isolated / "selfcheck" / "first.jsonl"
+    loop = subprocess.Popen(
+        [sys.executable, "-m", "agent_loop", "selfcheck"], cwd=tmp_path, stderr=subprocess.DEVNULL
+    )
+    # The loop has read the first event, so it is inside the session block.
+    deadline = time.monotonic() + 10
+    while not (raw_stream.is_file() and raw_stream.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    loop.send_signal(signal.SIGTERM)
+
+    assert loop.wait(timeout=10) == 128 + signal.SIGTERM
+    [call] = read_calls(calls_path)
+    with pytest.raises(ProcessLookupError):
+        os.kill(call["pid"], 0)

@@ -9,7 +9,7 @@ from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, read_calls
 from agent_loop import agent, budget, guard, log, step
 from agent_loop.agent import Limits, Window
 from agent_loop.config import Config, Settings
-from agent_loop.store import Store
+from agent_loop.store import Step, Store
 
 SETTINGS = Settings()
 CONTEXT = 4 + 5232 + 13060
@@ -55,10 +55,10 @@ def env(tmp_path):
     db = Store(home / "loop.db")
     run_id = db.create_run(workdir, "feature/x")
     task_id = db.add_task(run_id, "Add x", {"goal": "x"})
-    step_id = db.start_step(task_id, "implement", "abc123")
     cfg = Config(home, workdir, None, SETTINGS, {})
     settings_file = guard.prepare(step.run_dir(home, run_id), home, SETTINGS, workdir)
     session = agent.Session(prompt="do x", model="haiku", cwd=workdir, settings=settings_file)
+    step_id = db.start_step(task_id, "implement", "abc123", [], session.session_id)
     yield Env(cfg, db, run_id, step_id, session)
     db.close()
 
@@ -197,3 +197,48 @@ def test_deadlines(last_event, stop_requested, now, due, next_check):
 
     assert deadlines.due(now) == due
     assert deadlines.next_check() == next_check
+
+
+def ended(outcome, reason, session_id):
+    return Step(
+        id=1,
+        task_id=1,
+        kind="implement",
+        checkpoint="abc123",
+        session_id=session_id,
+        outcome=outcome,
+        detail={"reason": reason},
+        started_at="2026-10-11T10:00:00+00:00",
+        finished_at="2026-10-11T10:30:00+00:00",
+        untracked=[],
+    )
+
+
+@pytest.mark.parametrize(
+    ("steps", "expected"),
+    [
+        ([ended("paused", "budget", "s-1")], step.Resume("session", "s-1")),
+        (
+            [ended("paused", "context", "s-1"), ended("paused", "interrupt", "s-2")],
+            step.Resume("session", "s-2"),
+        ),
+        ([ended("paused", "context", "s-1")], step.Resume("handoff")),
+        (
+            [ended("completed", None, "s-1"), ended("paused", "context", "s-2")],
+            step.Resume("handoff"),
+        ),
+        (
+            [ended("paused", "context", "s-1"), ended("paused", "context", "s-2")],
+            step.Resume("replan"),
+        ),
+    ],
+    ids=[
+        "budget",
+        "interrupt after a context pause",
+        "first context pause",
+        "context pause after a completed step",
+        "second context pause",
+    ],
+)
+def test_how_to_resume(steps, expected):
+    assert step.how_to_resume(steps) == expected

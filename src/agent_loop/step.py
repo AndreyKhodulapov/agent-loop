@@ -19,7 +19,7 @@ from pathlib import Path
 
 from agent_loop import agent, budget, guard
 from agent_loop.config import Config
-from agent_loop.store import Store
+from agent_loop.store import Step, Store
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,8 @@ STOP_GRACE = 5 * 60
 IDLE_MARGIN = 2 * 60
 # The context fill is logged each time it crosses another multiple of this.
 CTX_LOG_STEP = 10_000
+# A task that fills the context this many times does not fit one session.
+CONTEXT_PAUSES_TO_REPLAN = 2
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,14 @@ class Outcome:
     # None when the session was terminated before its result.
     result: agent.Result | None
     context_tokens: int
+
+
+@dataclass(frozen=True)
+class Resume:
+    # session: continue the paused session with --resume; handoff: a new session starts from
+    # the handoff and the work in progress; replan: the task goes back to the planner.
+    mode: str
+    session_id: str | None = None
 
 
 @dataclass
@@ -78,8 +88,9 @@ def run_dir(home: Path, run_id: str) -> Path:
 def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id: int) -> Outcome:
     """Run the session of a step and record how it ended in the store.
 
-    The caller gets the run directory ready with `guard.prepare` and passes the settings file
-    it returns in the session. A CLI that exits without a result fails the step and raises.
+    The caller starts the step in the store with the session id, gets the run directory ready
+    with `guard.prepare` and passes the settings file it returns in the session. A CLI that
+    exits without a result fails the step and raises.
     """
     directory = run_dir(cfg.home, run_id)
     log_path = directory / f"step-{step_id}.jsonl"
@@ -111,16 +122,34 @@ def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id:
                 elif isinstance(event, agent.Result):
                     result = event
         except agent.AgentError as exc:
-            store.finish_step(step_id, "failed", session.session_id, {"error": str(exc)})
+            store.finish_step(step_id, "failed", {"error": str(exc)})
             raise
         finally:
             watch.close()
             watcher.join()
             signal.signal(signal.SIGINT, previous_handler)
     outcome = _outcome(result, guard.outcome(directory), watch.killed, context_tokens)
-    store.finish_step(step_id, outcome.status, session.session_id, _detail(outcome))
+    store.finish_step(step_id, outcome.status, _detail(outcome))
     _log_end(outcome)
     return outcome
+
+
+def how_to_resume(steps: list[Step]) -> Resume:
+    """How to go on with a task whose last step paused; `steps` are all steps of the task.
+
+    The paused session keeps its context, so it is resumed, unless the context itself was the
+    reason: then a new session starts from the handoff, and a task that has filled the context
+    again is too big for one session.
+    """
+    last = steps[-1]
+    if last.detail["reason"] != "context":
+        return Resume("session", last.session_id)
+    context_pauses = sum(
+        1 for s in steps if s.outcome == "paused" and s.detail["reason"] == "context"
+    )
+    if context_pauses >= CONTEXT_PAUSES_TO_REPLAN:
+        return Resume("replan")
+    return Resume("handoff")
 
 
 class _Watch:
