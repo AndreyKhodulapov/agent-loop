@@ -45,6 +45,9 @@ SKIP = re.compile(
     r"|t\.Skip\w*|xit|xdescribe|xtest|(it|test|describe)\.skip)\b"
 )
 ASSERT = re.compile(r"\b(assert\w*|expect\(|require\.|t\.(Error|Fatal)\w*)")
+# `type(module): gist`, printable ASCII: English, one line.
+COMMIT_MESSAGE = re.compile(r"[a-z]+\([\w./-]+\): [ -~]+", re.ASCII)
+ATTRIBUTION = re.compile(r"co-authored-by|claude|anthropic|generated with", re.IGNORECASE)
 SECRET_KEY = re.compile(r"KEY|TOKEN|SECRET|PASS|PWD|CREDENTIAL|AUTH|DSN|PRIVATE", re.IGNORECASE)
 
 
@@ -60,6 +63,8 @@ class Verdict:
     secrets: tuple[str, ...] = ()
     # Lines added and removed against the checkpoint, secrets left out.
     lines: int = 0
+    # New files the commands have left, reports and caches the ignore rules miss: not the work.
+    artifacts: tuple[str, ...] = ()
 
 
 def check(
@@ -127,12 +132,15 @@ def check(
         logger.warning("weakened tests: %s", "; ".join(findings))
         return Verdict("fixing", WEAKENED_TESTS, tuple(findings), secrets, lines)
     status, reason, findings = _run_commands(repo, profile, list(numstat), tests_before)
+    after = git.new_files(repo, step.checkpoint, step.untracked)
+    artifacts = tuple(path for path in after if path not in added)
+    if artifacts:
+        logger.info("left by the commands, not the work: %s", ", ".join(artifacts))
     env_secrets = _env_secrets(repo)
     if env_secrets:
-        # Taken again: the commands could write what they read into the work.
-        added = git.new_files(repo, step.checkpoint, step.untracked)
-        added_secrets = secret_files(added, profile)
-        work = [path for path in added if path not in added_secrets]
+        # Taken again, the artifacts too: the commands could write what they read into the work.
+        after_secrets = secret_files(after, profile)
+        work = [path for path in after if path not in after_secrets]
         patch = git.diff(repo, step.checkpoint, work, "-U0")
         added_lines = [line for line in patch.splitlines() if line.startswith("+")]
         leaked = sorted(
@@ -141,9 +149,23 @@ def check(
         if leaked:
             finding = "values from .env* are in the diff: " + ", ".join(leaked)
             logger.error("a human has to look: %s", finding)
-            return Verdict("needs_human", SECRET_IN_DIFF, (finding,), secrets, lines)
+            return Verdict("needs_human", SECRET_IN_DIFF, (finding,), secrets, lines, artifacts)
     findings = tuple(_mask(finding, env_secrets) for finding in findings)
-    return Verdict(status, reason, findings, secrets, lines)
+    return Verdict(status, reason, findings, secrets, lines, artifacts)
+
+
+def commit_message(proposed: str, title: str) -> str:
+    """The message to commit the task with: the one its session has proposed if it keeps the rules
+    of `session.md`, otherwise one made of the task title."""
+    if (
+        len(proposed) <= 72
+        and COMMIT_MESSAGE.fullmatch(proposed)
+        and not ATTRIBUTION.search(proposed)
+    ):
+        return proposed
+    message = f"feat: {title}"[:72]
+    logger.warning("the proposed commit message %r breaks the rules, using %r", proposed, message)
+    return message
 
 
 def secret_files(paths: list[str], profile: Profile) -> tuple[str, ...]:

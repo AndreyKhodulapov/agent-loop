@@ -1,10 +1,11 @@
-"""The loop of one task: the implementer works, the gate checks, the fixer repairs what failed.
+"""The loop of one task: the implementer works, the gate checks, the fixer repairs what failed,
+the loop commits what has passed.
 
-Every session and every gate is a step in the store; a gate keeps its verdict in the detail of
+Every session, gate and commit is a step in the store; a gate keeps its verdict in the detail of
 its step, so the fixer can get the findings without running the commands again. The task moves
-through implementing, gating and fixing until its work passes the gate, which leaves the task in
-gating for the commit, or until it goes to a human, back to the planner or pauses. A paused step
-leaves the work in progress in the WIP ref of the task.
+through implementing, gating and fixing until its work passes the gate and is committed, or until
+it goes to a human, back to the planner or pauses. A paused step leaves the work in progress in
+the WIP ref of the task.
 
 A stopped task goes on from its status and its last step: a paused session is resumed or
 replaced by a new one that starts from the handoff, a step whose end the loop has not taken yet
@@ -12,7 +13,8 @@ is taken. Before each session the loop checks the subscription limits: when they
 the task keeps its status and the run waits.
 
 All steps of a task share the checkpoint and the untracked files of its start: until the commit,
-the work of the task is its work against that checkpoint, whichever session has done it.
+the work of the task is its work against that checkpoint, whichever session has done it. Files
+the gate commands leave join the untracked files, they are not the work either.
 """
 
 from __future__ import annotations
@@ -31,11 +33,13 @@ logger = logging.getLogger(__name__)
 IMPLEMENT = "implement"
 GATE = "gate"
 FIX = "fix"
+COMMIT = "commit"
 INTERRUPT = "interrupt"
 BUDGET = "budget"
 NO_ANSWER = "no_answer"
 SESSION_FAILED = "session_failed"
 FIX_ATTEMPTS = "fix_attempts"
+NO_CHANGES = "no_changes"
 # Status and reason the task moves with on an answer other than done.
 ANSWERS = {
     "too_big": ("replan", "too_big"),
@@ -117,6 +121,9 @@ class _Task:
         steps = store.steps(task.id)
         self.checkpoint = steps[0].checkpoint if steps else git.head(self.repo)
         self.untracked = steps[0].untracked if steps else git.untracked(self.repo)
+        for gate in steps:
+            if gate.kind == GATE and gate.outcome == "completed":
+                self.untracked = [*self.untracked, *gate.detail["artifacts"]]
         self.tests = task.tests
 
     def start(self, previous: str) -> Stop | None:
@@ -136,6 +143,11 @@ class _Task:
                 # The run stopped between pausing the step and pausing the task.
                 self._pause(last.detail["reason"])
             return self._resume_paused(steps, previous)
+        if last.kind == COMMIT:
+            # The run stopped between the commit and the move of the task.
+            if self.status == "gating":
+                self._move("committed")
+            return None
         if last.kind == GATE:
             verdict = _verdict(last.detail)
             # Still gating: the verdict has passed, or the run stopped before it moved the task.
@@ -149,7 +161,8 @@ class _Task:
 
     def _resume_paused(self, steps: list[Step], previous: str) -> Stop | None:
         last = steps[-1]
-        if last.kind == GATE:
+        if last.kind in (GATE, COMMIT):
+            # The branch has moved: the work is checked again before it is committed.
             return self._loop(None)
         how = step.how_to_resume(steps, self.cfg.settings.ctx_soft_tokens)
         if how.mode == "replan":
@@ -200,11 +213,15 @@ class _Task:
         return _Session(FIX, prompt)
 
     def _work(self) -> str:
-        """The diff of the task against its checkpoint for a prompt. New files that look like
-        secrets stay out of it as they stay out of the commit."""
+        """The diff of the task against its checkpoint for a prompt."""
+        return git.diff(self.repo, self.checkpoint, self._new_files())
+
+    def _new_files(self) -> list[str]:
+        """The files the task has added. Those that look like secrets stay out of the prompts as
+        they stay out of the commit."""
         added = git.new_files(self.repo, self.checkpoint, self.untracked)
         secrets = gates.secret_files(added, self.profile)
-        return git.diff(self.repo, self.checkpoint, [path for path in added if path not in secrets])
+        return [path for path in added if path not in secrets]
 
     def _budget(self) -> Stop | None:
         limits = budget.load_limits(self.cfg.home / budget.LIMITS_FILE)
@@ -282,12 +299,14 @@ class _Task:
             )
         outcome = "paused" if verdict.status == "paused" else "completed"
         self.store.finish_step(step_id, outcome, asdict(verdict))
+        self.untracked = [*self.untracked, *verdict.artifacts]
         return verdict
 
     def _after_gate(self, verdict: gates.Verdict) -> gates.Verdict | None:
         """Move the task by the verdict of its last step, the gate; returns the verdict for the
         fixer, None when the task is through with the gate one way or another."""
         if verdict.status == "pass":
+            self._commit()
             return None
         if verdict.status == "paused":
             self._pause(verdict.reason)
@@ -310,6 +329,31 @@ class _Task:
         self._move(status, reason)
         return verdict if status == "fixing" else None
 
+    def _commit(self) -> None:
+        """Commit the work that has passed the gate with the message of the last session."""
+        added = self._new_files()
+        if not git.diff(self.repo, self.checkpoint, added, "--name-only"):
+            logger.error("the session has answered done without changing anything")
+            self._move("needs_human", NO_CHANGES)
+            return
+        step_id = self.store.start_step(self.task.id, COMMIT, self.checkpoint, self.untracked)
+        with log.scope(stage=COMMIT):
+            # The verdict may be from before the run stopped, and the operator may have moved
+            # the branch since.
+            moved = gates.branch_moved(self.repo, self.run.branch, self.checkpoint)
+            if moved is not None:
+                logger.error("%s, pausing", moved)
+                self.store.finish_step(step_id, "paused", {"reason": gates.BRANCH_CHANGED})
+                self._pause(gates.BRANCH_CHANGED)
+                return
+            steps = self.store.steps(self.task.id)
+            answer = next(s for s in reversed(steps) if s.kind in (IMPLEMENT, FIX)).detail["answer"]
+            message = gates.commit_message(answer["commit_message"], self.task.title)
+            commit = git.commit(self.repo, self.checkpoint, added, message)
+            logger.info("committed %s %s", commit[:12], message)
+        self.store.finish_step(step_id, "completed", {"commit": commit, "message": message})
+        self._move("committed")
+
     def _pause(self, reason: str) -> None:
         ref = git.wip_ref(self.run.id, self.task.seq)
         git.save_wip(self.repo, ref, self.untracked, self.checkpoint)
@@ -330,5 +374,10 @@ class _Task:
 def _verdict(detail: dict) -> gates.Verdict:
     """The verdict a gate step keeps in its detail."""
     return gates.Verdict(
-        **detail | {"findings": tuple(detail["findings"]), "secrets": tuple(detail["secrets"])}
+        **detail
+        | {
+            "findings": tuple(detail["findings"]),
+            "secrets": tuple(detail["secrets"]),
+            "artifacts": tuple(detail["artifacts"]),
+        }
     )

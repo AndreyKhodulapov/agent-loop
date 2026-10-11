@@ -92,6 +92,22 @@ def save_wip(repo: Path, ref: str, untracked_before: list[str], base: str) -> st
     return commit
 
 
+def commit(repo: Path, base: str, added: list[str], message: str) -> str:
+    """Commit the work on top of `base`, the HEAD of the current branch: the changes of tracked
+    files and `added`; returns the commit.
+
+    The branch moves only if it is still at `base`. The index is reset to the commit and the
+    working tree is not touched: files left out of the commit stay as they are. The author and
+    the signing are as the git config says.
+    """
+    with _work_index(repo, base, added) as env:
+        tree = git(repo, "write-tree", env=env).strip()
+    commit = git(repo, "commit-tree", tree, "-p", base, "-m", message).strip()
+    git(repo, "update-ref", "-m", f"commit: {message}", "HEAD", commit, base)
+    git(repo, "reset", "--quiet")
+    return commit
+
+
 def diff(repo: Path, base: str, added: list[str], *options: str, paths: Sequence[str] = ()) -> str:
     """`git diff` of the work on top of `base`: the changes of tracked files and `added`.
 

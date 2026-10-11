@@ -79,6 +79,39 @@ def test_save_wip_without_changes_keeps_the_head_tree(repo):
     )
 
 
+def test_commit_takes_the_work_and_leaves_the_rest_in_the_tree(repo):
+    (repo / ".env").write_text("TOKEN=1\n")
+    head = git.head(repo)
+    (repo / "app.py").write_text("x = 2\n")
+    (repo / "old.py").unlink()
+    (repo / "new.py").write_text("z = 3\n")
+    (repo / "secret.pem").write_text("key\n")
+    git.git(repo, "add", "app.py", "secret.pem")
+
+    commit = git.commit(repo, head, ["new.py"], "feat(app): x")
+
+    assert git.head(repo) == commit
+    assert git.branch(repo) == "main"
+    assert git.git(repo, "rev-parse", f"{commit}^").strip() == head
+    assert git.git(repo, "log", "-1", "--format=%s|%an").strip() == "feat(app): x|Test"
+    assert sorted(ls_tree(repo, commit)) == ["app.py", "new.py"]
+    assert show(repo, commit, "app.py") == "x = 2\n"
+    # The index is the commit, so the file left out is untracked again.
+    assert git.git(repo, "status", "--porcelain").splitlines() == ["?? .env", "?? secret.pem"]
+
+
+def test_commit_does_not_move_a_branch_that_has_moved(repo):
+    checkpoint = git.head(repo)
+    git.git(repo, "commit", "-q", "--allow-empty", "-m", "operator's commit")
+    moved = git.head(repo)
+    (repo / "app.py").write_text("x = 2\n")
+
+    with pytest.raises(git.GitError, match="update-ref"):
+        git.commit(repo, checkpoint, [], "feat(app): x")
+
+    assert git.head(repo) == moved
+
+
 def test_git_error_carries_stderr(repo):
     with pytest.raises(git.GitError, match="rev-parse nope"):
         git.git(repo, "rev-parse", "nope")
@@ -120,6 +153,7 @@ def test_git_of_the_loop_runs_no_code_from_the_repository(repo, tmp_path):
     git.save_wip(repo, git.wip_ref("3f2a", 1), [], git.head(repo))
     git.diff(repo, git.head(repo), [".gitattributes"], "--numstat")
     git.diff(repo, git.head(repo), [".gitattributes"], "-U0")
+    git.commit(repo, git.head(repo), [".gitattributes"], "feat(app): x")
 
     assert not marker.exists()
     # The planted code is live for a plain git.

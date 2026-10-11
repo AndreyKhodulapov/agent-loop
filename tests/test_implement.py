@@ -122,22 +122,30 @@ def env(repo, tmp_path):
     db.close()
 
 
-def test_done_work_that_passes_the_gate_waits_for_the_commit(env, monkeypatch):
+def test_done_work_that_passes_the_gate_is_committed(env, monkeypatch):
+    checkpoint = git.head(env.repo)
     write(guard.HANDOFF, "stale")(env.repo)
     env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered()))
 
     assert env.start(previous="M app.py") is None
 
     task = env.task()
-    assert task.status == "gating"
+    assert task.status == "committed"
     assert task.tests == 3
-    assert env.moves() == [("implementing", None), ("gating", None)]
-    implementer, gate = env.steps()
+    assert env.moves() == [("implementing", None), ("gating", None), ("committed", None)]
+    implementer, gate, commit_step = env.steps()
     assert implementer.kind == "implement"
     assert gate.kind == "gate"
     assert gate.outcome == "completed"
     assert gate.detail["status"] == "pass"
-    assert gate.checkpoint == implementer.checkpoint == git.head(env.repo)
+    assert gate.checkpoint == implementer.checkpoint == commit_step.checkpoint == checkpoint
+    head = git.head(env.repo)
+    assert commit_step.kind == "commit"
+    assert commit_step.outcome == "completed"
+    assert commit_step.detail == {"commit": head, "message": "feat(app): x"}
+    assert git.git(env.repo, "rev-parse", "HEAD^").strip() == checkpoint
+    assert git.git(env.repo, "show", "HEAD:app.py") == "x = 'fixed'\n"
+    assert git.git(env.repo, "status", "--porcelain") == ""
     [session] = env.sessions
     assert implementer.session_id == session.session_id
     assert session.model == SETTINGS.model_implementer
@@ -161,26 +169,28 @@ def test_fixer_gets_the_findings_and_the_work(env, monkeypatch):
 
     env.start()
 
-    assert env.task().status == "gating"
+    assert env.task().status == "committed"
     assert env.moves() == [
         ("implementing", None),
         ("gating", None),
         ("fixing", "test_failed"),
         ("gating", None),
+        ("committed", None),
     ]
-    assert [s.kind for s in env.steps()] == ["implement", "gate", "fix", "gate"]
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "fix", "gate", "commit"]
     first_gate = env.steps()[1]
     assert first_gate.detail["status"] == "fixing"
     fixer = env.sessions[1]
     assert fixer.system_files == prompts.system_files("fixer", SETTINGS)
     assert "test_failed" in fixer.prompt
     assert "x is not fixed" in fixer.prompt
-    # The file the implementer has added is in the work the fixer gets.
+    # The file the implementer has added is in the work the fixer gets and in the commit.
     assert "+y = 1" in fixer.prompt
+    assert git.git(env.repo, "show", "HEAD:new.py") == "y = 1\n"
     assert len({s.checkpoint for s in env.steps()}) == 1
 
 
-def test_secrets_stay_out_of_the_work_of_the_fixer(env, monkeypatch):
+def test_secrets_stay_out_of_the_work_of_the_fixer_and_the_commit(env, monkeypatch):
     env.script(
         monkeypatch,
         (write("config/.env.local", "TOKEN=abcdefghijk\n"), answered()),
@@ -190,6 +200,45 @@ def test_secrets_stay_out_of_the_work_of_the_fixer(env, monkeypatch):
     env.start()
 
     assert "abcdefghijk" not in env.sessions[1].prompt
+    assert env.task().status == "committed"
+    assert "config/.env.local" not in git.git(env.repo, "ls-tree", "-r", "--name-only", "HEAD")
+    assert git.untracked(env.repo) == ["config/.env.local"]
+
+
+def test_files_the_gate_commands_leave_are_not_the_work(env, monkeypatch):
+    profile = Profile(commands={"test": "echo junit > report.xml; " + PROFILE.commands["test"]})
+    env.script(
+        monkeypatch,
+        (None, answered()),
+        (write("app.py", "x = 'fixed'\n"), answered()),
+    )
+
+    env.start(profile)
+
+    assert env.task().status == "committed"
+    assert env.steps()[1].detail["artifacts"] == ["report.xml"]
+    assert "report.xml" not in env.sessions[1].prompt
+    assert "report.xml" not in git.git(env.repo, "ls-tree", "-r", "--name-only", "HEAD")
+    assert git.untracked(env.repo) == ["report.xml"]
+
+
+def test_commit_message_that_breaks_the_rules_is_made_of_the_title(env, monkeypatch):
+    message = "feat(app): x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered(commit_message=message)))
+
+    env.start()
+
+    assert git.git(env.repo, "log", "-1", "--format=%B").strip() == "feat: Fix x"
+
+
+def test_done_without_changes_goes_to_a_human(env, monkeypatch):
+    profile = Profile(commands={"collect": PROFILE.commands["collect"]})
+    env.script(monkeypatch, (None, answered()))
+
+    env.start(profile)
+
+    assert (env.task().status, env.task().reason) == ("needs_human", "no_changes")
+    assert [s.kind for s in env.steps()] == ["implement", "gate"]
 
 
 def test_task_goes_back_to_the_planner_when_the_fixes_fail(env, monkeypatch):
@@ -288,14 +337,15 @@ def test_paused_session_goes_on_with_its_context(env, monkeypatch):
 
     assert env.resume() is None
 
-    assert env.task().status == "gating"
+    assert env.task().status == "committed"
     assert env.moves() == [
         ("implementing", None),
         ("paused", "interrupt"),
         ("implementing", None),
         ("gating", None),
+        ("committed", None),
     ]
-    assert [s.kind for s in env.steps()] == ["implement", "implement", "gate"]
+    assert [s.kind for s in env.steps()] == ["implement", "implement", "gate", "commit"]
     stopped, resumed = env.sessions
     assert resumed.resume
     assert resumed.session_id == stopped.session_id == env.steps()[1].session_id
@@ -316,7 +366,7 @@ def test_session_with_a_full_context_goes_on_from_the_handoff(env, monkeypatch):
 
     env.resume(previous="M old.py")
 
-    assert env.task().status == "gating"
+    assert env.task().status == "committed"
     session = env.sessions[-1]
     assert not session.resume
     assert "Make x fixed" in session.prompt
@@ -337,8 +387,8 @@ def test_fixer_with_a_full_context_goes_on_from_the_findings_and_the_handoff(env
 
     env.resume()
 
-    assert env.task().status == "gating"
-    assert [s.kind for s in env.steps()] == ["implement", "gate", "fix", "fix", "gate"]
+    assert env.task().status == "committed"
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "fix", "fix", "gate", "commit"]
     fixer = env.sessions[-1]
     assert fixer.system_files == prompts.system_files("fixer", SETTINGS)
     assert "x is not fixed" in fixer.prompt
@@ -357,9 +407,38 @@ def test_gate_paused_on_a_moved_branch_runs_again(env, monkeypatch):
 
     env.resume()
 
-    assert env.moves()[-2:] == [("paused", "branch_changed"), ("gating", None)]
-    assert [s.kind for s in env.steps()] == ["implement", "gate", "gate"]
-    assert env.steps()[-1].detail["status"] == "pass"
+    assert env.moves()[-3:] == [("paused", "branch_changed"), ("gating", None), ("committed", None)]
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "gate", "commit"]
+    assert env.steps()[-2].detail["status"] == "pass"
+
+
+def test_branch_moved_after_the_gate_pauses_the_commit(env, monkeypatch):
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered(reason="interrupt")))
+    env.start()
+    gate = implement._Task._gate
+
+    def gate_then_operator_commits(task):
+        verdict = gate(task)
+        write("old.py", "y = 3\n")(env.repo)
+        subprocess.run(["git", "commit", "-q", "-m", "by hand", "old.py"], cwd=env.repo, check=True)
+        return verdict
+
+    monkeypatch.setattr(implement._Task, "_gate", gate_then_operator_commits)
+
+    env.resume()
+
+    assert (env.task().status, env.task().reason) == ("paused", "branch_changed")
+    commit_step = env.steps()[-1]
+    assert (commit_step.kind, commit_step.outcome) == ("commit", "paused")
+    assert git.git(env.repo, "log", "-1", "--format=%s").strip() == "by hand"
+    monkeypatch.setattr(implement._Task, "_gate", gate)
+    # The operator takes the commit back, its change stays in the working tree.
+    subprocess.run(["git", "reset", "-q", "--soft", "HEAD~1"], cwd=env.repo, check=True)
+
+    env.resume()
+
+    assert env.task().status == "committed"
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "commit", "gate", "commit"]
 
 
 def test_task_stopped_after_the_answer_goes_to_the_gate(env, monkeypatch):
@@ -368,8 +447,8 @@ def test_task_stopped_after_the_answer_goes_to_the_gate(env, monkeypatch):
 
     assert env.resume() is None
 
-    assert env.task().status == "gating"
-    assert [s.kind for s in env.steps()] == ["implement", "gate"]
+    assert env.task().status == "committed"
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "commit"]
 
 
 def test_task_stopped_before_its_fixer_gets_one(env, monkeypatch):
@@ -391,7 +470,7 @@ def test_task_stopped_before_its_fixer_gets_one(env, monkeypatch):
 
     env.resume()
 
-    assert env.task().status == "gating"
+    assert env.task().status == "committed"
     assert "x is not fixed" in env.sessions[-1].prompt
 
 
@@ -415,7 +494,7 @@ def test_no_room_in_the_limits_leaves_the_task_as_it_is(env, monkeypatch):
             "implement",
             "completed",
             {"reason": None, "answer": answered().result.structured_output},
-            [("gating", None)],
+            [("gating", None), ("committed", None)],
         ),
         (
             ["implementing"],
@@ -429,17 +508,30 @@ def test_no_room_in_the_limits_leaves_the_task_as_it_is(env, monkeypatch):
             "implement",
             "paused",
             {"reason": "budget"},
-            [("paused", "budget"), ("implementing", None), ("gating", None)],
+            [("paused", "budget"), ("implementing", None), ("gating", None), ("committed", None)],
         ),
         (
             ["implementing", "gating"],
             "gate",
             "completed",
             asdict(Verdict("fixing", "test_failed", ("x is not fixed",))),
-            [("fixing", "test_failed"), ("gating", None)],
+            [("fixing", "test_failed"), ("gating", None), ("committed", None)],
+        ),
+        (
+            ["implementing", "gating"],
+            "commit",
+            "completed",
+            {"commit": "c0ffee", "message": "feat(app): x"},
+            [("committed", None)],
         ),
     ],
-    ids=["answer not taken", "error of the CLI", "pause not taken", "verdict not taken"],
+    ids=[
+        "answer not taken",
+        "error of the CLI",
+        "pause not taken",
+        "verdict not taken",
+        "commit not taken",
+    ],
 )
 def test_end_of_a_step_not_taken_is_taken_on_resume(
     env, monkeypatch, path, kind, outcome, detail, moves

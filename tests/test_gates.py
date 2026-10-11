@@ -312,6 +312,16 @@ def test_value_from_env_in_the_diff_needs_a_human(repo, work):
     assert verdict.findings == ("values from .env* are in the diff: DB_PASSWORD of .env",)
 
 
+def test_files_the_commands_leave_are_artifacts(repo, work):
+    (repo / "app.py").write_text("x = 2\n")
+    (repo / "new.py").write_text("y = 1\n")
+    profile = Profile(commands={"test": "mkdir -p out && echo junit > out/report.xml"})
+
+    verdict = check(repo, work, profile)
+
+    assert verdict == gates.Verdict("pass", lines=3, artifacts=("out/report.xml",))
+
+
 def test_commands_do_not_run_when_the_invariants_fail(repo, work, calls):
     profile = Profile(commands={"lint": logged(calls, "lint")})
     edit_test(repo, "def test_add", "@pytest.mark.skip\ndef test_add")
@@ -413,3 +423,24 @@ def test_count_tests_needs_a_number_from_the_collect_command(repo):
     assert gates.count_tests(Profile(commands={"collect": "echo 228 tests"}), repo) == 228
     with pytest.raises(ConfigError, match="no number in the last line"):
         gates.count_tests(Profile(commands={"collect": "echo 5 tests; echo done"}), repo)
+
+
+@pytest.mark.parametrize(
+    ("proposed", "message"),
+    [
+        ("feat(gates): check the commit message", "feat(gates): check the commit message"),
+        ("fix(prompts/session.md): name the rules", "fix(prompts/session.md): name the rules"),
+        ("feat: no module", "feat: Fix x"),
+        ("feat(gates): проверить сообщение", "feat: Fix x"),
+        ("feat(gates): x\n\nCo-Authored-By: someone", "feat: Fix x"),
+        ("feat(gates): x, generated with a tool", "feat: Fix x"),
+        ("feat(agent): talk to Claude", "feat: Fix x"),
+        ("feat(gates): " + "x" * 60, "feat: Fix x"),
+    ],
+)
+def test_commit_message_that_breaks_the_rules_is_made_of_the_title(proposed, message):
+    assert gates.commit_message(proposed, "Fix x") == message
+
+
+def test_commit_message_made_of_a_long_title_is_cut():
+    assert gates.commit_message("", "x" * 100) == "feat: " + "x" * 66
