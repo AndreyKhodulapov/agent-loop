@@ -1,118 +1,10 @@
 import json
 import os
-import sys
-from pathlib import Path
 
 import pytest
+from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, SUBAGENT, USER, read_calls
 
 from agent_loop import agent
-
-# Shapes taken from a real `claude -p --output-format stream-json --verbose` run on 2.1.296.
-INIT = {
-    "type": "system",
-    "subtype": "init",
-    "session_id": "{session_id}",
-    "model": "claude-haiku-5-5",
-    "claude_code_version": "2.1.296",
-    "permissionMode": "dontAsk",
-    "tools": ["Bash", "Read"],
-}
-ASSISTANT = {
-    "type": "assistant",
-    "parent_tool_use_id": None,
-    "session_id": "{session_id}",
-    "message": {
-        "content": [{"type": "text", "text": "pong"}],
-        "usage": {
-            "input_tokens": 4,
-            "cache_creation_input_tokens": 5232,
-            "cache_read_input_tokens": 13060,
-            "output_tokens": 5,
-        },
-    },
-}
-SUBAGENT = {**ASSISTANT, "parent_tool_use_id": "toolu_01"}
-RATE_LIMIT = {
-    "type": "rate_limit_event",
-    "session_id": "{session_id}",
-    "rate_limit_info": {
-        "status": "allowed",
-        "rateLimitType": "five_hour",
-        "unifiedWindows": {
-            "five_hour": {"utilization": 0.03, "resetsAt": 1791734400},
-            "seven_day": {"utilization": 0.64, "resetsAt": 1791813600},
-        },
-    },
-}
-USER = {"type": "user", "session_id": "{session_id}", "message": {"content": []}}
-RESULT = {
-    "type": "result",
-    "subtype": "success",
-    "is_error": False,
-    "terminal_reason": "completed",
-    "result": "pong",
-    "num_turns": 3,
-    "total_cost_usd": 0.0049,
-    "permission_denials": [],
-    "session_id": "{session_id}",
-}
-WORDS = {"project_word": "Maple.", "appended_word": "copper", "second_word": "willow"}
-
-FAKE_CLAUDE = """#!{python}
-import json, os, sys, time
-from pathlib import Path
-
-here = Path(__file__).parent
-argv = sys.argv[1:]
-if argv == ["--version"]:
-    print("2.1.296 (Claude Code)")
-    sys.exit(0)
-flag = "--resume" if "--resume" in argv else "--session-id"
-session_id = argv[argv.index(flag) + 1]
-call = {
-    "argv": argv,
-    "prompt": sys.stdin.read(),
-    "env": dict(os.environ),
-    "cwd": os.getcwd(),
-    "pid": os.getpid(),
-    "pgid": os.getpgid(0),
-}
-if "--append-system-prompt-file" in argv:
-    call["system"] = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text()
-with open(here / "calls.jsonl", "a") as calls:
-    calls.write(json.dumps(call) + "\\n")
-scenario = json.loads((here / "scenario.json").read_text())
-print(scenario.get("stderr", ""), file=sys.stderr)
-for item in scenario["resume" if flag == "--resume" else "new"]:
-    if item == "sleep":
-        time.sleep(30)
-        continue
-    print(json.dumps(item).replace("{session_id}", session_id), flush=True)
-sys.exit(scenario.get("exit", 0))
-"""
-
-
-@pytest.fixture
-def fake_claude(tmp_path, monkeypatch):
-    """Put a fake `claude` first in PATH; returns a function that sets what it prints."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "claude"
-    script.write_text(FAKE_CLAUDE.replace("{python}", sys.executable))
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-
-    def configure(new, resume=(), stderr="", exit_code=0):
-        (bin_dir / "scenario.json").write_text(
-            json.dumps({"new": new, "resume": list(resume), "stderr": stderr, "exit": exit_code})
-        )
-        return bin_dir / "calls.jsonl"
-
-    return configure
-
-
-def read_calls(path):
-    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 def session(tmp_path, **kwargs):
@@ -191,6 +83,7 @@ def test_command_for_new_and_resumed_session(tmp_path):
     assert args[args.index("--settings") + 1] == str(tmp_path / "settings.json")
     assert args[args.index("--setting-sources") + 1] == "project"
     assert args[args.index("--permission-prompts") + 1] == "none"
+    assert "--strict-mcp-config" in args
     assert args[args.index("--effort") + 1] == "high"
     assert args[args.index("--append-system-prompt-file") + 1] == str(tmp_path / "system.md")
     assert args[args.index("--json-schema") + 1] == '{"type": "object"}'
@@ -237,8 +130,14 @@ def test_exit_without_result_reports_stderr(tmp_path, fake_claude):
         list(process.events())
 
 
-def test_stopped_session_ends_without_error(tmp_path, fake_claude):
-    fake_claude([INIT, "sleep", RESULT])
+@pytest.mark.parametrize(
+    "scenario",
+    [[INIT, "sleep", RESULT], ["ignore-term", INIT, "sleep", RESULT]],
+    ids=["exits on SIGTERM", "ignores SIGTERM"],
+)
+def test_stopped_session_ends_without_error(tmp_path, fake_claude, monkeypatch, scenario):
+    fake_claude(scenario)
+    monkeypatch.setattr(agent, "ORPHAN_GRACE", 0.5)
 
     with agent.Process(session(tmp_path), tmp_path / "s.jsonl") as process:
         events = []
@@ -258,44 +157,3 @@ def test_leaving_the_block_kills_the_session(tmp_path, fake_claude):
     [call] = read_calls(calls_path)
     with pytest.raises(ProcessLookupError):
         os.kill(call["pid"], 0)
-
-
-def test_selfcheck_passes_and_records_version(tmp_path, fake_claude):
-    calls_path = fake_claude(
-        new=[INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "structured_output": WORDS}],
-        resume=[INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "result": "It is **copper**."}],
-    )
-    home = tmp_path / "home"
-
-    assert agent.selfcheck(home) == "2.1.296"
-
-    assert json.loads((home / agent.SELFCHECK_FILE).read_text())["version"] == "2.1.296"
-    first, resumed = read_calls(calls_path)
-    session_id = first["argv"][first["argv"].index("--session-id") + 1]
-    assert resumed["argv"][-2:] == ["--resume", session_id]
-    assert "maple" in (Path(first["cwd"]) / "CLAUDE.md").read_text()
-    assert "copper" in first["system"] and "willow" in first["system"]
-
-
-def test_selfcheck_lists_every_problem(tmp_path, fake_claude):
-    fake_claude(
-        new=[INIT, ASSISTANT, {**RESULT, "structured_output": {**WORDS, "second_word": "oak"}}],
-        resume=[INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "result": "I do not know."}],
-    )
-    home = tmp_path / "home"
-
-    with pytest.raises(agent.AgentError) as exc:
-        agent.selfcheck(home)
-
-    message = str(exc.value)
-    assert "first: no rate_limit_event" in message
-    assert "first: expected" in message and "'oak'" in message
-    assert "resumed: resumed session lost the context" in message
-    assert not (home / agent.SELFCHECK_FILE).exists()
-
-
-def test_selfcheck_without_claude(tmp_path, monkeypatch):
-    monkeypatch.setenv("PATH", str(tmp_path))
-
-    with pytest.raises(agent.AgentError, match="claude is not found"):
-        agent.selfcheck(tmp_path / "home")

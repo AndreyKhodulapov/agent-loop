@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
+import signal
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_loop import agent, config, log
+from agent_loop import agent, config, log, recovery, selfcheck
+from agent_loop.store import DB_FILE, Store
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,6 @@ STUBS = {
     "answer": "answer the questions of a run waiting for a human",
     "status": "show runs and their state",
     "stats": "show metrics of finished runs",
-    "gc": "stop leftovers of runs that died without cleanup",
 }
 
 
@@ -35,7 +37,23 @@ def main(argv: list[str] | None = None) -> int:
     except config.ConfigError as exc:
         logger.error("config: %s", exc)
         return 2
+    _exit_on_termination()
+    # Every command that works with runs first pauses the ones that died, so a run is never
+    # left as running without an orchestrator.
+    if args.command in STUBS:
+        _reap(cfg)
     return args.handler(args, cfg)
+
+
+def _exit_on_termination() -> None:
+    # SystemExit unwinds the stack, so `agent.Process` terminates the session on the way out;
+    # the default action would leave the session running in its own process group.
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, _exit)
+
+
+def _exit(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -60,6 +78,9 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "selfcheck", help="check that the installed claude CLI matches the adapter"
     ).set_defaults(handler=_selfcheck)
+    commands.add_parser(
+        "gc", help="pause runs that died without cleanup and stop their sessions"
+    ).set_defaults(handler=_gc)
     return parser
 
 
@@ -86,14 +107,25 @@ def _show_config(args: argparse.Namespace, cfg: config.Config) -> int:
 def _selfcheck(args: argparse.Namespace, cfg: config.Config) -> int:
     with log.scope(stage="selfcheck"):
         logger.info(
-            "two short sessions on %s, raw streams in %s",
-            agent.SELFCHECK_MODEL,
-            cfg.home / "selfcheck",
+            "three short sessions on %s, raw streams in %s",
+            selfcheck.MODEL,
+            cfg.home / selfcheck.DIR,
         )
         try:
-            version = agent.selfcheck(cfg.home)
+            version = selfcheck.run(cfg.home)
         except agent.AgentError as exc:
             logger.error("failed: %s", exc)
             return 1
         logger.info("ok, claude %s", version)
     return 0
+
+
+def _gc(args: argparse.Namespace, cfg: config.Config) -> int:
+    if not _reap(cfg):
+        logger.info("no dead runs")
+    return 0
+
+
+def _reap(cfg: config.Config) -> list[str]:
+    with contextlib.closing(Store(cfg.home / DB_FILE)) as db:
+        return recovery.reap(db, cfg.home)

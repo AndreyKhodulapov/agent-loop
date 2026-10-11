@@ -16,6 +16,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_loop.agent import Limits
+
+DB_FILE = "loop.db"
 
 RUN_TRANSITIONS = {
     "planning": {"approved"},
@@ -89,6 +95,24 @@ MIGRATIONS = [
     );
     CREATE INDEX transitions_run ON transitions (run_id);
     """,
+    # Utilization seen during a run; a window may be missing from an event.
+    """
+    CREATE TABLE limit_snapshots (
+        id INTEGER PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs (id),
+        step_id INTEGER REFERENCES steps (id),
+        five_hour REAL,
+        five_hour_resets_at INTEGER,
+        seven_day REAL,
+        seven_day_resets_at INTEGER,
+        at TEXT NOT NULL
+    );
+    CREATE INDEX limit_snapshots_run ON limit_snapshots (run_id);
+    """,
+    # Untracked files before a step: only the files that appear after it belong to the step.
+    """
+    ALTER TABLE steps ADD COLUMN untracked TEXT NOT NULL DEFAULT '[]';
+    """,
 ]
 
 
@@ -131,6 +155,7 @@ class Step:
     detail: dict | None
     started_at: str
     finished_at: str | None
+    untracked: list[str]
 
 
 @dataclass(frozen=True)
@@ -141,6 +166,18 @@ class Transition:
     src: str
     dst: str
     reason: str | None
+    at: str
+
+
+@dataclass(frozen=True)
+class LimitSnapshot:
+    id: int
+    run_id: str
+    step_id: int | None
+    five_hour: float | None
+    five_hour_resets_at: int | None
+    seven_day: float | None
+    seven_day_resets_at: int | None
     at: str
 
 
@@ -212,27 +249,40 @@ class Store:
             )
             self._record(row["run_id"], task_id, row["status"], dst, reason, now)
 
-    def start_step(self, task_id: int, kind: str, checkpoint: str) -> int:
-        """Record a step before it runs; `checkpoint` is HEAD to roll back to if it never ends."""
+    def start_step(
+        self,
+        task_id: int,
+        kind: str,
+        checkpoint: str,
+        untracked: list[str],
+        session_id: str | None = None,
+    ) -> int:
+        """Record a step before it runs.
+
+        `checkpoint` is HEAD to roll back to if it never ends, `untracked` are the untracked
+        files before it. The session id is stored up front, so a session that outlives a killed
+        orchestrator can still be found and resumed.
+        """
         cursor = self._conn.execute(
-            "INSERT INTO steps (task_id, kind, checkpoint, started_at) VALUES (?, ?, ?, ?)",
-            (task_id, kind, checkpoint, _now()),
+            "INSERT INTO steps (task_id, kind, checkpoint, untracked, session_id, started_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                task_id,
+                kind,
+                checkpoint,
+                json.dumps(untracked, ensure_ascii=False),
+                session_id,
+                _now(),
+            ),
         )
         return cursor.lastrowid
 
-    def finish_step(
-        self,
-        step_id: int,
-        outcome: str,
-        session_id: str | None = None,
-        detail: dict | None = None,
-    ) -> None:
+    def finish_step(self, step_id: int, outcome: str, detail: dict | None = None) -> None:
         cursor = self._conn.execute(
-            "UPDATE steps SET outcome = ?, session_id = ?, detail = ?, finished_at = ?"
+            "UPDATE steps SET outcome = ?, detail = ?, finished_at = ?"
             " WHERE id = ? AND finished_at IS NULL",
             (
                 outcome,
-                session_id,
                 None if detail is None else json.dumps(detail, ensure_ascii=False),
                 _now(),
                 step_id,
@@ -241,11 +291,34 @@ class Store:
         if cursor.rowcount == 0:
             raise StoreError(f"step {step_id} is already finished or does not exist")
 
+    def record_limits(self, run_id: str, step_id: int | None, limits: Limits) -> None:
+        """Keep a snapshot of the limits; `step_id` is None for a probe outside any step."""
+        five_hour, seven_day = limits.five_hour, limits.seven_day
+        self._conn.execute(
+            "INSERT INTO limit_snapshots (run_id, step_id, five_hour, five_hour_resets_at,"
+            " seven_day, seven_day_resets_at, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                step_id,
+                five_hour and five_hour.utilization,
+                five_hour and five_hour.resets_at,
+                seven_day and seven_day.utilization,
+                seven_day and seven_day.resets_at,
+                _now(),
+            ),
+        )
+
     def run(self, run_id: str) -> Run:
         row = self._conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         if row is None:
             raise StoreError(f"run {run_id} not found")
         return Run(**row)
+
+    def runs(self, status: str) -> list[Run]:
+        rows = self._conn.execute(
+            "SELECT * FROM runs WHERE status = ? ORDER BY created_at", (status,)
+        ).fetchall()
+        return [Run(**row) for row in rows]
 
     def tasks(self, run_id: str) -> list[Task]:
         rows = self._conn.execute(
@@ -257,16 +330,28 @@ class Store:
         rows = self._conn.execute(
             "SELECT * FROM steps WHERE task_id = ? ORDER BY id", (task_id,)
         ).fetchall()
-        return [
-            Step(**{**row, "detail": None if row["detail"] is None else json.loads(row["detail"])})
-            for row in rows
-        ]
+        return [_step(row) for row in rows]
+
+    def open_steps(self, run_id: str) -> list[Step]:
+        """Steps of the run that started and never finished."""
+        rows = self._conn.execute(
+            "SELECT steps.* FROM steps JOIN tasks ON tasks.id = steps.task_id"
+            " WHERE tasks.run_id = ? AND steps.finished_at IS NULL ORDER BY steps.id",
+            (run_id,),
+        ).fetchall()
+        return [_step(row) for row in rows]
 
     def transitions(self, run_id: str) -> list[Transition]:
         rows = self._conn.execute(
             "SELECT * FROM transitions WHERE run_id = ? ORDER BY id", (run_id,)
         ).fetchall()
         return [Transition(**row) for row in rows]
+
+    def limit_snapshots(self, run_id: str) -> list[LimitSnapshot]:
+        rows = self._conn.execute(
+            "SELECT * FROM limit_snapshots WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
+        return [LimitSnapshot(**row) for row in rows]
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -305,6 +390,11 @@ class Store:
 def _check(allowed: dict[str, set[str]], what: str, src: str, dst: str) -> None:
     if dst not in allowed[src]:
         raise StoreError(f"{what}: {src} -> {dst} is not allowed")
+
+
+def _step(row: sqlite3.Row) -> Step:
+    detail = None if row["detail"] is None else json.loads(row["detail"])
+    return Step(**{**row, "detail": detail, "untracked": json.loads(row["untracked"])})
 
 
 def _now() -> str:

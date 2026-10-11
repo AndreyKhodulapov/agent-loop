@@ -1,0 +1,51 @@
+{
+  "autoMemoryEnabled": false,
+  "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "120000",
+    "BASH_MAX_TIMEOUT_MS": "600000"
+  },
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": ["Read(./**)", "Edit(./**)", "TodoWrite"],
+    "deny": [
+      "WebFetch",
+      "WebSearch",
+      "Read(.env*)",
+      "Read(*.pem)",
+      "Read(*.key)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.config/gh/**)",
+      "Read(~/.config/gcloud/**)",
+      "Read(~/.kube/**)",
+      "Read(~/.docker/config.json)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.netrc)",
+      "Read(~/.git-credentials)",
+      "Read(~/.pypirc)",
+      "Read(~/.npmrc)",
+      "Edit(.git/**)",
+      "Edit(.claude/**)",
+      "Edit(.mcp.json)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git reset *)",
+      "Bash(git checkout *)",
+      "Bash(git switch *)",
+      "Bash(git rebase *)",
+      "Bash(git merge *)",
+      "Bash(git stash *)",
+      "Bash(git clean *)",
+      "Bash(rm -rf *)",
+      "Bash(curl *)",
+      "Bash(wget *)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "network": {"allowLocalBinding": true}
+  }
+}
