@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from agent_loop import store
+from agent_loop.agent import Limits, Window
 
 CARD = {"goal": "Добавить схему", "acceptance": ["tests pass"]}
 
@@ -59,16 +60,34 @@ def test_newer_schema_is_rejected(db_path):
 
 def test_failed_migration_leaves_previous_version(db_path, monkeypatch):
     store.Store(db_path).close()
+    released = len(store.MIGRATIONS)
     broken = "CREATE TABLE limits (at TEXT); INSERT INTO missing VALUES (1);"
     monkeypatch.setattr(store, "MIGRATIONS", [*store.MIGRATIONS, broken])
 
     with pytest.raises(sqlite3.OperationalError, match="missing"):
         store.Store(db_path)
 
-    assert user_version(db_path) == 1
+    assert user_version(db_path) == released
     with connect(db_path) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     assert "limits" not in tables
+
+
+def test_older_database_is_migrated_with_its_data(db_path, monkeypatch):
+    monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS[:1])
+    old = store.Store(db_path)
+    run_id = old.create_run(Path("/work/service"), "main")
+    old.close()
+    monkeypatch.undo()
+
+    db = store.Store(db_path)
+    try:
+        db.record_limits(run_id, None, Limits(None, Window(0.64, 1791813600)))
+        assert db.run(run_id).branch == "main"
+        assert len(db.limit_snapshots(run_id)) == 1
+    finally:
+        db.close()
+    assert user_version(db_path) == len(store.MIGRATIONS)
 
 
 def test_run_lifecycle_records_transitions(db, run_id):
@@ -206,3 +225,20 @@ def test_step_is_started_and_finished_once(db, run_id):
 
     with pytest.raises(store.StoreError, match="already finished"):
         db.finish_step(step_id, "done")
+
+
+def test_limit_snapshots_keep_missing_windows_empty(db, run_id):
+    task_id = db.add_task(run_id, "budget", CARD)
+    step_id = db.start_step(task_id, "implement", checkpoint="abc123")
+
+    db.record_limits(run_id, None, Limits(Window(0.0, 1791670200), Window(0.64, 1791813600)))
+    db.record_limits(run_id, step_id, Limits(Window(0.05, 1791670200), None))
+
+    snapshots = db.limit_snapshots(run_id)
+    assert [
+        (s.step_id, s.five_hour, s.five_hour_resets_at, s.seven_day, s.seven_day_resets_at)
+        for s in snapshots
+    ] == [
+        (None, 0.0, 1791670200, 0.64, 1791813600),
+        (step_id, 0.05, 1791670200, None, None),
+    ]

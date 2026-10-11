@@ -16,6 +16,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_loop.agent import Limits
 
 RUN_TRANSITIONS = {
     "planning": {"approved"},
@@ -89,6 +93,20 @@ MIGRATIONS = [
     );
     CREATE INDEX transitions_run ON transitions (run_id);
     """,
+    # Utilization seen during a run; a window may be missing from an event.
+    """
+    CREATE TABLE limit_snapshots (
+        id INTEGER PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs (id),
+        step_id INTEGER REFERENCES steps (id),
+        five_hour REAL,
+        five_hour_resets_at INTEGER,
+        seven_day REAL,
+        seven_day_resets_at INTEGER,
+        at TEXT NOT NULL
+    );
+    CREATE INDEX limit_snapshots_run ON limit_snapshots (run_id);
+    """,
 ]
 
 
@@ -141,6 +159,18 @@ class Transition:
     src: str
     dst: str
     reason: str | None
+    at: str
+
+
+@dataclass(frozen=True)
+class LimitSnapshot:
+    id: int
+    run_id: str
+    step_id: int | None
+    five_hour: float | None
+    five_hour_resets_at: int | None
+    seven_day: float | None
+    seven_day_resets_at: int | None
     at: str
 
 
@@ -241,6 +271,23 @@ class Store:
         if cursor.rowcount == 0:
             raise StoreError(f"step {step_id} is already finished or does not exist")
 
+    def record_limits(self, run_id: str, step_id: int | None, limits: Limits) -> None:
+        """Keep a snapshot of the limits; `step_id` is None for a probe outside any step."""
+        five_hour, seven_day = limits.five_hour, limits.seven_day
+        self._conn.execute(
+            "INSERT INTO limit_snapshots (run_id, step_id, five_hour, five_hour_resets_at,"
+            " seven_day, seven_day_resets_at, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                step_id,
+                five_hour and five_hour.utilization,
+                five_hour and five_hour.resets_at,
+                seven_day and seven_day.utilization,
+                seven_day and seven_day.resets_at,
+                _now(),
+            ),
+        )
+
     def run(self, run_id: str) -> Run:
         row = self._conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         if row is None:
@@ -267,6 +314,12 @@ class Store:
             "SELECT * FROM transitions WHERE run_id = ? ORDER BY id", (run_id,)
         ).fetchall()
         return [Transition(**row) for row in rows]
+
+    def limit_snapshots(self, run_id: str) -> list[LimitSnapshot]:
+        rows = self._conn.execute(
+            "SELECT * FROM limit_snapshots WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
+        return [LimitSnapshot(**row) for row in rows]
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[None]:
