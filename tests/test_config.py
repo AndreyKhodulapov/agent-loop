@@ -37,6 +37,12 @@ def test_defaults_without_any_source(tmp_path, home):
     assert set(cfg.sources.values()) == {"default"}
 
 
+def test_relative_home_is_taken_from_the_working_directory(tmp_path):
+    cfg = config.load(tmp_path, environ={"LOOP_HOME": "home"})
+
+    assert cfg.home == tmp_path / "home"
+
+
 def test_env_example_is_valid(tmp_path, home):
     (home / ".env").write_text((ROOT / ".env.example").read_text())
 

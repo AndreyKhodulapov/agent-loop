@@ -141,7 +141,9 @@ def load(
     profile: Path | None = None,
     environ: Mapping[str, str] = os.environ,
 ) -> Config:
-    home = Path(environ.get("LOOP_HOME", DEFAULT_HOME)).expanduser()
+    # The guard hook runs in the working directory of the session, so a relative home would
+    # point elsewhere there.
+    home = cwd / Path(environ.get("LOOP_HOME", DEFAULT_HOME)).expanduser()
     values: dict[str, object] = {}
     sources: dict[str, str] = {}
 

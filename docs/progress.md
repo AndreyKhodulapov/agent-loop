@@ -481,11 +481,51 @@ uv run ruff check . && uv run ruff format --check .
 
 Предлагаемое сообщение коммита 3.4а: `feat(prompts): build the implementer and fixer prompts, add the role files and the answer schema`.
 
+### 3.4б Цикл новой задачи — готово 2026-10-11
+
+Решения человека (2026-10-11, перед шагом; план, раздел 3): шаг 3.4б разбит на 3.4б (новая задача) и 3.4в (продолжение остановленной); gate — шаг `kind="gate"` в `steps` с вердиктом в `detail`; остановка между сессиями оставляет задаче её статус, на паузу встаёт прогон, `paused` у задачи — только с приостановленным шагом.
+
+Сделано:
+1. Новый модуль `src/agent_loop/implement.py` (не `task`: имя затеняло бы переменные `task` вызывающего кода), `start(cfg, store, run, task, total, profile, previous) -> str | None` для задачи в `pending`:
+   - эталон: `gates.count_tests` → `store.set_tests` (нет `collect` — не пишется), затем `implementing`;
+   - чекпоинт и неотслеживаемые файлы снимаются один раз на старте задачи и общие для всех её шагов: работа задачи до коммита — работа против этого чекпоинта, кто бы из сессий её ни сделал;
+   - сессия (`_session`): `guard.prepare` перед каждой, `agent.Session` с `model_implementer`/`effort_implementer` (у fixer'а те же — отдельных настроек нет), `prompts.system_files(role)`, `ANSWER_SCHEMA`, `env=profile.env`; шаг `implement` или `fix` в store с `session_id`, `log.scope(stage=kind)`, задача в логе — `seq/total`;
+   - исход сессии (`_take`): `paused` → WIP в `git.wip_ref(run, seq)` через `save_wip` и `paused(<причина шага>)`; `failed` → `needs_human(project_settings)` или `needs_human(session_failed)`; ответа нет → `needs_human(no_answer)`; `too_big` → `replan(too_big)`, `needs_human` → `needs_human(question)`, `blocked` → `needs_human(blocked)`; `done` → `gating`. `split` и `question` лежат в `detail.answer` шага;
+   - gate (`_gate`): шаг `gate` без сессии, `gates.check(..., tests_before=эталон)`, `asdict(verdict)` в `detail`; `paused` (ветка или HEAD сдвинулись) — шаг `paused`, WIP и `paused(branch_changed)`; `pass` — задача остаётся в `gating` для коммита (3.5); `needs_human`/`replan` — с причиной вердикта; `fixing` → `fixing(<причина>)` и fixer, но `weakened_tests` второй раз на задаче → `needs_human(weakened_tests)`, а после `fix_attempts` завершённых fixer'ов → `replan(fix_attempts)`;
+   - fixer: `prompts.fixer` с вердиктом и диффом работы против чекпоинта задачи — новые файлы без `verdict.secrets` (содержимое файла-секрета в промпт не попадает);
+   - Ctrl+C, пока агент отвечал (исход `completed` с причиной `interrupt`): ответ разбирается, задача переходит, куда он ведёт, и `start` возвращает `interrupt` до gate — задача остаётся, например, в `gating` без шага gate.
+2. `config.load`: `home` — от `cwd`, если `LOOP_HOME` относительный (hook иначе искал бы `run_dir` от каталога сессии).
+3. План: раздел 3 (решение про разбиение, шаг gate и остановку между сессиями), раздел 14 (шаг 4 (б) сделан, (в) записан).
+
+Чего нет (всё — 3.4в, кроме оговорённого):
+- Продолжения: `start` работает только с `pending`. Задача в `paused`, в `gating` после `interrupt` (gate ещё не было), в `implementing`/`fixing` с завершённым шагом (остановка между ответом и переходом) не продолжается.
+- `.loop/handoff.md` не исключён из работы: handoff приостановленной сессии попадает в WIP и выглядит как новый файл задачи (в gate и в будущий коммит). Читать, удалять и не считать работой — в 3.4в; там же чистить устаревший handoff перед первой сессией задачи.
+- Проверки бюджета перед сессией нет; проверки ветки и HEAD перед первой сессией задачи нет (`gates.branch_moved` — только в gate). Ветку при старте прогона сверит команда `run` (3.5).
+- Повтор ослабления тестов узнаётся только по `verdict.reason`: убыль тестов по `collect` за упавшими `fmt`/`lint` — не причина вердикта и не считается.
+- `agent.AgentError` из `step.run` и `ConfigError` из `count_tests`/gate не ловятся: задача остаётся в своём статусе, шаг сессии — `failed`, открытый шаг gate доуберёт `reap` как `died`. Что с этим делать, решит команда `run`.
+- Коммит (3.5): задача после gate остаётся в `gating`; сообщение — `commit_message` из `detail.answer` последнего шага сессии, файлы-секреты — `secrets` из `detail` последнего шага gate, предупреждение `flaky_tests` — там же.
+
+Тесты: новый `tests/test_implement.py` — сессия подменяется сценарием (действие с репозиторием и исход, шаг завершается в store, как это делает `step.run`), gate и git настоящие, профиль с `collect` и `test` (`grep` по `app.py`). Работа проходит gate (эталон, переходы, шаги, общий чекпоинт, поля `Session`, сводка прошлых задач в промпте); fixer получает находки и дифф с новым файлом, у всех шагов один чекпоинт; файл-секрет не попадает в промпт fixer'а (тест падает, если не фильтровать `secrets`); исчерпанные попытки → `replan(fix_attempts)`; ослабление дважды → `needs_human`; шесть исходов без `done` не идут в gate; пауза сохраняет WIP с новым файлом поверх чекпоинта; `interrupt` во время ответа — без gate; коммит в сессии → шаг gate `paused`, задача `paused(branch_changed)`. В `test_config` — относительный `LOOP_HOME`.
+
+Проверка:
+```
+uv run pytest -q            # 286 тестов
+uv run ruff check . && uv run ruff format --check .
+```
+
+Предлагаемое сообщение коммита 3.4б: `feat(implement): take a task through the implementer, gate and fixer`.
+
 ## Дальше
 
-### Шаг 3.4б и после
+### Шаг 3.4в и после
 
-3.4б — цикл задачи (новый модуль, например `task`): перед первым шагом задачи `store.set_tests(task.id, gates.count_tests(profile, repo))` (если не `None`); сессия исполнителя — `agent.Session(prompt=prompts.implementer(...), system_files=prompts.system_files("implementer", settings), schema=prompts.ANSWER_SCHEMA, model=model_implementer, effort=effort_implementer, env=profile.env)`; `previous` — `prompts.previous_tasks(repo, <checkpoint первого шага прогона>, [(title, notes_for_next)])`; ответ — `prompts.answer(outcome.result.structured_output)`: `too_big` → `replan` со `split`, `needs_human`/`blocked` → `needs_human`; `done` → `gates.check(..., tests_before=task.tests)`; `fixing` → новая сессия `prompts.fixer(...)` с `system_files("fixer", ...)`, не больше `fix_attempts` (3), затем `replan`; `weakened_tests` второй раз — `needs_human` (раздел 7); `pass` с `flaky_tests` — в отчёт и в задачу для планировщика. `work` для fixer'а и возобновления — `git.diff(repo, checkpoint, git.new_files(...))`. Пробелы из вводной к этапу 3 в плане: handoff читать и удалять после использования (нет — по одному WIP-диффу), счётчик пауз `timeout`/`guard_error` → `replan`, `how_to_resume` только после `paused` (проверкой), абсолютный `LOOP_HOME` в `config.load`.
+3.4в — продолжение остановленной задачи в `implement` (например, `resume(...)` рядом со `start`), по статусу задачи и её последнему шагу:
+- `paused` — `step.how_to_resume` только при `steps[-1].outcome == "paused"` (проверкой, пробел из вводной к этапу 3); разобрать `kind` шага: `implement`/`fix` — `--resume` сессии (`Session(resume=True, session_id=...)`) или новая сессия с handoff и WIP-диффом (`prompts.implementer(..., handoff, work)`; для `fix` — снова `prompts.fixer` с вердиктом последнего шага gate из `detail`); `gate` — gate заново (`died` или `branch_changed` после того, как человек вернул ветку);
+- `gating` без шага gate после последней сессии — gate; `implementing`/`fixing` с завершённым последним шагом — разобрать сохранённый `detail.answer`; `fixing` после gate — fixer с вердиктом из `detail` шага gate;
+- эталон тестов — из `task.tests`, не заново;
+- handoff `.loop/handoff.md`: прочитать для новой сессии и удалить; не считать работой задачи (в `gates.check` и в WIP); нет handoff — по одному WIP-диффу; устаревший удалять перед первой сессией задачи;
+- счётчик пауз `timeout`/`idle`/`guard_error` на задачу в `how_to_resume`, после исчерпания — `replan` (как `CONTEXT_PAUSES_TO_REPLAN`);
+- бюджет перед каждой сессией (`budget.load_limits` + `budget.check`): нельзя — задача остаётся в статусе, `start`/`resume` возвращают `budget` с `resume_at` для прогона.
 
 3.5 — коммит кодом с валидацией сообщения; детерминированные проверки стиля. Команда `run` — по контрактам из 3.2.
 
