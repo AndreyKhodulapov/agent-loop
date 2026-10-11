@@ -4,6 +4,11 @@ A session runs `claude -p` in its own process group, so Ctrl+C in the terminal r
 orchestrator, which then decides how to stop the session. The raw stream is appended to the log
 file as it arrives; parsed events carry what the loop needs: session id, context fill, limits and
 the final result.
+
+Sessions run with `--restricted`: settings files of the user and of the project are ignored and
+only `--settings` of the loop applies. The agent may write the settings of the project, and their
+hooks would run outside the sandbox. The CLAUDE.md of the working directory is ignored too, so
+the adapter puts it into the system prompt itself.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -19,7 +25,18 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent_loop import git
+
 CLAUDE = "claude"
+# `StructuredOutput` is added by the CLI itself when there is a schema.
+TOOLS = ("Bash", "Read", "Edit", "Write")
+# Instruction files of the working directory the CLI would read without `--restricted`.
+PROJECT_INSTRUCTIONS = ("CLAUDE.md", ".claude/CLAUDE.md")
+# Hops of `@path` imports the CLI follows.
+IMPORT_DEPTH = 5
+IMPORT = re.compile(r"(?:^|\s)@(\S+)")
+# Imports are not looked for in code, the way the CLI does it.
+CODE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
 # USER is needed to find the OAuth token in the keychain; tokens and keys from the shell are
 # not passed on.
 ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "TMPDIR")
@@ -43,10 +60,10 @@ class Session:
     cwd: Path
     settings: Path
     effort: str | None = None
-    # The CLI keeps only the last --append-system-prompt-file, so the files are joined into one.
+    # The CLI keeps only the last --append-system-prompt-file, so the files are joined into one,
+    # followed by the instructions of the working directory.
     system_files: tuple[Path, ...] = ()
     schema: dict | None = None
-    disallowed_tools: tuple[str, ...] = ()
     # Known before the start, so the caller can store it before the process may die.
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     resume: bool = False
@@ -99,8 +116,9 @@ def command(session: Session, system_file: Path | None = None) -> list[str]:
         "--output-format",
         "stream-json",
         "--verbose",
-        "--setting-sources",
-        "project",
+        "--restricted",
+        "--tools",
+        ",".join(TOOLS),
         "--settings",
         str(session.settings),
         "--permission-prompts",
@@ -117,10 +135,43 @@ def command(session: Session, system_file: Path | None = None) -> list[str]:
         args += ["--append-system-prompt-file", str(system_file)]
     if session.schema is not None:
         args += ["--json-schema", json.dumps(session.schema)]
-    if session.disallowed_tools:
-        args += ["--disallowed-tools", ",".join(session.disallowed_tools)]
     args += ["--resume" if session.resume else "--session-id", session.session_id]
     return args
+
+
+def project_instructions(cwd: Path) -> str:
+    """The CLAUDE.md files of the working directory with the files they import by `@path`.
+
+    An imported file is read only if it is committed: the agent may edit CLAUDE.md, and an
+    import of `.env` or `~/.ssh/config` would put a file it is not allowed to read into the
+    prompt of the next session. A CLAUDE.md that is a link is read under the same rule.
+    """
+    root = cwd.resolve()
+    own = {root / name for name in PROJECT_INSTRUCTIONS}
+    committed: set[Path] = set()
+    texts: dict[Path, str] = {}
+
+    def include(path: Path, depth: int) -> None:
+        real = path.resolve()
+        if real in texts or not real.is_file():
+            return
+        if real not in own:
+            if not committed:
+                names = git.git(root, "ls-tree", "-r", "-z", "--name-only", "HEAD")
+                committed.update(root / name for name in names.split("\0")[:-1])
+            if real not in committed:
+                return
+        texts[real] = real.read_text(encoding="utf-8")
+        if depth < IMPORT_DEPTH:
+            for name in IMPORT.findall(CODE.sub("", texts[real])):
+                include(path.parent / Path(name).expanduser(), depth + 1)
+
+    for name in PROJECT_INSTRUCTIONS:
+        include(root / name, 0)
+    return "\n\n".join(
+        f"Contents of {path.relative_to(root).as_posix()}:\n\n{text}"
+        for path, text in texts.items()
+    )
 
 
 def parse_event(line: str) -> Event | None:
@@ -179,13 +230,14 @@ class Process:
         # of life too.
         self.last_output = time.monotonic()
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        rules = [path.read_text(encoding="utf-8") for path in session.system_files]
+        instructions = project_instructions(session.cwd)
+        if instructions:
+            rules.append(instructions)
         system_file = None
-        if session.system_files:
+        if rules:
             system_file = log_path.with_suffix(".system.md")
-            system_file.write_text(
-                "\n\n".join(path.read_text(encoding="utf-8") for path in session.system_files),
-                encoding="utf-8",
-            )
+            system_file.write_text("\n\n".join(rules), encoding="utf-8")
         # The prompt goes through stdin: in argv it would be visible in `ps` and a leading dash
         # would be read as an option. The file stays next to the log for debugging.
         prompt_file = log_path.with_suffix(".prompt.md")

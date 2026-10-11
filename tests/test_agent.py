@@ -4,7 +4,7 @@ import os
 import pytest
 from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, SUBAGENT, USER, read_calls
 
-from agent_loop import agent
+from agent_loop import agent, git
 
 
 def session(tmp_path, **kwargs):
@@ -73,7 +73,6 @@ def test_command_for_new_and_resumed_session(tmp_path):
         tmp_path,
         effort="high",
         schema={"type": "object"},
-        disallowed_tools=("Agent", "WebFetch"),
         session_id="s-1",
     )
 
@@ -81,28 +80,91 @@ def test_command_for_new_and_resumed_session(tmp_path):
 
     assert args[:2] == ["claude", "-p"]
     assert args[args.index("--settings") + 1] == str(tmp_path / "settings.json")
-    assert args[args.index("--setting-sources") + 1] == "project"
+    assert "--restricted" in args
+    assert args[args.index("--tools") + 1] == "Bash,Read,Edit,Write"
     assert args[args.index("--permission-prompts") + 1] == "none"
     assert "--strict-mcp-config" in args
     assert args[args.index("--effort") + 1] == "high"
     assert args[args.index("--append-system-prompt-file") + 1] == str(tmp_path / "system.md")
     assert args[args.index("--json-schema") + 1] == '{"type": "object"}'
-    assert args[args.index("--disallowed-tools") + 1] == "Agent,WebFetch"
     assert args[-2:] == ["--session-id", "s-1"]
 
     resumed = agent.command(session(tmp_path, session_id="s-1", resume=True))
 
     assert resumed[-2:] == ["--resume", "s-1"]
-    for flag in ("--effort", "--append-system-prompt-file", "--json-schema", "--disallowed-tools"):
+    for flag in ("--effort", "--append-system-prompt-file", "--json-schema"):
         assert flag not in resumed
+
+
+def commit(repo, files):
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    git.git(repo, "add", *files)
+    git.git(repo, "commit", "-q", "-m", "docs")
+
+
+def test_project_instructions_follow_committed_imports(repo):
+    commit(
+        repo,
+        {
+            "docs/style.md": "Style. See @../CLAUDE.md and @api.md",
+            "docs/api.md": "API.",
+            "docs/example.md": "Example.",
+        },
+    )
+    (repo / ".env").write_text("TOKEN=secret")
+    (repo / "notes.md").write_text("Uncommitted notes.")
+    (repo / "CLAUDE.md").write_text(
+        "Rules: @docs/style.md and email me@docs/api.md\n"
+        "Not committed: @.env @notes.md @~/.ssh/config @missing.md\n"
+        "Inline `@docs/example.md` and a block:\n```\n@docs/example.md\n```\n"
+    )
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "CLAUDE.md").write_text("More rules.")
+
+    instructions = agent.project_instructions(repo)
+
+    assert [line for line in instructions.splitlines() if line.startswith("Contents of")] == [
+        "Contents of CLAUDE.md:",
+        "Contents of docs/style.md:",
+        "Contents of docs/api.md:",
+        "Contents of .claude/CLAUDE.md:",
+    ]
+    assert "secret" not in instructions and "Uncommitted" not in instructions
+
+
+def test_project_instructions_stop_at_the_import_depth(repo):
+    depth = agent.IMPORT_DEPTH
+    commit(repo, {f"f{i}.md": f"File {i}: @f{i + 1}.md" for i in range(1, depth + 2)})
+    (repo / "CLAUDE.md").write_text("@f1.md")
+
+    instructions = agent.project_instructions(repo)
+
+    assert f"File {depth}:" in instructions
+    assert f"File {depth + 1}:" not in instructions
+
+
+def test_linked_claude_md_is_read_only_when_committed(repo):
+    (repo / ".env").write_text("TOKEN=secret")
+    (repo / "CLAUDE.md").symlink_to(repo / ".env")
+
+    assert agent.project_instructions(repo) == ""
+
+    commit(repo, {"AGENTS.md": "Shared rules."})
+    (repo / "CLAUDE.md").unlink()
+    (repo / "CLAUDE.md").symlink_to("AGENTS.md")
+
+    assert agent.project_instructions(repo) == "Contents of AGENTS.md:\n\nShared rules."
 
 
 def test_process_streams_events_and_keeps_raw_log(tmp_path, fake_claude, monkeypatch):
     calls_path = fake_claude([INIT, ASSISTANT, RATE_LIMIT, USER, RESULT])
     monkeypatch.setenv("ANTHROPIC_API_KEY", "secret")
-    first, second = tmp_path / "AGENTS.md", tmp_path / "CLAUDE.md"
+    first, second = tmp_path / "AGENTS.md", tmp_path / "context.md"
     first.write_text("rule one")
     second.write_text("rule two")
+    (tmp_path / "CLAUDE.md").write_text("rule three")
     log_path = tmp_path / "runs" / "r1" / "implement.jsonl"
     new = session(tmp_path, system_files=(first, second))
 
@@ -114,7 +176,7 @@ def test_process_streams_events_and_keeps_raw_log(tmp_path, fake_claude, monkeyp
     assert len(log_path.read_text().splitlines()) == 5
     [call] = read_calls(calls_path)
     assert call["prompt"] == "-v reply with pong"
-    assert call["system"] == "rule one\n\nrule two"
+    assert call["system"] == "rule one\n\nrule two\n\nContents of CLAUDE.md:\n\nrule three"
     assert call["pgid"] == call["pid"]
     assert "ANTHROPIC_API_KEY" not in call["env"]
     assert call["env"]["PATH"] == os.environ["PATH"]

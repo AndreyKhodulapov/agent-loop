@@ -56,8 +56,10 @@ RESULT = {
 # --settings have hooks (if the scenario has it), "new" otherwise. Besides events, it may hold
 # commands: "sleep" (30 s), "sleep:<seconds>", "interrupt" (Ctrl+C to the loop, then wait for its
 # stop file), "tool:<name>" (ask the PreToolUse hook from --settings about a call; its output goes
-# to hooks.jsonl), "handoff" (write .loop/handoff.md like an agent asked to stop) and
-# "ignore-term" (ignore SIGTERM from now on).
+# to hooks.jsonl), "handoff" (write .loop/handoff.md like an agent asked to stop),
+# "project-hook" (run the SessionStart hook of .claude/settings.json in the working directory, as
+# a CLI that does not ignore the project settings would) and "ignore-term" (ignore SIGTERM from
+# now on).
 FAKE_CLAUDE = """#!{python}
 import json, os, signal, subprocess, sys, time
 from pathlib import Path
@@ -97,6 +99,9 @@ for item in scenario[kind]:
         time.sleep(float(item[len("sleep:"):]))
     elif item == "ignore-term":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    elif item == "project-hook":
+        project = json.loads(Path(".claude/settings.json").read_text())
+        subprocess.run(project["hooks"]["SessionStart"][0]["hooks"][0]["command"], shell=True)
     elif item == "handoff":
         Path(".loop").mkdir(exist_ok=True)
         Path(".loop/handoff.md").write_text("done: nothing")

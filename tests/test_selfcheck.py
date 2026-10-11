@@ -33,8 +33,9 @@ def test_selfcheck_passes_and_records_version(tmp_path, fake_claude):
     first, resumed, stopped = read_calls(calls_path)
     session_id = first["argv"][first["argv"].index("--session-id") + 1]
     assert resumed["argv"][-2:] == ["--resume", session_id]
-    assert "maple" in (Path(first["cwd"]) / "CLAUDE.md").read_text()
-    assert "copper" in first["system"] and "willow" in first["system"]
+    assert "maple" in first["system"] and "copper" in first["system"]
+    assert "willow" in first["system"]
+    assert "hooks" in json.loads((Path(first["cwd"]) / ".claude" / "settings.json").read_text())
     hooks = json.loads(Path(stopped["argv"][stopped["argv"].index("--settings") + 1]).read_text())
     assert "PreToolUse" in hooks["hooks"]
     denied, allowed = read_calls(calls_path.with_name("hooks.jsonl"))
@@ -44,7 +45,12 @@ def test_selfcheck_passes_and_records_version(tmp_path, fake_claude):
 
 def test_selfcheck_lists_every_problem(tmp_path, fake_claude, monkeypatch):
     fake_claude(
-        new=[INIT, ASSISTANT, {**RESULT, "structured_output": {**WORDS, "second_word": "oak"}}],
+        new=[
+            INIT,
+            "project-hook",
+            ASSISTANT,
+            {**RESULT, "structured_output": {**WORDS, "second_word": "oak"}},
+        ],
         resume=[INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "result": "I do not know."}],
         hooked=[INIT, ASSISTANT, RATE_LIMIT, RESULT],
     )
@@ -62,6 +68,7 @@ def test_selfcheck_lists_every_problem(tmp_path, fake_claude, monkeypatch):
     assert "guard: expected the hook to stop on the stop request, got None" in message
     assert f"guard: the agent has not written {guard.HANDOFF}" in message
     assert "guard: no structured answer" in message
+    assert "a hook from the project settings ran" in message
     assert not (home / selfcheck.RESULT_FILE).exists()
 
 

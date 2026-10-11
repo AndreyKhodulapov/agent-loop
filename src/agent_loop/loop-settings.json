@@ -6,11 +6,10 @@
   },
   "permissions": {
     "defaultMode": "dontAsk",
-    "allow": ["Read(./**)", "Edit(./**)", "TodoWrite"],
+    "allow": ["Read(./**)", "Edit(./**)"],
     "deny": [
       "WebFetch",
       "WebSearch",
-      "Skill",
       "Read(.env*)",
       "Read(*.pem)",
       "Read(*.key)",

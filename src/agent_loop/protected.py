@@ -1,23 +1,19 @@
 """Files of the working repository that configure the CLI itself; they belong to the operator.
 
-With `--setting-sources project` the CLI reads the settings of the repository: their hooks are
-merged with the loop's and run outside the sandbox, their permissions are merged too. An agent
-that writes such a file gets its command run outside the sandbox in the next session. The
-permission rules keep the file tools away from these paths, but Bash in the sandbox writes
-anywhere in the working directory, so before each session the loop compares the files with the
-copy taken when the run started and puts the copy back.
+Sessions of the loop run with `--restricted` and ignore these files, but the operator's own
+sessions in the repository read them: a hook the agent puts there would run outside the sandbox
+the next time the operator starts `claude`. The permission rules keep the file tools away from
+these paths and the sandbox keeps Bash away from them, so this is the last line: before each
+session the loop compares the files with the copy taken when the run started and puts the copy
+back.
 
 Files are compared by content, not by `git diff`: `settings.local.json` and `.mcp.json` are
-usually ignored by git.
-
-The loop does not run in a repository whose settings have hooks: a hook of the operator that
-runs a formatter, tests or `make` would run the files the agent writes outside the sandbox.
+usually ignored by git, so a change to them never shows in the diff.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import stat
@@ -35,28 +31,15 @@ PATHS = (
     ".claude/commands",
     ".mcp.json",
 )
-SETTINGS_FILES = (".claude/settings.json", ".claude/settings.local.json")
 COPY_DIR = "protected"
 
 
-class ProjectHooksError(Exception):
-    pass
-
-
 def save(repo: Path, run_dir: Path) -> None:
-    """Copy the protected files as they are at the start of the run; a repository whose settings
-    have hooks raises `ProjectHooksError`.
+    """Copy the protected files as they are at the start of the run.
 
     Called once per run: a second call raises `FileExistsError`. `loop resume` keeps the copy,
     since one taken later would take in what the agent of an interrupted session has written.
     """
-    for name in SETTINGS_FILES:
-        path = repo / name
-        if path.is_file() and json.loads(path.read_text(encoding="utf-8")).get("hooks"):
-            raise ProjectHooksError(
-                f"{path} has hooks: they run outside the sandbox and may run the files the agent"
-                " writes; agent-loop does not run in such a repository"
-            )
     copy = run_dir / COPY_DIR
     # Missing files are missing from the copy, so the directory itself is the record of them.
     copy.mkdir(parents=True)

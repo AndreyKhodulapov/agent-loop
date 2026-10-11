@@ -297,20 +297,37 @@ uv run loop selfcheck       # Skill в deny не ломает сессии
 
 Предлагаемое сообщение коммита 3.1а: `docs(plan): record the --restricted spike and switch to it in 3.1b`.
 
+### 3.1б Переход на `--restricted` — готово 2026-10-11
+
+Сделано:
+1. `agent.command`: `--restricted --tools Bash,Read,Edit,Write` (`agent.TOOLS`) вместо `--setting-sources project`; `--strict-mcp-config` остаётся. `Session.disallowed_tools` и `--disallowed-tools` убраны: второго применения нет, `Agent` в сессию не попадает и так.
+2. `agent.project_instructions(cwd)`: `CLAUDE.md` и `.claude/CLAUDE.md` рабочего каталога с `@path`-импортами (пути от импортирующего файла, `~` разворачивается, глубина `IMPORT_DEPTH = 5`, в код-спанах и блоках ``` не ищутся, повторы и циклы отсекаются). Каждый файл — блоком `Contents of <путь>:`. `agent.Process` дописывает их после `system_files` в тот же `--append-system-prompt-file` для каждой сессии, в том числе `--resume`.
+   - Импортированный файл читается, только если он закоммичен в HEAD (`git ls-tree`): CLAUDE.md агенту править можно, и `@.env` или `@~/.ssh/config` затянули бы в промпт следующей сессии файл, который ему читать нельзя. Индекс не годится: `git add` агенту доступен. CLAUDE.md-ссылка (обычно `CLAUDE.md -> AGENTS.md`) подчиняется тому же правилу. git вызывается, только если есть что проверять, — selfcheck вне git работает.
+   - Хвостовая пунктуация (`@docs/x.md,`) не отрезается — импорт не найдётся; как это делает CLI, не проверяли.
+3. `selfcheck`: CLAUDE.md рабочего каталога проверяется уже как наша передача; в `.claude/settings.json` каталога — hook'и `SessionStart` и `PreToolUse`, пишущие маркер; маркер после трёх сессий — проблема «`--restricted` no longer ignores them».
+4. `protected`: отказ `ProjectHooksError` и `SETTINGS_FILES` убраны, вводная модуля переписана: сверка защищает следующую интерактивную сессию человека. `save`/`restore` и вызов в `step.run` не менялись.
+5. `loop-settings.json`: из allow убран `TodoWrite`, из deny — `Skill`. `WebFetch`/`WebSearch` в deny оставлены: инструментов в сессии нет, но запрет страхует, если их добавят в `TOOLS`.
+6. План: разделы 2, 3, 7 (субагенты), 8 (CLAUDE.md), 10, 14.
+
+Тесты: в `test_agent` — аргументы `--restricted`/`--tools`, CLAUDE.md рабочего каталога в файле правил `Process`, импорты (закоммиченные — да; `.env`, незакоммиченный файл, `~/...`, несуществующий, адрес почты, код — нет; цикл), глубина, CLAUDE.md-ссылка на `.env` и на закоммиченный `AGENTS.md`. В `test_selfcheck` — проектный hook, выполненный подделкой `claude` (новая команда `project-hook` в `fakes.py`), даёт проблему. Тесты отказа `ProjectHooksError` удалены.
+
+Проверка:
+```
+uv run pytest -q            # 184 теста
+uv run ruff check . && uv run ruff format --check .
+uv run loop selfcheck       # 2.1.296: зелёный; в init 5 инструментов (Bash, Edit, Read, StructuredOutput, Write), mcp_servers пуст
+```
+
+Предлагаемое сообщение коммита 3.1б: `feat(agent): run sessions with --restricted and pass the project CLAUDE.md`.
+
 ## Дальше
 
-### Шаг 3.1б. Переход на `--restricted`, ~200–300 строк
+### Шаг 3.2. Профиль репозитория и lock
 
-- `agent.command`: `--restricted --tools Bash,Read,Edit,Write` вместо `--setting-sources project`; `--strict-mcp-config` остаётся (без него подключаются коннекторы claude.ai). `StructuredOutput` называть не нужно — CLI добавляет его сам при `--json-schema`. `--disallowed-tools Agent` становится лишним: `Session.disallowed_tools` и его передачу из `selfcheck` убрать, если не останется второго применения.
-- CLAUDE.md репозитория передаётся сами: `CLAUDE.md` и `.claude/CLAUDE.md` из корня, если есть, добавляются к файлам правил (адаптер уже склеивает их в один `--append-system-prompt-file`). `@path`-импорты разворачиваются сами, только для файлов внутри репозитория (иначе `@~/.ssh/config` затянет секрет в промпт), с ограничением глубины. CLAUDE.md вложенных каталогов и `.claude/rules` с `paths:` не повторяем — в промпте исполнителя (3.4) строка «если в каталоге, где работаешь, есть CLAUDE.md, прочитай его».
-- `selfcheck`: первая сессия по-прежнему проверяет слово из CLAUDE.md рабочего каталога — теперь это проверка нашей передачи; добавить проверку, что проектный hook не выполнился.
-- `protected`: убрать отказ `ProjectHooksError` (и тесты на него). `protected.restore` **оставить**: он защищает уже не сессии цикла, а следующую интерактивную сессию человека в этом репозитории — подложенный hook в `.claude/settings.local.json` сработал бы у него вне sandbox, а этот файл обычно в gitignore и в дифф не попадает.
-- `loop-settings.json`: `TodoWrite` из allow убрать (инструмента в 2.1.296 нет); `Skill` в deny стал лишним (его нет в `--tools`); `Edit(.claude/**)`, `Edit(.mcp.json)` оставить — это защита человека, см. выше.
-- Промпт исполнителя (3.4) должен знать, что `Edit` на `.pre-commit-config.yaml`, `.husky`, `.devcontainer`, `.npmrc` отклоняется: это файлы человека, обходить через Bash нельзя — сообщить в ответе.
-- План: раздел 3 (решение), раздел 10, раздел 14 (нумерация этапа 3).
+Бывший шаг 3.1: профиль (`loop.toml`: `[commands]`, `[timeouts]`, `[env]`, `deps_files`, `secret_patterns`, проверка неизвестных ключей), lock рабочего каталога `.git/agent-loop.lock` через `recovery.hold`, `down` профиля в финализаторе и в `reap`. Оценить размер до начала; если больше ~1000 строк — разбить.
 
 ### Потом
 
-Бывший шаг 3.1 сдвигается: 3.2 — профиль репозитория (`loop.toml`: `[commands]`, `[timeouts]`, `[env]`, `deps_files`, `secret_patterns`, проверка неизвестных ключей), lock рабочего каталога `.git/agent-loop.lock` через `recovery.hold`, `down` профиля в финализаторе и в `reap`; 3.3 — `gates` (`install` по изменению зависимостей, команды с таймаутами, перезапуск упавших тестов, инварианты ветки/HEAD, числа тестов, размера диффа, секретов, `protected.restore`, изменённых конфигов менеджеров git-hook'ов → `needs_human`). Дальше по плану: сборка промпта и цикл fixer, коммит кодом. Учесть пробелы из вводной к этапу 3 в плане (handoff после жёсткой остановки, счётчик пауз `timeout`/`guard_error`, `how_to_resume` только после `paused`, абсолютный `LOOP_HOME`).
+3.3 — `gates` (`install` по изменению зависимостей, команды с таймаутами, перезапуск упавших тестов, инварианты ветки/HEAD, числа тестов, размера диффа, секретов, `protected.restore`, изменённых конфигов менеджеров git-hook'ов → `needs_human`). 3.4 — сборка промпта и цикл fixer; промпт исполнителя должен сказать: `Edit` на `.pre-commit-config.yaml`, `.husky`, `.devcontainer`, `.npmrc` отклоняется — это файлы человека, обходить через Bash нельзя, сообщить в ответе; если в каталоге, где идёт работа, есть свой CLAUDE.md — прочитать его. 3.5 — коммит кодом. Учесть пробелы из вводной к этапу 3 в плане (handoff после жёсткой остановки, счётчик пауз `timeout`/`guard_error`, `how_to_resume` только после `paused`, абсолютный `LOOP_HOME`).
 
 Все шаги этапа 3 — коммиты в ветке `implementation-loop`.

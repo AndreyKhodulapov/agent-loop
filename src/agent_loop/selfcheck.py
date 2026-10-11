@@ -1,12 +1,14 @@
 """`loop selfcheck`: short real sessions that catch a CLI update breaking the adapter or the guard.
 
 The first session uses every flag of the adapter, the second one resumes it, the third one runs
-under the guard hook with a stop request, the way a step is paused.
+under the guard hook with a stop request, the way a step is paused. The working directory has
+project settings with hooks that none of the sessions may run.
 """
 
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from agent_loop.config import Settings
 MODEL = "haiku"
 DIR = "selfcheck"
 RESULT_FILE = "selfcheck.json"
+PROJECT_HOOK_MARKER = "project-hook-ran"
 WORDS = {"project_word": "maple", "appended_word": "copper", "second_word": "willow"}
 SETTINGS = {"autoMemoryEnabled": False, "permissions": {"defaultMode": "dontAsk"}}
 GUARD_SCHEMA = {
@@ -40,6 +43,10 @@ def run(home: Path) -> str:
     second.write_text(f"The second word is: {WORDS['second_word']}.\n")
     settings = workdir / "settings.json"
     settings.write_text(json.dumps(SETTINGS))
+    marker = workdir / PROJECT_HOOK_MARKER
+    marker.unlink(missing_ok=True)
+    (workdir / ".claude").mkdir(exist_ok=True)
+    (workdir / ".claude" / "settings.json").write_text(json.dumps(_project_hooks(marker)))
 
     first = agent.Session(
         prompt="Report the project word, the appended word and the second word"
@@ -54,7 +61,6 @@ def run(home: Path) -> str:
             "properties": {name: {"type": "string"} for name in WORDS},
             "required": list(WORDS),
         },
-        disallowed_tools=("Agent",),
     )
     result, problems = _check_session(first, workdir / "first.jsonl")
     if result is not None and _normalized(result.structured_output) != WORDS:
@@ -74,6 +80,8 @@ def run(home: Path) -> str:
         problems.append(f"resumed: resumed session lost the context: {result.text}")
 
     problems += _check_guard(workdir)
+    if marker.exists():
+        problems.append("a hook from the project settings ran: --restricted no longer ignores them")
     if problems:
         raise agent.AgentError("; ".join(problems))
     (home / RESULT_FILE).write_text(
@@ -82,6 +90,11 @@ def run(home: Path) -> str:
         )
     )
     return cli_version
+
+
+def _project_hooks(marker: Path) -> dict:
+    hook = [{"hooks": [{"type": "command", "command": f"touch {shlex.quote(str(marker))}"}]}]
+    return {"hooks": {"SessionStart": hook, "PreToolUse": hook}}
 
 
 def _check_guard(workdir: Path) -> list[str]:
@@ -102,7 +115,6 @@ def _check_guard(workdir: Path) -> list[str]:
         settings=session_settings,
         effort="low",
         schema=GUARD_SCHEMA,
-        disallowed_tools=("Agent",),
     )
     result, problems = _check_session(session, workdir / "guard.jsonl", find_process=True)
     state = guard.outcome(run_dir)
