@@ -47,6 +47,17 @@ def test_save_wip_keeps_the_step_work_and_leaves_the_tree_alone(repo):
     assert sorted(git.untracked(repo)) == [".env", "pkg/[new].py"]
 
 
+def test_new_files_are_the_ones_the_step_has_added(repo):
+    (repo / ".env").write_text("TOKEN=1\n")
+    (repo / "notes.txt").write_text("")
+    before = git.untracked(repo)
+    (repo / "new.py").write_text("")
+    (repo / "staged.py").write_text("")
+    git.git(repo, "add", "staged.py", "notes.txt")
+
+    assert git.new_files(repo, git.head(repo), before) == ["new.py", "staged.py"]
+
+
 def test_save_wip_without_changes_keeps_the_head_tree(repo):
     commit = git.save_wip(repo, git.wip_ref("3f2a", 1), [], git.head(repo))
 
@@ -72,7 +83,8 @@ def test_save_wip_goes_on_top_of_the_checkpoint(repo):
 
 
 def test_git_of_the_loop_runs_no_code_from_the_repository(repo, tmp_path):
-    # What an agent could plant from its sandbox: hooks and an fsmonitor run by the loop's git.
+    # What an agent could plant from its sandbox: hooks, an fsmonitor and diff drivers run by the
+    # loop's git.
     marker = tmp_path / "ran"
     script = f"#!{sys.executable}\nimport pathlib; pathlib.Path({str(marker)!r}).touch()\n"
     for name in ("post-index-change", "reference-transaction"):
@@ -82,10 +94,19 @@ def test_git_of_the_loop_runs_no_code_from_the_repository(repo, tmp_path):
     fsmonitor = tmp_path / "fsmonitor"
     fsmonitor.write_text(script)
     fsmonitor.chmod(0o755)
-    subprocess.run(["git", "config", "core.fsmonitor", str(fsmonitor)], cwd=repo, check=True)
+    for key, value in (
+        ("core.fsmonitor", str(fsmonitor)),
+        ("diff.external", str(fsmonitor)),
+        ("diff.planted.textconv", str(fsmonitor)),
+        ("diff.planted.command", str(fsmonitor)),
+    ):
+        subprocess.run(["git", "config", key, value], cwd=repo, check=True)
+    (repo / ".gitattributes").write_text("*.py diff=planted\n")
     (repo / "app.py").write_text("x = 2\n")
 
     git.save_wip(repo, git.wip_ref("3f2a", 1), [], git.head(repo))
+    git.diff(repo, git.head(repo), [".gitattributes"], "--numstat")
+    git.diff(repo, git.head(repo), [".gitattributes"], "-U0")
 
     assert not marker.exists()
     # The planted code is live for a plain git.

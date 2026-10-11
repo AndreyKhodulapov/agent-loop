@@ -7,9 +7,11 @@ repository config: they could be the agent's code. Today the CLI keeps the agent
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import tempfile
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 WIP_REFS = "refs/loop/wip"
@@ -37,6 +39,11 @@ def head(repo: Path) -> str:
     return git(repo, "rev-parse", "HEAD").strip()
 
 
+def branch(repo: Path) -> str:
+    """The current branch; `HEAD` when HEAD is detached."""
+    return git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+
+
 def untracked(repo: Path) -> list[str]:
     """Untracked files that are not ignored, relative to the repository root."""
     return git(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0")[:-1]
@@ -46,22 +53,26 @@ def wip_ref(run_id: str, task_seq: int) -> str:
     return f"{WIP_REFS}/{run_id}/{task_seq}"
 
 
+def new_files(repo: Path, base: str, untracked_before: list[str]) -> list[str]:
+    """Files a step has added on top of `base`, relative to the repository root.
+
+    These are the untracked files that were not there before the step and the files it has
+    added to the index with `git add`. Files that were untracked before the step are the
+    operator's environment and stay out.
+    """
+    added = git(
+        repo, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=A", "-z", base
+    ).split("\0")[:-1]
+    return sorted((set(untracked(repo)) | set(added)) - set(untracked_before))
+
+
 def save_wip(repo: Path, ref: str, untracked_before: list[str], base: str) -> str:
     """Keep the uncommitted work of a step in `ref`; returns the commit.
 
     The commit on top of `base`, the checkpoint of the step, holds the changes of tracked files
-    and the untracked files that appeared after `untracked_before` was taken. Files that were
-    untracked before the step are the operator's environment and stay out. The index and the
-    working tree are not touched.
+    and the files of `new_files`. The index and the working tree are not touched.
     """
-    new_files = sorted(set(untracked(repo)) - set(untracked_before))
-    with tempfile.TemporaryDirectory() as tmp:
-        # A separate index: the real one stays as the agent or the operator left it.
-        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        git(repo, "read-tree", base, env=env)
-        git(repo, "add", "--update", env=env)
-        if new_files:
-            git(repo, "--literal-pathspecs", "add", "--", *new_files, env=env)
+    with _work_index(repo, base, new_files(repo, base, untracked_before)) as env:
         tree = git(repo, "write-tree", env=env).strip()
     # A signing prompt would hang the loop, and the commit is never published.
     commit = git(
@@ -69,3 +80,43 @@ def save_wip(repo: Path, ref: str, untracked_before: list[str], base: str) -> st
     ).strip()
     git(repo, "update-ref", ref, commit)
     return commit
+
+
+def diff(repo: Path, base: str, added: list[str], *options: str, paths: Sequence[str] = ()) -> str:
+    """`git diff` of the work on top of `base`: the changes of tracked files and `added`.
+
+    Renames show as a removal and an addition. Diff drivers and textconv filters are named in the
+    repository config and attributes, so they are never run.
+    """
+    with _work_index(repo, base, added) as env:
+        return git(
+            repo,
+            "--literal-pathspecs",
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--no-color",
+            *options,
+            base,
+            "--",
+            *paths,
+            env=env,
+        )
+
+
+@contextlib.contextmanager
+def _work_index(repo: Path, base: str, added: list[str]) -> Iterator[dict[str, str]]:
+    """Environment of git with a separate index: `base` plus the work in the working tree.
+
+    The real index stays as the agent or the operator left it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        git(repo, "read-tree", base, env=env)
+        git(repo, "add", "--update", env=env)
+        if added:
+            # A file the step has added to the index with `git add -f` may be ignored.
+            git(repo, "--literal-pathspecs", "add", "--force", "--", *added, env=env)
+        yield env
