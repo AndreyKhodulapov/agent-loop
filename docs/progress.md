@@ -449,11 +449,45 @@ uv run ruff check . && uv run ruff format --check .
 
 Предлагаемое сообщение коммита 3.3в: `feat(commands): run gate commands under sandbox-exec, mask .env values in findings`.
 
+### 3.4а Промпт задачи, роли, схема ответа — готово 2026-10-11
+
+Решения человека (2026-10-11, перед шагом; план, раздел 3): шаг 3.4 разбит на 3.4а (промпт) и 3.4б (цикл задачи); fixer — новая сессия с ролью `fixer.md` (карточка, дифф работы, находки gate), а не `--resume` сессии исполнителя.
+
+Сделано:
+1. Новый пакет `src/agent_loop/prompts/`:
+   - файлы правил (английский): `session.md` — общие для исполнителя и fixer'а: что делает цикл после сессии (gate, проверка ослабления тестов, коммит, `install`), сети нет, файлы человека (`.git/`, `.claude/`, `.mcp.json`, конфиги git-hook'ов, `.idea`/`.vscode`/`.devcontainer`, `.npmrc`, секреты) — `Edit` отклоняется, обходить через Bash нельзя, сказать в ответе; CLAUDE.md вложенного каталога прочитать самому; отказ guard'а — записать handoff и закончить; смысл полей ответа. `implementer.md`, `fixer.md` — роли;
+   - `AGENTS.md` — символическая ссылка на `AGENTS.md` в корне репозитория: один источник, в колесо (`uv build`) попадает содержимое;
+   - `system_files(role, settings)` — `session.md`, роль, `AGENTS.md`, `context_file` (если задан) для `agent.Session.system_files`; CLAUDE.md репозитория к ним добавляет адаптер;
+   - `ANSWER_SCHEMA` и `Answer`/`answer(structured_output)`: `status` (`done`, `too_big`, `needs_human`, `blocked`), `summary`, `commit_message` (≤ 72), `notes_for_next` — обязательные; `question`, `split` (список строк). Одна схема на обе роли;
+   - `implementer(task, total, settings, previous, handoff=None, work=None)` — карточка (`goal`, `criteria`, `files`, `tests`, `decisions`; пустые списки — без раздела), размер (`diff_soft_lines`/`diff_hard_lines`), язык комментариев из `doc_lang`, сводка прошлых задач; при возобновлении в новой сессии (`work` не `None`) — handoff или указание идти по WIP-диффу, если handoff нет;
+   - `fixer(task, total, settings, verdict, work)` — карточка, правила, дифф работы, `verdict.reason` и каждая находка в своём блоке;
+   - `previous_tasks(repo, base, notes)` — `git diff --name-status` от HEAD старта прогона до HEAD и новые публичные имена Python-модулей по AST (функции, классы с методами, переменные, `type`; приватные и непарсящиеся файлы — без имён), плюс непустые `notes_for_next` прошлых задач парами (заголовок, заметки);
+   - блоки кода с длинным забором, если в тексте есть свои ```` ``` ````.
+2. План: раздел 3 (решение про fixer и разбиение), раздел 8 (`session.md` и роли), раздел 14 (шаг 4 (а) сделан).
+
+Чего нет:
+- `jsonschema` не добавлен: ответ проверяет сам CLI (`--json-schema` — «structured output validation», находки S3), `answer` только раскладывает его по полям.
+- Формат карточки зафиксирован только докстрингом `prompts`: схему `plan.json` (этап 4) делать с этими пятью полями, все обязательные, списки могут быть пустыми.
+- Сводка прошлых задач — только закоммиченное (до HEAD); имена — только Python.
+- Вызывающего кода нет: всё позовёт цикл задачи в 3.4б.
+
+Тесты: новый `tests/test_prompts.py` — файлы правил обеих ролей существуют и `AGENTS.md` совпадает с корневым, без `context_file` — три файла; поля `Answer` совпадают со схемой (и обязательные), `split` — кортеж; полный текст промпта исполнителя; первая задача без разделов прошлых задач и возобновления; возобновление с handoff и без, длинный забор вокруг диффа с ```` ``` ````; промпт fixer'а; сводка прошлых задач (изменённый, добавленный, удалённый файл, не-Python, непарсящийся `.py`, приватные имена и методы, пустые заметки) и пустая сводка на старте.
+
+Проверка:
+```
+uv run pytest -q            # 271 тест
+uv run ruff check . && uv run ruff format --check .
+```
+
+Предлагаемое сообщение коммита 3.4а: `feat(prompts): build the implementer and fixer prompts, add the role files and the answer schema`.
+
 ## Дальше
 
-### Шаг 3.4 и после
+### Шаг 3.4б и после
 
-3.4 — сборка промпта и цикл fixer; промпт исполнителя должен сказать: `Edit` на `.pre-commit-config.yaml`, `.husky`, `.devcontainer`, `.npmrc` отклоняется — это файлы человека, обходить через Bash нельзя, сообщить в ответе; если в каталоге, где идёт работа, есть свой CLAUDE.md — прочитать его. В 3.4 цикл перед первым шагом задачи делает `store.set_tests(task.id, gates.count_tests(profile, repo))` (если не `None`), после шага — `gates.check(..., tests_before=task.tests)`; `findings` идут fixer'у, `pass` с `flaky_tests` — в отчёт и в задачу для планировщика. 3.5 — коммит кодом. Команда `run` — по контрактам из 3.2. Учесть пробелы из вводной к этапу 3 в плане (handoff после жёсткой остановки, счётчик пауз `timeout`/`guard_error`, `how_to_resume` только после `paused`, абсолютный `LOOP_HOME`).
+3.4б — цикл задачи (новый модуль, например `task`): перед первым шагом задачи `store.set_tests(task.id, gates.count_tests(profile, repo))` (если не `None`); сессия исполнителя — `agent.Session(prompt=prompts.implementer(...), system_files=prompts.system_files("implementer", settings), schema=prompts.ANSWER_SCHEMA, model=model_implementer, effort=effort_implementer, env=profile.env)`; `previous` — `prompts.previous_tasks(repo, <checkpoint первого шага прогона>, [(title, notes_for_next)])`; ответ — `prompts.answer(outcome.result.structured_output)`: `too_big` → `replan` со `split`, `needs_human`/`blocked` → `needs_human`; `done` → `gates.check(..., tests_before=task.tests)`; `fixing` → новая сессия `prompts.fixer(...)` с `system_files("fixer", ...)`, не больше `fix_attempts` (3), затем `replan`; `weakened_tests` второй раз — `needs_human` (раздел 7); `pass` с `flaky_tests` — в отчёт и в задачу для планировщика. `work` для fixer'а и возобновления — `git.diff(repo, checkpoint, git.new_files(...))`. Пробелы из вводной к этапу 3 в плане: handoff читать и удалять после использования (нет — по одному WIP-диффу), счётчик пауз `timeout`/`guard_error` → `replan`, `how_to_resume` только после `paused` (проверкой), абсолютный `LOOP_HOME` в `config.load`.
+
+3.5 — коммит кодом с валидацией сообщения; детерминированные проверки стиля. Команда `run` — по контрактам из 3.2.
 
 Из 3.3в: команда `run` отказывает на старте, если `sandbox-exec` нет (не macOS); коммит (3.5) не должен забирать файлы, созданные gate-командами; профили рабочих репозиториев писать с `uv run --no-sync --no-cache`. Открыто к обсуждению: `needs_human` на изменение `docker-compose*.yml` и `[build-system]` (остаток риска `install`/`up`, раздел 10).
 
