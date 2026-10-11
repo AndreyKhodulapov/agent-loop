@@ -7,8 +7,8 @@ import uuid
 
 import pytest
 
-from agent_loop import git, recovery, step
-from agent_loop.config import Settings
+from agent_loop import commands, git, recovery, step
+from agent_loop.config import Profile, Settings
 from agent_loop.store import Store
 
 ORPHAN = "import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(60)"
@@ -81,6 +81,19 @@ def test_hold_is_exclusive_and_released_on_close(tmp_path):
     second.close()
 
 
+def test_working_directory_is_locked_in_the_git_dir_of_its_worktree(repo, tmp_path):
+    worktree = tmp_path / "worktree"
+    git.git(repo, "worktree", "add", "-q", "-b", "side", str(worktree))
+
+    first = recovery.hold_repo(repo)
+    assert (repo / ".git" / recovery.REPO_LOCK_FILE).is_file()
+    assert recovery.hold_repo(repo) is None
+    other = recovery.hold_repo(worktree)
+    assert other is not None
+    first.close()
+    other.close()
+
+
 def test_dead_run_is_paused_with_its_session_stopped_and_work_saved(home, db, repo, orphan):
     session_id, proc, bystander = orphan
     run_id, task_id = running_run(db, repo)
@@ -107,17 +120,22 @@ def test_dead_run_is_paused_with_its_session_stopped_and_work_saved(home, db, re
     assert (repo / "feature.py").is_file()
 
 
-def test_live_run_is_left_alone(home, db, repo):
+def test_live_run_is_left_alone_and_dead_one_stops_its_services(home, db, repo, tmp_path):
     run_id, _ = running_run(db, repo)
     lock = recovery.hold(lock_path(home, run_id))
+    services = tmp_path / "services.log"
+    profile = Profile(commands={"down": f"echo down {{run_id}} >> {services}"})
+    commands.freeze(profile, step.run_dir(home, run_id), run_id)
 
     assert recovery.reap(db, home) == []
     assert db.run(run_id).status == "running"
+    assert not services.exists()
 
     lock.close()
     assert recovery.reap(db, home) == [run_id]
     assert recovery.reap(db, home) == []
     assert db.run(run_id).status == "paused"
+    assert services.read_text() == f"down {run_id}\n"
 
 
 def test_broken_run_does_not_block_the_others(home, db, repo, tmp_path):

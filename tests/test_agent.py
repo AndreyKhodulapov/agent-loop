@@ -166,7 +166,7 @@ def test_process_streams_events_and_keeps_raw_log(tmp_path, fake_claude, monkeyp
     second.write_text("rule two")
     (tmp_path / "CLAUDE.md").write_text("rule three")
     log_path = tmp_path / "runs" / "r1" / "implement.jsonl"
-    new = session(tmp_path, system_files=(first, second))
+    new = session(tmp_path, system_files=(first, second), env={"POSTGRES_PORT": "55432"})
 
     with agent.Process(new, log_path) as process:
         events = list(process.events())
@@ -180,6 +180,7 @@ def test_process_streams_events_and_keeps_raw_log(tmp_path, fake_claude, monkeyp
     assert call["pgid"] == call["pid"]
     assert "ANTHROPIC_API_KEY" not in call["env"]
     assert call["env"]["PATH"] == os.environ["PATH"]
+    assert call["env"]["POSTGRES_PORT"] == "55432"
 
 
 def test_exit_without_result_reports_stderr(tmp_path, fake_claude):

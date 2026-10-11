@@ -7,7 +7,7 @@ after a reboot.
 
 A dead run is paused the way a live one pauses: its orphaned session is terminated, the work in
 progress goes to the WIP ref of the task and the step is finished as paused, so the task resumes
-the session (`step.how_to_resume`).
+the session (`step.how_to_resume`). Its services are stopped with `down` of the frozen profile.
 """
 
 from __future__ import annotations
@@ -22,12 +22,13 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from agent_loop import agent, git, log, step
+from agent_loop import agent, commands, git, log, step
 from agent_loop.store import TASK_TRANSITIONS, Run, Store
 
 logger = logging.getLogger(__name__)
 
 LOCK_FILE = "lock"
+REPO_LOCK_FILE = "agent-loop.lock"
 DIED = "died"
 
 
@@ -50,11 +51,20 @@ def hold(path: Path) -> TextIO | None:
     return lock
 
 
+def hold_repo(repo: Path) -> TextIO | None:
+    """Lock the working directory for one run; None if another run works in it.
+
+    The lock is in the git directory of the worktree, where the agent cannot write.
+    """
+    return hold(Path(git.git(repo, "rev-parse", "--absolute-git-dir").strip()) / REPO_LOCK_FILE)
+
+
 def reap(store: Store, home: Path) -> list[str]:
     """Pause the running runs whose orchestrator is gone; returns their ids."""
     reaped = []
     for run in store.runs("running"):
-        lock = hold(step.run_dir(home, run.id) / LOCK_FILE)
+        run_dir = step.run_dir(home, run.id)
+        lock = hold(run_dir / LOCK_FILE)
         if lock is None:
             continue
         with lock:
@@ -69,6 +79,9 @@ def reap(store: Store, home: Path) -> list[str]:
                     # must not stop every command.
                     logger.error("cannot save the work in progress, the run stays running: %s", exc)
                     continue
+                # A run that died before freezing its profile has not started the services.
+                if (run_dir / commands.PROFILE_FILE).is_file():
+                    commands.down(commands.frozen(run_dir), Path(run.repo))
         reaped.append(run.id)
     return reaped
 

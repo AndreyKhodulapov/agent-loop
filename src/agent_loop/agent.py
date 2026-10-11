@@ -64,6 +64,8 @@ class Session:
     # followed by the instructions of the working directory.
     system_files: tuple[Path, ...] = ()
     schema: dict | None = None
+    # `[env]` of the repository profile, on top of `ENV_KEYS`.
+    env: dict[str, str] = field(default_factory=dict)
     # Known before the start, so the caller can store it before the process may die.
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     resume: bool = False
@@ -242,7 +244,7 @@ class Process:
         # would be read as an option. The file stays next to the log for debugging.
         prompt_file = log_path.with_suffix(".prompt.md")
         prompt_file.write_text(session.prompt, encoding="utf-8")
-        env = {key: os.environ[key] for key in ENV_KEYS if key in os.environ}
+        env = {key: os.environ[key] for key in ENV_KEYS if key in os.environ} | session.env
         with open(prompt_file, "rb") as stdin, open(self.stderr_path, "ab") as stderr:
             self._proc = subprocess.Popen(
                 command(session, system_file),

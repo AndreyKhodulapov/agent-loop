@@ -320,14 +320,44 @@ uv run loop selfcheck       # 2.1.296: зелёный; в init 5 инструм�
 
 Предлагаемое сообщение коммита 3.1б: `feat(agent): run sessions with --restricted and pass the project CLAUDE.md`.
 
+### 3.2 Профиль репозитория и lock — готово 2026-10-11
+
+Сделано:
+1. `config`: `Profile` — `commands`, `timeouts`, `env`, `deps_files`, `secret_patterns` из `loop.toml`, в `Config.repo` (без профиля — пустой `Profile()`). Неизвестный ключ верхнего уровня, команда не из `config.COMMANDS` (`install`, `fmt`, `lint`, `test`, `test_full`, `up`, `down`, `smoke`) в `[commands]` или `[timeouts]`, не строка в `[commands]`/`[env]`, не целое > 0 в `[timeouts]` (`true` тоже), не список строк в `deps_files`/`secret_patterns` — `ConfigError`. Команда с пустой строкой выбрасывается: шаг пропускается. Значения `[env]` — только строки (`PORT = 5433` без кавычек — ошибка).
+2. Новый модуль `src/agent_loop/commands.py`:
+   - `freeze(profile, run_dir, run_id)` — подстановка `{run_id}` (команды и `[env]`) и `{free_port}` (только `[env]`, каждый — свой порт: сокеты держатся до выбора всех), результат в `runs/<run>/profile.json`. Один раз при старте прогона; `frozen(run_dir)` читает его для `loop resume` и `reap`. `{changed_tests}` остаётся — его подставит gate. Правка `loop.toml` посреди прогона на него не влияет.
+   - `run(profile, name, repo)` — команда через shell в корне репозитория, окружение процесса плюс `[env]`, stdout и stderr вместе; таймаут из `[timeouts]` или `DEFAULT_TIMEOUT` (10 мин). Своя группа процессов: по таймауту, Ctrl+C или SIGTERM оркестратора SIGKILL получает вся группа. Ненулевой код или таймаут — `CommandError` с хвостом вывода (20 строк).
+   - `services(profile, repo)` — контекстный менеджер прогона: `up` на входе, `down` в `finally` (выход по SIGTERM/SIGHUP — `SystemExit`, см. `cli`, — тоже его проходит; упавший `up` тоже). `down(profile, repo)` ошибку только пишет в лог: запущенные сервисы не портят итог прогона.
+3. `recovery`: `hold_repo(repo)` — lock рабочего каталога `<git-dir>/agent-loop.lock` через `hold` (`--absolute-git-dir`: у worktree свой lock). `reap` после паузы мёртвого прогона делает `down` его замороженного профиля, если профиль успели заморозить.
+4. `agent.Session.env` — `[env]` профиля поверх `ENV_KEYS` в окружении `claude`.
+5. План: раздел 9 (замороженный профиль, `up`/`down`, таймаут по умолчанию), раздел 13 (`profile.json`), раздел 14 (шаг 2 сделан).
+
+Контракты для команды `run` (3.3–3.5): порядок старта — `hold_repo` (иначе отказ: в каталоге уже идёт прогон) → `create_run` → `hold(runs/<run>/lock)` → `commands.freeze` → `move_run(running)` → `with commands.services(...)`; `loop resume` — `hold_repo`, `hold`, `commands.frozen` вместо `freeze`. Сессиям передавать `env=profile.env`.
+
+Тесты: в `test_config` — полный профиль, пустой профиль по умолчанию, 11 новых случаев в `test_invalid_profile`; новый `tests/test_commands.py` — подстановка и разные порты, `frozen` возвращает то же, окружение и каталог команды, хвост вывода, таймаут убивает дочерний процесс оболочки (тест падает, если убивать только оболочку), `down` после блока, при `SystemExit` и при упавшем `up`, упавший `down` только в логе; в `test_recovery` — lock в git-каталоге и отдельный у worktree, `reap` делает `down` только мёртвого прогона; в `test_agent` — переменная из `Session.env` доходит до `claude`.
+
+Чего нет:
+- Вызывающего кода: `freeze`/`services`/`hold_repo` вызовет команда `run`.
+- `loop config` команды профиля не показывает — только путь к нему.
+- `{free_port}` в `[commands]` не подставляется и не считается ошибкой — останется в команде как есть.
+- Окружение gate-команд — всё окружение оркестратора плюс `[env]`; тесты агента идут вне sandbox. Решать вместе с gates (3.3), если нужно.
+
+Проверка:
+```
+uv run pytest -q            # 205 тестов
+uv run ruff check . && uv run ruff format --check .
+```
+
+Предлагаемое сообщение коммита 3.2: `feat(commands): load the repository profile, freeze it per run, lock the working directory`.
+
 ## Дальше
 
-### Шаг 3.2. Профиль репозитория и lock
+### Шаг 3.3. `gates`
 
-Бывший шаг 3.1: профиль (`loop.toml`: `[commands]`, `[timeouts]`, `[env]`, `deps_files`, `secret_patterns`, проверка неизвестных ключей), lock рабочего каталога `.git/agent-loop.lock` через `recovery.hold`, `down` профиля в финализаторе и в `reap`. Оценить размер до начала; если больше ~1000 строк — разбить.
+`install` по изменению `deps_files`, команды профиля через `commands.run` с таймаутами, перезапуск упавших тестов, инварианты ветки/HEAD, числа тестов, размера диффа, секретов (`secret_patterns`), `protected.restore`, изменённых конфигов менеджеров git-hook'ов → `needs_human`. Оценить размер до начала; если больше ~1000 строк — разбить. `{changed_tests}` в команде `test` подставляет gate.
 
 ### Потом
 
-3.3 — `gates` (`install` по изменению зависимостей, команды с таймаутами, перезапуск упавших тестов, инварианты ветки/HEAD, числа тестов, размера диффа, секретов, `protected.restore`, изменённых конфигов менеджеров git-hook'ов → `needs_human`). 3.4 — сборка промпта и цикл fixer; промпт исполнителя должен сказать: `Edit` на `.pre-commit-config.yaml`, `.husky`, `.devcontainer`, `.npmrc` отклоняется — это файлы человека, обходить через Bash нельзя, сообщить в ответе; если в каталоге, где идёт работа, есть свой CLAUDE.md — прочитать его. 3.5 — коммит кодом. Учесть пробелы из вводной к этапу 3 в плане (handoff после жёсткой остановки, счётчик пауз `timeout`/`guard_error`, `how_to_resume` только после `paused`, абсолютный `LOOP_HOME`).
+3.4 — сборка промпта и цикл fixer; промпт исполнителя должен сказать: `Edit` на `.pre-commit-config.yaml`, `.husky`, `.devcontainer`, `.npmrc` отклоняется — это файлы человека, обходить через Bash нельзя, сообщить в ответе; если в каталоге, где идёт работа, есть свой CLAUDE.md — прочитать его. 3.5 — коммит кодом. Команда `run` — по контрактам из 3.2. Учесть пробелы из вводной к этапу 3 в плане (handoff после жёсткой остановки, счётчик пауз `timeout`/`guard_error`, `how_to_resume` только после `paused`, абсолютный `LOOP_HOME`).
 
 Все шаги этапа 3 — коммиты в ветке `implementation-loop`.
