@@ -776,12 +776,14 @@ uv run ruff check . && uv run ruff format --check .
 - тесты поднимают Postgres через testcontainers (под gate не работает — нужен docker socket), но `tests/conftest.py` берёт `TEST_DATABASE_URL`, если он задан: базу поднимает `up` профиля, тесты ходят на localhost (sandbox это разрешает);
 - `docker-compose.yml` не годится для `up`: фиксированные `container_name` столкнутся со стеком человека — `docker run`/`docker rm`;
 - CLAUDE.md в репозитории нет — нужен `context_file`; `.env` нет, `tech_task.md` в `.gitignore`;
-- Docker Desktop на момент записи не был запущен — запустить перед прогоном.
+- Docker Desktop на момент записи не был запущен — запустить перед прогоном;
+- `main` не проходит `ruff format --check`: 12 файлов (`app/main.py`, `app/core/pagination.py`, `app/repositories/dish.py`, `app/repositories/order.py`, `app/services/order.py`, обе миграции, `tests/test_app.py`, `test_body_limit.py`, `test_dishes.py`, `test_migrations.py`, `test_orders.py`). Gate запускает `fmt` по всему репозиторию, а коммит задачи забирает все изменённые отслеживаемые файлы (`git add --update`): первый коммит цикла унёс бы с собой переформатирование этих 12 файлов, `Verdict.lines` их бы не посчитал (ревью 2026-10-12, находка 1).
 
 Находка до прогона: каждый `{free_port}` в `[env]` получает свой порт, а один порт нужен в двух местах (URL тестов и `up`). Обход в профиле — порт только в `TEST_DATABASE_URL`, `up` достаёт его shell-подстановкой. Решить после прогона, нужна ли именованная подстановка порта.
 
 Шаги:
 1. Подготовка (агент):
+   - человек форматирует `main` foodtech до создания ветки прогона: `uv run ruff format .`, коммит `style: format with ruff`; агент проверяет `ruff format --check .` зелёный, иначе прогон не стартует. Так цикл работает в чистом поле, а поведение «`fmt` трогает файлы вне работы» остаётся видимым, не замаскированным `fmt = ""`;
    - `~/.agent-loop/.env` (его ещё нет): `LOOP_KNOWLEDGE_DIR=~/andrey_personal_projects/MY-KNOWLEDGE-DATABASE/USEFUL_JOB_NOTES/agent_runs`;
    - профиль `agent_runs/api-service-foodtech/loop.toml` (черновик ниже) и рядом `CLAUDE.md` проекта: слои, тесты и `ruff` через `uv run --no-sync --no-cache` (кэш uv в `$HOME` в sandbox сессии закрыт), `TEST_DATABASE_URL` уже в окружении, комментарии на английском;
    - ручная проверка команд профиля: `install`, `up`, `collect` и `test` под sandbox gate (`commands.run`), `down`, контейнер удалён; `loop config` показывает профиль; `loop selfcheck` зелёный.
