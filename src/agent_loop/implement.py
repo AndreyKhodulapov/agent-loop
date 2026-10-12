@@ -5,7 +5,8 @@ Every session, gate and commit is a step in the store; a gate keeps its verdict 
 its step, so the fixer can get the findings without running the commands again. The task moves
 through implementing, gating and fixing until its work passes the gate and is committed, or until
 it goes to a human, back to the planner or pauses. A paused step leaves the work in progress in
-the WIP ref of the task.
+the WIP ref of the task. A commit message that breaks the rules goes back to its session once;
+the answer goes through the gate again, as the session may have changed the files.
 
 A stopped task goes on from its status and its last step: a paused session is resumed or
 replaced by a new one that starts from the handoff, a step whose end the loop has not taken yet
@@ -151,9 +152,10 @@ class _Task:
         if last.kind == GATE:
             verdict = _verdict(last.detail)
             # Still gating: the verdict has passed, or the run stopped before it moved the task.
-            if self.status == "gating":
-                verdict = self._after_gate(verdict)
-            return None if verdict is None else self._loop(self._fixer(verdict))
+            upcoming = (
+                self._after_gate(verdict) if self.status == "gating" else self._fixer(verdict)
+            )
+            return None if upcoming is None else self._loop(upcoming)
         # After a session the task is gating once its end is taken.
         if self.status != "gating" and not self._take(last):
             return None
@@ -201,10 +203,9 @@ class _Task:
                 if not to_gate:
                     return None
             self._enter("gating")
-            verdict = self._after_gate(self._gate())
-            if verdict is None:
+            upcoming = self._after_gate(self._gate())
+            if upcoming is None:
                 return None
-            upcoming = self._fixer(verdict)
 
     def _implementer(
         self, previous: str, handoff: str | None = None, work: str | None = None
@@ -308,12 +309,11 @@ class _Task:
         self.untracked = [*self.untracked, *verdict.artifacts]
         return verdict
 
-    def _after_gate(self, verdict: gates.Verdict) -> gates.Verdict | None:
-        """Move the task by the verdict of its last step, the gate; returns the verdict for the
-        fixer, None when the task is through with the gate one way or another."""
+    def _after_gate(self, verdict: gates.Verdict) -> _Session | None:
+        """Move the task by the verdict of its last step, the gate; returns the next session of
+        the task, None when the task is through with the loop one way or another."""
         if verdict.status == "pass":
-            self._commit()
-            return None
+            return self._commit()
         if verdict.status == "paused":
             self._pause(verdict.reason)
             return None
@@ -325,7 +325,8 @@ class _Task:
                 for s in steps[:-1]
                 if s.kind == GATE and s.detail["reason"] == gates.WEAKENED_TESTS
             ]
-            fixes = [s for s in steps if s.kind == FIX and s.outcome == "completed"]
+            # A fixer asked for another commit message answers twice in one session.
+            fixes = {s.session_id for s in steps if s.kind == FIX and s.outcome == "completed"}
             if reason == gates.WEAKENED_TESTS and weakened:
                 logger.error("the tests are weakened again, a human has to look")
                 status = "needs_human"
@@ -333,15 +334,20 @@ class _Task:
                 logger.error("%d fixes have not passed the gate", len(fixes))
                 status, reason = "replan", FIX_ATTEMPTS
         self._move(status, reason)
-        return verdict if status == "fixing" else None
+        return self._fixer(verdict) if status == "fixing" else None
 
-    def _commit(self) -> None:
-        """Commit the work that has passed the gate with the message of the last session."""
+    def _commit(self) -> _Session | None:
+        """Commit the work that has passed the gate with the message of the last session; returns
+        the session to ask for another message when this one breaks the rules."""
         added = self._new_files()
         if not git.diff(self.repo, self.checkpoint, added, "--name-only"):
             logger.error("the session has answered done without changing anything")
             self._move("needs_human", NO_CHANGES)
-            return
+            return None
+        steps = self.store.steps(self.task.id)
+        message = last_answer(steps)["commit_message"]
+        if not gates.commit_message_ok(message):
+            return self._ask_message(steps, message)
         step_id = self.store.start_step(self.task.id, COMMIT, self.checkpoint, self.untracked)
         with log.scope(stage=COMMIT):
             # The verdict may be from before the run stopped, and the operator may have moved
@@ -351,13 +357,23 @@ class _Task:
                 logger.error("%s, pausing", moved)
                 self.store.finish_step(step_id, "paused", {"reason": gates.BRANCH_CHANGED})
                 self._pause(gates.BRANCH_CHANGED)
-                return
-            answer = last_answer(self.store.steps(self.task.id))
-            message = gates.commit_message(answer["commit_message"], self.task.title)
+                return None
             commit = git.commit(self.repo, self.checkpoint, added, message)
             logger.info("committed %s %s", commit[:12], message)
         self.store.finish_step(step_id, "completed", {"commit": commit, "message": message})
         self._move("committed")
+        return None
+
+    def _ask_message(self, steps: list[Step], message: str) -> _Session | None:
+        sessions = [s for s in steps if s.kind in (IMPLEMENT, FIX)]
+        last = sessions[-1]
+        # A session answers once, unless it has been asked for another message already.
+        if any(s.session_id == last.session_id and s.outcome == "completed" for s in sessions[:-1]):
+            logger.error("the commit message %r still breaks the rules", message)
+            self._move("needs_human", "commit_message")
+            return None
+        logger.warning("the commit message %r breaks the rules, asking the session again", message)
+        return _Session(last.kind, prompts.commit_message(message), last.session_id)
 
     def _pause(self, reason: str) -> None:
         ref = git.wip_ref(self.run.id, self.task.seq)

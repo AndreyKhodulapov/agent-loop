@@ -133,6 +133,20 @@ def fixer(
     return "\n\n".join(sections)
 
 
+def commit_message(proposed: str) -> str:
+    """The prompt that asks a session which has answered done for another commit message."""
+    return "\n\n".join(
+        [
+            "agent-loop cannot commit your work with the commit message of your answer:",
+            _fenced(proposed),
+            "The message is one line of printable ASCII in English, `type(module): gist of"
+            " changes`, at most 72 characters, with no co-author lines and no words Claude,"
+            ' Anthropic or "generated with". The work has passed the checks: do not change the'
+            " files, answer as before with such a message.",
+        ]
+    )
+
+
 def previous_tasks(repo: Path, base: str, notes: list[tuple[str, str]]) -> str:
     """What the previous tasks of the run have done, for the prompt of the next one.
 

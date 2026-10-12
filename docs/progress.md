@@ -723,14 +723,31 @@ uv run ruff check . && uv run ruff format --check .
 
 Предлагаемое сообщение: `fix(runner): stop the services once when a run fails, log git and store errors in one line`.
 
-#### Коммит 3. Сообщение коммита (находка 3) — следующая сессия
+#### Коммит 3. Сообщение коммита (находка 3) — готово 2026-10-12
 
-Запасное `feat: {title}` не проходит собственный `COMMIT_MESSAGE` никогда (нет `(module)`), даже с английским заголовком. Вместо него: сообщение нарушает правила — продолжить ту же сессию (`--resume`, механизм `_Session.session_id`) коротким запросом с правилами и плохим сообщением; второй ответ проверяется теми же правилами, снова плохой — `needs_human(commit_message)`. Шаг сессии — как у остальных, бюджет проверяется. Убрать `gates.commit_message`-fallback; тесты в `test_implement` (исправлено со второго раза, не исправлено) и `test_gates` (правила).
+Запасное `feat: {title}` не проходило собственный `COMMIT_MESSAGE` никогда (нет `(module)`). Сделано:
+1. `gates.commit_message_ok(message) -> bool` вместо `gates.commit_message(proposed, title)`: правила те же, шаблона нет.
+2. `implement._commit`: после проверки «работы нет» и до шага `commit` — проверка сообщения последней сессии. Плохое — `_ask_message`: `_Session` того же вида (`implement`/`fix`) с `session_id` последней сессии (`--resume`) и промптом `prompts.commit_message(proposed)` (плохое сообщение в ограде, правила, «файлы не менять»). Сессия идёт через `_loop` как любая: бюджет, `_enter` (`gating → implementing/fixing`), `_take`, затем gate заново — сессия с инструментами могла тронуть файлы, коммитить непроверенное нельзя. Сессия, у которой уже есть завершённый шаг (её уже переспрашивали), снова с плохим сообщением — `needs_human(commit_message)`.
+3. `_after_gate` возвращает следующую сессию (`fixer` или переспрос) вместо вердикта; `_loop` и `resume` берут её. Остановка между gate и переспросом безопасна: `resume` с последним шагом `gate` (pass) снова идёт в `_commit` и переспрашивает.
+4. Попытки fixer'а — число разных `session_id` завершённых шагов `fix`: переспрошенный fixer не съедает попытку.
+5. План: раздел 3 (решение 2026-10-12), раздел 7 (строка «Сообщение коммита»).
 
-#### Коммит 4. Код цикла против `AGENTS.md` (находки 7–9) — после коммита 3
+Тесты: `test_gates::test_commit_message_keeps_the_rules` (параметризация `bool`, граница 72 символа, пустое). `test_implement`: дубль `Co-Authored-By` (находка 8) заменён на `..._goes_back_to_its_session` (тот же `session_id`, `resume`, плохое сообщение в промпте, шаги `implement, gate, implement, gate, commit`), `..._again_goes_to_a_human` (коммита нет), `test_fixer_asked_for_another_message_has_not_used_up_a_fix` (на подсчёте шагов — `replan`).
+
+Известный остаток: переспрошенная сессия, вставшая на паузу с полным контекстом, продолжится по handoff; для fixer'а это промпт с находками последнего gate, а он `pass`. Редко (нужен полный контекст на однострочном ответе), правок нет.
+
+Проверка:
+```
+uv run pytest -q            # 374 теста
+uv run ruff check . && uv run ruff format --check .
+```
+
+Предлагаемое сообщение: `fix(implement): ask the session again for a commit message that breaks the rules`.
+
+#### Коммит 4. Код цикла против `AGENTS.md` (находки 7–9) — следующая сессия
 
 1. Правило остаётся. 15 имён из находки 7 (и новые с 1–2 использованиями, если появятся): одноразовые коды причин — литералами на месте, regex и `ANSWERS` — внутрь функций. Перед правкой прогнать `_style` на `git diff main...HEAD`.
-2. Убрать дубль `Co-Authored-By` из `test_implement` (после коммита 3 проверить, что осталось от теста); докстринги `_Session`, `_work`, `_verdict`, `_wait`, `_head`.
+2. Дубль `Co-Authored-By` из `test_implement` убран в коммите 3; докстринги `_Session`, `_work`, `_verdict`, `_wait`, `_head`.
 3. `_style`: не считать markdown-выделением `*...*` внутри обратных кавычек; тест.
 
 Для подготовки испытания (3а.2) учесть: агент не может править `.env.example` (`Read(.env*)` запрещён, `Edit` без чтения не пройдёт, sandbox закрывает запись в `.env*` из Bash) — в карточке задачи 1 сказать, где документировать `ADMIN_TOKEN` (README). Новый файл `.env*` от агента (`Write` его не запрещает) теперь останавливает задачу в `needs_human(secret_file)`.

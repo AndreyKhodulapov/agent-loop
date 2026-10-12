@@ -225,13 +225,55 @@ def test_files_the_gate_commands_leave_are_not_the_work(env, monkeypatch):
     assert git.untracked(env.repo) == ["report.xml"]
 
 
-def test_commit_message_that_breaks_the_rules_is_made_of_the_title(env, monkeypatch):
+def test_commit_message_that_breaks_the_rules_goes_back_to_its_session(env, monkeypatch):
     message = "feat(app): x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
-    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered(commit_message=message)))
+    env.script(
+        monkeypatch,
+        (write("app.py", "x = 'fixed'\n"), answered(commit_message=message)),
+        (None, answered(commit_message="fix(app): fix x")),
+    )
+
+    assert env.start() is None
+
+    assert env.task().status == "committed"
+    assert git.git(env.repo, "log", "-1", "--format=%B").strip() == "fix(app): fix x"
+    first, again = env.sessions
+    assert (again.session_id, again.resume) == (first.session_id, True)
+    assert "Co-Authored-By: Claude" in again.prompt
+    # The session could have changed the files, its answer is checked again.
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "implement", "gate", "commit"]
+
+
+def test_commit_message_that_breaks_the_rules_again_goes_to_a_human(env, monkeypatch):
+    head = git.head(env.repo)
+    env.script(
+        monkeypatch,
+        (write("app.py", "x = 'fixed'\n"), answered(commit_message="feat: x")),
+        (None, answered(commit_message="feat: x")),
+    )
+
+    assert env.start() is None
+
+    assert (env.task().status, env.task().reason) == ("needs_human", "commit_message")
+    assert git.head(env.repo) == head
+    assert [s.kind for s in env.steps()] == ["implement", "gate", "implement", "gate"]
+
+
+def test_fixer_asked_for_another_message_has_not_used_up_a_fix(env, monkeypatch):
+    env.script(
+        monkeypatch,
+        (None, answered()),
+        (write("app.py", "x = 'fixed'\n"), answered(commit_message="feat: x")),
+        (write("app.py", "x = 2\n"), answered()),
+        (write("app.py", "x = 'fixed'\n"), answered()),
+    )
 
     env.start()
 
-    assert git.git(env.repo, "log", "-1", "--format=%B").strip() == "feat: Fix x"
+    assert env.task().status == "committed"
+    _, fixer, asked, second_fixer = env.sessions
+    assert asked.session_id == fixer.session_id
+    assert second_fixer.session_id != fixer.session_id
 
 
 def test_done_without_changes_goes_to_a_human(env, monkeypatch):

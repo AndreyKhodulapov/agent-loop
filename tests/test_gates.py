@@ -573,21 +573,19 @@ def test_count_tests_needs_a_number_from_the_collect_command(repo):
 
 
 @pytest.mark.parametrize(
-    ("proposed", "message"),
+    ("message", "ok"),
     [
-        ("feat(gates): check the commit message", "feat(gates): check the commit message"),
-        ("fix(prompts/session.md): name the rules", "fix(prompts/session.md): name the rules"),
-        ("feat: no module", "feat: Fix x"),
-        ("feat(gates): проверить сообщение", "feat: Fix x"),
-        ("feat(gates): x\n\nCo-Authored-By: someone", "feat: Fix x"),
-        ("feat(gates): x, generated with a tool", "feat: Fix x"),
-        ("feat(agent): talk to Claude", "feat: Fix x"),
-        ("feat(gates): " + "x" * 60, "feat: Fix x"),
+        ("feat(gates): check the commit message", True),
+        ("fix(prompts/session.md): name the rules", True),
+        ("feat(gates): " + "x" * 59, True),
+        ("feat(gates): " + "x" * 60, False),
+        ("", False),
+        ("feat: no module", False),
+        ("feat(gates): проверить сообщение", False),
+        ("feat(gates): x\n\nCo-Authored-By: someone", False),
+        ("feat(gates): x, generated with a tool", False),
+        ("feat(agent): talk to Claude", False),
     ],
 )
-def test_commit_message_that_breaks_the_rules_is_made_of_the_title(proposed, message):
-    assert gates.commit_message(proposed, "Fix x") == message
-
-
-def test_commit_message_made_of_a_long_title_is_cut():
-    assert gates.commit_message("", "x" * 100) == "feat: " + "x" * 66
+def test_commit_message_keeps_the_rules(message, ok):
+    assert gates.commit_message_ok(message) is ok

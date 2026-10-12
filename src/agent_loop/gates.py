@@ -184,18 +184,13 @@ def check(
     return Verdict(status, reason, findings, secrets, lines, artifacts)
 
 
-def commit_message(proposed: str, title: str) -> str:
-    """The message to commit the task with: the one its session has proposed if it keeps the rules
-    of `session.md`, otherwise one made of the task title."""
-    if (
-        len(proposed) <= 72
-        and COMMIT_MESSAGE.fullmatch(proposed)
-        and not ATTRIBUTION.search(proposed)
-    ):
-        return proposed
-    message = f"feat: {title}"[:72]
-    logger.warning("the proposed commit message %r breaks the rules, using %r", proposed, message)
-    return message
+def commit_message_ok(message: str) -> bool:
+    """Whether a task can be committed with `message`: it keeps the rules of `session.md`."""
+    return (
+        len(message) <= 72
+        and COMMIT_MESSAGE.fullmatch(message) is not None
+        and not ATTRIBUTION.search(message)
+    )
 
 
 def secret_files(paths: list[str], profile: Profile) -> tuple[str, ...]:
