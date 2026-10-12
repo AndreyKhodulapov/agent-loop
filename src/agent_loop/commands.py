@@ -30,6 +30,7 @@ from agent_loop.config import Profile
 logger = logging.getLogger(__name__)
 
 PROFILE_FILE = "profile.json"
+SERVICES_FILE = "services"
 DEFAULT_TIMEOUT = 10 * 60
 # The fixer gets the failures from it: a test report puts them at the end.
 OUTPUT_TAIL_LINES = 200
@@ -262,8 +263,14 @@ def run(profile: Profile, name: str, repo: Path) -> str:
 
 
 @contextlib.contextmanager
-def services(profile: Profile, repo: Path) -> Iterator[None]:
-    """`up` of the profile before the block, `down` after it, however the block ends."""
+def services(profile: Profile, repo: Path, run_dir: Path) -> Iterator[None]:
+    """`up` of the profile before the block, `down` after it, however the block ends.
+
+    `runs/<run>/services` is there while the services may be up: `reap` stops them only for a
+    run that has died without `down`.
+    """
+    marker = run_dir / SERVICES_FILE
+    marker.touch()
     try:
         if "up" in profile.commands:
             logger.info("starting the services")
@@ -271,6 +278,7 @@ def services(profile: Profile, repo: Path) -> Iterator[None]:
         yield
     finally:
         down(profile, repo)
+        marker.unlink()
 
 
 def down(profile: Profile, repo: Path) -> None:

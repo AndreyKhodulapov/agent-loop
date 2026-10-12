@@ -7,9 +7,9 @@ import signal
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_loop import agent, config, log, recovery, runner, selfcheck
+from agent_loop import agent, config, git, log, recovery, runner, selfcheck
 from agent_loop.commands import CommandError
-from agent_loop.store import DB_FILE, Store
+from agent_loop.store import DB_FILE, Store, StoreError
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +112,17 @@ def _resume(args: argparse.Namespace, cfg: config.Config) -> int:
 def _work(cfg: config.Config, run: Callable[[], bool]) -> int:
     try:
         return 0 if run() else 1
-    # A broken profile, a failed `install` or `up` stop the run as well as a refusal to start.
-    except (runner.RunError, agent.AgentError, config.ConfigError, CommandError) as exc:
+    # A broken profile, a failed `install` or `up`, git or the store failing under the run, a
+    # removed copy of the protected files stop the run as well as a refusal to start.
+    except (
+        runner.RunError,
+        agent.AgentError,
+        config.ConfigError,
+        CommandError,
+        git.GitError,
+        StoreError,
+        FileNotFoundError,
+    ) as exc:
         logger.error("%s", exc)
         return 1
     except KeyboardInterrupt:

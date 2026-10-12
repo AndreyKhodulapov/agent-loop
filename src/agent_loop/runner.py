@@ -101,7 +101,7 @@ def start(cfg: Config, tasks_file: Path) -> bool:
             if "install" in profile.commands:
                 logger.info("installing the dependencies")
                 commands.run(profile, "install", repo)
-            with commands.services(profile, repo):
+            with commands.services(profile, repo, run_dir):
                 return _work(cfg, store, store.run(run_id), profile)
 
 
@@ -130,7 +130,7 @@ def resume(cfg: Config, run_id: str | None) -> bool:
             profile = commands.frozen(run_dir)
             store.move_run(run.id, "running")
             logger.info("resuming the run paused for %s", run.reason)
-            with commands.services(profile, repo):
+            with commands.services(profile, repo, run_dir):
                 return _work(cfg, store, run, profile)
 
 

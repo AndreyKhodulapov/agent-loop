@@ -7,7 +7,8 @@ after a reboot.
 
 A dead run is paused the way a live one pauses: its orphaned session is terminated, the work in
 progress goes to the WIP ref of the task and the step is finished as paused, so the task resumes
-the session (`step.how_to_resume`). Its services are stopped with `down` of the frozen profile.
+the session (`step.how_to_resume`). Services it has left up are stopped with `down` of the frozen
+profile.
 """
 
 from __future__ import annotations
@@ -79,9 +80,10 @@ def reap(store: Store, home: Path) -> list[str]:
                     # must not stop every command.
                     logger.error("cannot save the work in progress, the run stays running: %s", exc)
                     continue
-                # A run that died before freezing its profile has not started the services.
-                if (run_dir / commands.PROFILE_FILE).is_file():
+                services = run_dir / commands.SERVICES_FILE
+                if services.is_file():
                     commands.down(commands.frozen(run_dir), Path(run.repo))
+                    services.unlink()
         reaped.append(run.id)
     return reaped
 

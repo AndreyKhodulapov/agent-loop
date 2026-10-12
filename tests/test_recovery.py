@@ -120,12 +120,17 @@ def test_dead_run_is_paused_with_its_session_stopped_and_work_saved(home, db, re
     assert (repo / "feature.py").is_file()
 
 
-def test_live_run_is_left_alone_and_dead_one_stops_its_services(home, db, repo, tmp_path):
+# A run that stops on an error in the process has stopped its services on the way out.
+@pytest.mark.parametrize("left_up", [True, False])
+def test_live_run_is_left_alone_and_dead_one_stops_its_services(home, db, repo, tmp_path, left_up):
     run_id, _ = running_run(db, repo)
     lock = recovery.hold(lock_path(home, run_id))
     services = tmp_path / "services.log"
     profile = Profile(commands={"down": f"echo down {{run_id}} >> {services}"})
     commands.freeze(profile, step.run_dir(home, run_id), run_id)
+    marker = step.run_dir(home, run_id) / commands.SERVICES_FILE
+    if left_up:
+        marker.touch()
 
     assert recovery.reap(db, home) == []
     assert db.run(run_id).status == "running"
@@ -135,7 +140,10 @@ def test_live_run_is_left_alone_and_dead_one_stops_its_services(home, db, repo, 
     assert recovery.reap(db, home) == [run_id]
     assert recovery.reap(db, home) == []
     assert db.run(run_id).status == "paused"
-    assert services.read_text() == f"down {run_id}\n"
+    assert services.exists() == left_up
+    if left_up:
+        assert services.read_text() == f"down {run_id}\n"
+    assert not marker.exists()
 
 
 def test_broken_run_does_not_block_the_others(home, db, repo, tmp_path):

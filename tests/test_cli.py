@@ -10,7 +10,7 @@ import pytest
 from fakes import INIT, RESULT, read_calls
 
 from agent_loop import agent, cli, config, git, implement, selfcheck, step
-from agent_loop.store import Store
+from agent_loop.store import Store, StoreError
 
 
 @pytest.fixture(autouse=True)
@@ -91,17 +91,32 @@ def test_run_commits_the_work_of_its_tasks(isolated, in_repo, tmp_path, monkeypa
         assert [task.status for task in store.tasks(run.id)] == ["committed"]
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        config.ConfigError("collect: no number in the last line of the output: ''"),
+        git.GitError("git commit-tree: Author identity unknown"),
+        StoreError("no run abc"),
+        FileNotFoundError("no copy of the protected files in runs/abc/protected"),
+    ],
+)
 def test_run_stopped_by_an_error_is_paused_as_a_dead_one(
-    isolated, in_repo, tmp_path, monkeypatch, capsys
+    isolated, in_repo, tmp_path, monkeypatch, capsys, error
 ):
     def broken(*args):
-        raise config.ConfigError("collect: no number in the last line of the output: ''")
+        raise error
 
     monkeypatch.setattr(implement, "start", broken)
+    services = tmp_path / "services.log"
+    profile = tmp_path / "loop.toml"
+    profile.write_text(
+        f'[commands]\nup = "echo up >> {services}"\ndown = "echo down >> {services}"\n'
+    )
 
-    assert cli.main(["run", str(tmp_path / "tasks.json")]) == 1
+    assert cli.main(["--profile", str(profile), "run", str(tmp_path / "tasks.json")]) == 1
 
-    assert "collect: no number" in capsys.readouterr().err
+    assert str(error) in capsys.readouterr().err
+    assert services.read_text() == "up\ndown\n"
     with contextlib.closing(Store(isolated / "loop.db")) as store:
         [run] = store.runs("paused")
         assert run.reason == "died"

@@ -707,12 +707,23 @@ uv run ruff check . && uv run ruff format --check .
 
 Предлагаемое сообщение: `fix(gates): stop on new secret files, ignore env values the repository already has`.
 
-#### Коммит 2. Путь ошибки прогона (находки 4, 5) — следующая сессия
+#### Коммит 2. Путь ошибки прогона (находки 4, 5) — готово 2026-10-12
 
-1. `commands.services`: `down` только при нормальном выходе из блока (`yield; down(...)` без `finally`); все пути с исключением — ошибка, Ctrl+C, SIGTERM — проходят через `reap` из `cli._work`, который ставит прогон на паузу и зовёт `down`. Так задумано в `runner`: прогон, остановленный ошибкой, — для `reap`. Обновить докстринги `services` и `runner`. Тест в `test_cli`: ошибка посреди прогона — `down` ровно один раз.
-2. `cli._work`: `git.GitError`, `StoreError`, `FileNotFoundError` — одной строкой в лог, как остальные. Тест на `GitError`.
+Отступление от плана коммита: «`down` только при нормальном выходе из блока, остальное — `reap`» не годится. SIGTERM/SIGHUP во время ожидания лимитов (`runner._wait`) приходит, когда прогон уже `paused(budget)`; `reap` берёт только `running` — контейнер остался бы поднятым. Сделано иначе:
+1. `commands.services(profile, repo, run_dir)`: метка `runs/<run>/services` создаётся до `up` и удаляется после `down` в `finally` (`down` по-прежнему при любом выходе). `recovery.reap` зовёт `down` только при метке и удаляет её; раньше условием был замороженный профиль. Метка остаётся только у процесса, умершего без `finally` (`kill -9`, перезагрузка). Ошибка посреди прогона: `down` из `finally`, `reap` ставит прогон на паузу без второго `down`. План, раздел 9 (строка про `up`/`down`), и докстринг `recovery` обновлены.
+2. `cli._work`: `git.GitError`, `StoreError`, `FileNotFoundError` (копии защищённых файлов нет, `protected.restore`) — одной строкой в лог и код 1, как остальные; `reap` прогон доубирает.
 
-#### Коммит 3. Сообщение коммита (находка 3) — после коммита 2
+Тесты: `test_cli::test_run_stopped_by_an_error_is_paused_as_a_dead_one` параметризован по `ConfigError`, `GitError`, `StoreError`, `FileNotFoundError` и идёт с профилем `up`/`down`: лог — `up\ndown\n` (на старом коде — `up\ndown\ndown\n` и traceback для трёх новых типов). `test_recovery::test_live_run_is_left_alone_and_dead_one_stops_its_services` параметризован по метке: без неё `down` не зовётся; метка после `reap` удалена. `test_commands`: метка есть внутри блока и нет после.
+
+Проверка:
+```
+uv run pytest -q            # 371 тест
+uv run ruff check . && uv run ruff format --check .
+```
+
+Предлагаемое сообщение: `fix(runner): stop the services once when a run fails, log git and store errors in one line`.
+
+#### Коммит 3. Сообщение коммита (находка 3) — следующая сессия
 
 Запасное `feat: {title}` не проходит собственный `COMMIT_MESSAGE` никогда (нет `(module)`), даже с английским заголовком. Вместо него: сообщение нарушает правила — продолжить ту же сессию (`--resume`, механизм `_Session.session_id`) коротким запросом с правилами и плохим сообщением; второй ответ проверяется теми же правилами, снова плохой — `needs_human(commit_message)`. Шаг сессии — как у остальных, бюджет проверяется. Убрать `gates.commit_message`-fallback; тесты в `test_implement` (исправлено со второго раза, не исправлено) и `test_gates` (правила).
 

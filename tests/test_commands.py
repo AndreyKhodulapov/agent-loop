@@ -156,15 +156,17 @@ def services_profile(up="echo up >> services.log", down="echo down >> services.l
 def test_services_are_up_for_the_block_and_down_after_it(tmp_path):
     log = tmp_path / "services.log"
 
-    with commands.services(services_profile(), tmp_path):
+    with commands.services(services_profile(), tmp_path, tmp_path):
         assert log.read_text() == "up\n"
+        assert (tmp_path / commands.SERVICES_FILE).is_file()
 
     assert log.read_text() == "up\ndown\n"
+    assert not (tmp_path / commands.SERVICES_FILE).exists()
 
 
 def test_services_go_down_when_the_loop_is_terminated(tmp_path):
     # SIGTERM and SIGHUP of the loop become SystemExit, see `cli`.
-    with pytest.raises(SystemExit), commands.services(services_profile(), tmp_path):
+    with pytest.raises(SystemExit), commands.services(services_profile(), tmp_path, tmp_path):
         raise SystemExit(128 + 15)
 
     assert (tmp_path / "services.log").read_text() == "up\ndown\n"
@@ -175,7 +177,7 @@ def test_services_go_down_when_up_fails(tmp_path):
 
     with (
         pytest.raises(commands.CommandError, match="up: exit code 1"),
-        commands.services(profile, tmp_path),
+        commands.services(profile, tmp_path, tmp_path),
     ):
         pytest.fail("the block must not run")
 
@@ -185,7 +187,7 @@ def test_services_go_down_when_up_fails(tmp_path):
 def test_failed_down_is_logged_and_does_not_hide_the_result(tmp_path, caplog):
     profile = services_profile(down="echo compose is gone; exit 1")
 
-    with commands.services(profile, tmp_path):
+    with commands.services(profile, tmp_path, tmp_path):
         pass
 
     assert "cannot stop the services: down: exit code 1\ncompose is gone" in caplog.text
