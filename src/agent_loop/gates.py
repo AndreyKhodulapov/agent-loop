@@ -39,35 +39,11 @@ logger = logging.getLogger(__name__)
 
 BRANCH_CHANGED = "branch_changed"
 HOOK_CONFIG = "hook_config"
-DIFF_TOO_BIG = "diff_too_big"
 WEAKENED_TESTS = "weakened_tests"
 FLAKY_TESTS = "flaky_tests"
 SECRET_FILE = "secret_file"
 SECRET_IN_DIFF = "secret_in_diff"
 STYLE = "style"
-
-# Any name with credentials in it would take `test_credentials.py` for a secret.
-SECRET_PATTERNS = (
-    ".env*",
-    "*.pem",
-    "*.key",
-    "*credentials",
-    "*credentials*.json",
-    "*credentials*.yaml",
-    "*credentials*.yml",
-)
-TEST_DIRS = {"test", "tests", "__tests__"}
-TEST_NAME = re.compile(r"^test_|_test\.|\.(test|spec)\.")
-# pytest, unittest, Go and JavaScript test frameworks.
-SKIP = re.compile(
-    r"\b(mark\.(skip|skipif|xfail)|pytest\.(skip|xfail)|unittest\.skip\w*|skipTest"
-    r"|t\.Skip\w*|xit|xdescribe|xtest|(it|test|describe)\.skip)\b"
-)
-ASSERT = re.compile(r"\b(assert\w*|expect\(|require\.|t\.(Error|Fatal)\w*)")
-# `type(module): gist`, printable ASCII: English, one line.
-COMMIT_MESSAGE = re.compile(r"[a-z]+\([\w./-]+\): [ -~]+", re.ASCII)
-ATTRIBUTION = re.compile(r"co-authored-by|claude|anthropic|generated with", re.IGNORECASE)
-SECRET_KEY = re.compile(r"KEY|TOKEN|SECRET|PASS|PWD|CREDENTIAL|AUTH|DSN|PRIVATE", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -140,7 +116,7 @@ def check(
     if lines > settings.diff_hard_lines:
         finding = f"the diff has {lines} lines, more than {settings.diff_hard_lines}"
         logger.error("%s, the task goes back to the planner", finding)
-        return Verdict("replan", DIFF_TOO_BIG, (finding,), secrets, lines)
+        return Verdict("replan", "diff_too_big", (finding,), secrets, lines)
     if lines > settings.diff_soft_lines:
         logger.warning("the diff has %d lines, more than %d", lines, settings.diff_soft_lines)
 
@@ -186,16 +162,29 @@ def check(
 
 def commit_message_ok(message: str) -> bool:
     """Whether a task can be committed with `message`: it keeps the rules of `session.md`."""
+    # `type(module): gist`, printable ASCII: English, one line.
+    form = re.compile(r"[a-z]+\([\w./-]+\): [ -~]+", re.ASCII)
+    attribution = re.compile(r"co-authored-by|claude|anthropic|generated with", re.IGNORECASE)
     return (
         len(message) <= 72
-        and COMMIT_MESSAGE.fullmatch(message) is not None
-        and not ATTRIBUTION.search(message)
+        and form.fullmatch(message) is not None
+        and not attribution.search(message)
     )
 
 
 def secret_files(paths: list[str], profile: Profile) -> tuple[str, ...]:
     """The new files of `paths` that look like secrets: they stay out of commits and prompts."""
-    patterns = SECRET_PATTERNS + profile.secret_patterns
+    # Any name with credentials in it would take `test_credentials.py` for a secret.
+    patterns = (
+        ".env*",
+        "*.pem",
+        "*.key",
+        "*credentials",
+        "*credentials*.json",
+        "*credentials*.yaml",
+        "*credentials*.yml",
+        *profile.secret_patterns,
+    )
     return tuple(path for path in paths if _matches(path, patterns))
 
 
@@ -250,7 +239,7 @@ def _run_commands(
     tests = [
         path
         for path in changed
-        if TEST_NAME.search(PurePosixPath(path).name) and (repo / path).exists()
+        if _is_test_module(PurePosixPath(path).name) and (repo / path).exists()
     ]
     value = " ".join(shlex.quote(path) for path in tests)
     profile = replace(
@@ -374,8 +363,10 @@ def _module_style(repo: Path, path: str, added: set[int], before: set[str]) -> l
             if re.match(r"\s*#{1,6} ", lines[n - 1]):
                 findings.append((n, f"a markdown heading in a docstring: {texts[-1]}"))
         for text in texts:
-            # `*args` and `**kwargs` are not emphasis: the star is not closed before a space.
-            if re.search(r"(?<![\w*])\*{1,2}(?=[^\s*])[^*\n]*[^\s*]\*{1,2}(?![\w*])", text):
+            # `*args` and `**kwargs` are not emphasis: the star is not closed before a space. Nor
+            # is a star in code.
+            prose = re.sub(r"`[^`\n]*`", "", text)
+            if re.search(r"(?<![\w*])\*{1,2}(?=[^\s*])[^*\n]*[^\s*]\*{1,2}(?![\w*])", prose):
                 findings.append((n, f"markdown emphasis: {text}"))
             # Numbers alone are too common: `step 2`, `retry the task 3 times`.
             if re.search(
@@ -458,12 +449,13 @@ def _env_secrets(repo: Path, checkpoint: str) -> dict[str, str]:
     tracked `.env*` changed in the working tree is not.
     """
     listed = git.git(repo, "ls-files", "-z", "--cached", "--others", ":(glob,icase)**/.env*")
+    secret_key = re.compile(r"KEY|TOKEN|SECRET|PASS|PWD|CREDENTIAL|AUTH|DSN|PRIVATE", re.IGNORECASE)
     env_secrets = {}
     for path in listed.split("\0")[:-1]:
         for line in (repo / path).read_text(encoding="utf-8", errors="replace").splitlines():
             key, sep, value = line.removeprefix("export ").partition("=")
             value = value.strip().strip("\"'")
-            if sep and SECRET_KEY.search(key) and len(value) >= 8:
+            if sep and secret_key.search(key) and len(value) >= 8:
                 env_secrets[value] = f"{key.strip()} of {path}"
     published = git.strings_in(repo, env_secrets, checkpoint) if env_secrets else set()
     return {value: key for value, key in env_secrets.items() if value not in published}
@@ -491,6 +483,12 @@ def _weakened(patch: str) -> list[str]:
     Lines are counted over all test files together: a changed line is a removal and an addition,
     and a moved test is a removal from one file and an addition to another.
     """
+    # pytest, unittest, Go and JavaScript test frameworks.
+    skip = re.compile(
+        r"\b(mark\.(skip|skipif|xfail)|pytest\.(skip|xfail)|unittest\.skip\w*|skipTest"
+        r"|t\.Skip\w*|xit|xdescribe|xtest|(it|test|describe)\.skip)\b"
+    )
+    assertion = re.compile(r"\b(assert\w*|expect\(|require\.|t\.(Error|Fatal)\w*)")
     skips: Counter[str] = Counter()
     asserts: Counter[str] = Counter()
     path = None
@@ -504,8 +502,8 @@ def _weakened(patch: str) -> list[str]:
             in_hunks = True
         elif in_hunks and line[:1] in ("+", "-"):
             sign = 1 if line[0] == "+" else -1
-            skips[path] += sign * bool(SKIP.search(line))
-            asserts[path] -= sign * bool(ASSERT.search(line))
+            skips[path] += sign * bool(skip.search(line))
+            asserts[path] -= sign * bool(assertion.search(line))
     findings = []
     if skips.total() > 0:
         findings.append(f"skip or xfail added: {_by_file(skips)}")
@@ -535,4 +533,9 @@ def _is_hook_config(path: str) -> bool:
 
 def _is_test(path: str) -> bool:
     parts = PurePosixPath(path).parts
-    return bool(TEST_DIRS.intersection(parts[:-1])) or TEST_NAME.search(parts[-1]) is not None
+    in_test_dir = bool({"test", "tests", "__tests__"}.intersection(parts[:-1]))
+    return in_test_dir or _is_test_module(parts[-1])
+
+
+def _is_test_module(name: str) -> bool:
+    return re.search(r"^test_|_test\.|\.(test|spec)\.", name) is not None

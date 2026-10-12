@@ -28,15 +28,8 @@ from pathlib import Path
 from agent_loop import git
 
 CLAUDE = "claude"
-# `StructuredOutput` is added by the CLI itself when there is a schema.
-TOOLS = ("Bash", "Read", "Edit", "Write")
-# Instruction files of the working directory the CLI would read without `--restricted`.
-PROJECT_INSTRUCTIONS = ("CLAUDE.md", ".claude/CLAUDE.md")
 # Hops of `@path` imports the CLI follows.
 IMPORT_DEPTH = 5
-IMPORT = re.compile(r"(?:^|\s)@(\S+)")
-# Imports are not looked for in code, the way the CLI does it.
-CODE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
 # USER is needed to find the OAuth token in the keychain; tokens and keys from the shell are
 # not passed on.
 ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "TMPDIR")
@@ -119,8 +112,9 @@ def command(session: Session, system_file: Path | None = None) -> list[str]:
         "stream-json",
         "--verbose",
         "--restricted",
+        # `StructuredOutput` is added by the CLI itself when there is a schema.
         "--tools",
-        ",".join(TOOLS),
+        "Bash,Read,Edit,Write",
         "--settings",
         str(session.settings),
         "--permission-prompts",
@@ -149,7 +143,12 @@ def project_instructions(cwd: Path) -> str:
     prompt of the next session. A CLAUDE.md that is a link is read under the same rule.
     """
     root = cwd.resolve()
-    own = {root / name for name in PROJECT_INSTRUCTIONS}
+    # Instruction files of the working directory the CLI would read without `--restricted`.
+    instructions = ("CLAUDE.md", ".claude/CLAUDE.md")
+    own = {root / name for name in instructions}
+    imports = re.compile(r"(?:^|\s)@(\S+)")
+    # Imports are not looked for in code, the way the CLI does it.
+    code = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
     committed: set[Path] = set()
     texts: dict[Path, str] = {}
 
@@ -165,10 +164,10 @@ def project_instructions(cwd: Path) -> str:
                 return
         texts[real] = real.read_text(encoding="utf-8")
         if depth < IMPORT_DEPTH:
-            for name in IMPORT.findall(CODE.sub("", texts[real])):
+            for name in imports.findall(code.sub("", texts[real])):
                 include(path.parent / Path(name).expanduser(), depth + 1)
 
-    for name in PROJECT_INSTRUCTIONS:
+    for name in instructions:
         include(root / name, 0)
     return "\n\n".join(
         f"Contents of {path.relative_to(root).as_posix()}:\n\n{text}"

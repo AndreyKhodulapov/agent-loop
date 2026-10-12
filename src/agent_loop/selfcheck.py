@@ -19,7 +19,6 @@ from agent_loop.config import Profile, Settings
 MODEL = "haiku"
 DIR = "selfcheck"
 RESULT_FILE = "selfcheck.json"
-PROJECT_HOOK_MARKER = "project-hook-ran"
 WORDS = {"project_word": "maple", "appended_word": "copper", "second_word": "willow"}
 SETTINGS = {"autoMemoryEnabled": False, "permissions": {"defaultMode": "dontAsk"}}
 GUARD_SCHEMA = {
@@ -44,7 +43,7 @@ def run(home: Path) -> str:
     second.write_text(f"The second word is: {WORDS['second_word']}.\n")
     settings = workdir / "settings.json"
     settings.write_text(json.dumps(SETTINGS))
-    marker = workdir / PROJECT_HOOK_MARKER
+    marker = workdir / "project-hook-ran"
     marker.unlink(missing_ok=True)
     (workdir / ".claude").mkdir(exist_ok=True)
     (workdir / ".claude" / "settings.json").write_text(json.dumps(_project_hooks(marker)))

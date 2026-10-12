@@ -461,6 +461,7 @@ RATE = 2
 
 def total(*args, **kwargs):
     # Retry the task 3 times; a * b * c.
+    # Secrets are `*credentials*`, `*.pem` and `*.key`.
     return sum(args) * RATE + RATE * RATE
 '''
     )

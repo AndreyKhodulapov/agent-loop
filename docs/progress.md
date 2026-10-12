@@ -682,7 +682,7 @@ uv run ruff check . && uv run ruff format --check .
 
 Вывод: блокер испытания — находка 1, воспроизводится на репозитории испытания без запуска агента; находку 2 закрыть до запуска (задача 1 про `ADMIN_TOKEN` с заметной вероятностью создаст файл под `*credentials*` или `.env*`). Находки 3–6 прогону не мешают, 7–9 — на решение человека.
 
-### 3а.1б Правки по ревью
+### 3а.1б Правки по ревью — готово 2026-10-12
 
 Решения человека (2026-10-12), по рекомендациям агента: находки сгруппированы по причине — секреты в gate (1, 2), правила, которые цикл требует от агента, но сам не соблюдает (3, 7–9), путь ошибки прогона (4, 5), упаковка (6). Четыре коммита в `implementation-loop`.
 
@@ -744,15 +744,31 @@ uv run ruff check . && uv run ruff format --check .
 
 Предлагаемое сообщение: `fix(implement): ask the session again for a commit message that breaks the rules`.
 
-#### Коммит 4. Код цикла против `AGENTS.md` (находки 7–9) — следующая сессия
+#### Коммит 4. Код цикла против `AGENTS.md` (находки 7–9) — готово 2026-10-12
 
-1. Правило остаётся. 15 имён из находки 7 (и новые с 1–2 использованиями, если появятся): одноразовые коды причин — литералами на месте, regex и `ANSWERS` — внутрь функций. Перед правкой прогнать `_style` на `git diff main...HEAD`.
-2. Дубль `Co-Authored-By` из `test_implement` убран в коммите 3; докстринги `_Session`, `_work`, `_verdict`, `_wait`, `_head`.
-3. `_style`: не считать markdown-выделением `*...*` внутри обратных кавычек; тест.
+1. Имён оказалось больше 15. `git.words_in` считает ссылкой любое упоминание в другом файле, документацию тоже: при ревью 11 имён прятались за `docs/progress.md` и `docs/plan.md`, а после записи находок в progress спрятались и сами 15. `_style` на `git diff main...HEAD` без `docs/` дал 25 имён в `src` и одно в тестах. Исправлены все:
+   - коды причин (`diff_too_big`, `no_answer`, `session_failed`, `fix_attempts`, `no_changes`) — литералами на месте;
+   - regex, кортежи и словари — локальными в своих функциях: `agent.project_instructions` (`instructions`, `imports`, `code`), `agent.command` (`--tools`), `commands._sandbox` (`operator_files`, `repo_secrets`, профиль Seatbelt — в возвращаемую f-строку), `config` (`known` в разборе профиля), `gates.commit_message_ok`, `secret_files`, `_env_secrets`, `_weakened`, `_is_test`, `implement._Task._take` (`ANSWERS`), `step.how_to_resume` (`stall_reasons`, порог 3), `selfcheck.run`; таймаут команды по умолчанию — `10 * 60` на месте;
+   - `TEST_NAME` нужен двум функциям — `gates._is_test_module(name)` вместо глобала;
+   - `tests/test_step.py`: `ANSWER` поднят к константам и использован в третьем месте, где тот же ответ собирался заново.
+   Имена из `main` (`CONTEXT_PAUSES_TO_REPLAN`, `IDLE_MARGIN` и др.) не тронуты.
+2. Докстринги `_Session`, `_work`, `_verdict` (`implement`), `_wait`, `_head` (`runner`) убраны.
+3. `_style`: код в обратных кавычках вырезается перед поиском markdown-выделения. Тест — строка `` `*credentials*`, `*.pem` и `*.key` `` в комментарии `write_orders` (`test_style_keeps_to_new_breaks_in_python`); на старом коде падает.
+
+Открыто: упоминание имени в документации (README, docs) освобождает его от правила трёх использований. Для агента в продуктовом репозитории это редкий обход; сузить `words_in` до файлов кода — решить после испытания.
+
+Проверка:
+```
+uv run pytest -q            # 374 теста
+uv run ruff check . && uv run ruff format --check .
+# _style на git diff main...HEAD (со скриптом из scratchpad, docs/ исключён из words_in): находок нет
+```
+
+Предлагаемое сообщение: `refactor(loop): keep the loop's own code to the rules it checks in the agent's work`.
 
 Для подготовки испытания (3а.2) учесть: агент не может править `.env.example` (`Read(.env*)` запрещён, `Edit` без чтения не пройдёт, sandbox закрывает запись в `.env*` из Bash) — в карточке задачи 1 сказать, где документировать `ADMIN_TOKEN` (README). Новый файл `.env*` от агента (`Write` его не запрещает) теперь останавливает задачу в `needs_human(secret_file)`.
 
-### 3а.2 Пробный прогон на `api-service-foodtech` — после ревью
+### 3а.2 Пробный прогон на `api-service-foodtech` — следующая сессия
 
 Репозиторий: `~/PET_PROJECTS/api-service-foodtech` — Python 3.14, uv, FastAPI, SQLAlchemy async, Alembic, слои router → service → repository → DB, `ruff`, тесты на настоящем Postgres. Прогон ведёт агент: запускает `loop run` в фоне, следит за логом и `loop.db`, сам делает проверки и разбор. Ветку, профиль, файл контекста и карточки показывает человеку до запуска; `loop run` — только после его «да».
 

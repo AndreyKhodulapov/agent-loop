@@ -18,7 +18,6 @@ DEFAULT_HOME = "~/.agent-loop"
 PROFILE_NAME = "loop.toml"
 DOC_LANGS = ("ru", "en")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-COMMANDS = ("install", "fmt", "lint", "collect", "test", "test_full", "up", "down", "smoke")
 
 
 class ConfigError(Exception):
@@ -206,9 +205,10 @@ def _read_profile(path: Path) -> tuple[dict[str, object], Profile]:
         raise ConfigError(f"{path}: unknown keys {', '.join(unknown)}")
     commands = _table(data, "commands", str, path)
     timeouts = _table(data, "timeouts", int, path)
+    known = ("install", "fmt", "lint", "collect", "test", "test_full", "up", "down", "smoke")
     for name in (*commands, *timeouts):
-        if name not in COMMANDS:
-            raise ConfigError(f"{path}: unknown command {name}, known: {', '.join(COMMANDS)}")
+        if name not in known:
+            raise ConfigError(f"{path}: unknown command {name}, known: {', '.join(known)}")
     for name, seconds in timeouts.items():
         if seconds <= 0:
             raise ConfigError(f"{path}: timeouts.{name} must be positive")

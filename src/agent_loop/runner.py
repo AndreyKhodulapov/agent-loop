@@ -168,7 +168,6 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> bool:
 
 
 def _wait(store: Store, run: Run, resume_at: int) -> bool:
-    """Keep the run paused until the limits leave room; False if the operator stops it."""
     store.move_run(run.id, "paused", implement.BUDGET)
     try:
         time.sleep(max(0, resume_at - time.time()))
@@ -186,7 +185,6 @@ def _pause(store: Store, run: Run, reason: str) -> bool:
 
 
 def _head(store: Store, run: Run) -> str:
-    """HEAD as the run has left it: its last commit or its start."""
     head = run.base
     for task in store.tasks(run.id):
         for s in store.steps(task.id):

@@ -13,6 +13,7 @@ from agent_loop.store import Step, Store
 
 SETTINGS = Settings()
 CONTEXT = 4 + 5232 + 13060
+ANSWER = {**RESULT, "structured_output": {"status": "done"}}
 FULL = {
     **ASSISTANT,
     "message": {
@@ -73,7 +74,7 @@ def stderr_lines(capsys):
 
 
 def test_events_feed_the_guard_and_the_store(env, fake_claude, stderr_lines):
-    fake_claude([INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "structured_output": {"status": "done"}}])
+    fake_claude([INIT, ASSISTANT, RATE_LIMIT, ANSWER])
 
     outcome = env.run()
 
@@ -129,9 +130,6 @@ def test_second_ctrl_c_terminates_the_session(env, fake_claude, monkeypatch, ign
     assert (env.run_dir / guard.STOP_FILE).read_text() == "interrupt"
     assert outcome == step.Outcome("paused", "interrupt", None, CONTEXT)
     assert env.step().outcome == "paused"
-
-
-ANSWER = {**RESULT, "structured_output": {"status": "done"}}
 
 
 @pytest.mark.parametrize(

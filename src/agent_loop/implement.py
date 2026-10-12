@@ -37,16 +37,6 @@ FIX = "fix"
 COMMIT = "commit"
 INTERRUPT = "interrupt"
 BUDGET = "budget"
-NO_ANSWER = "no_answer"
-SESSION_FAILED = "session_failed"
-FIX_ATTEMPTS = "fix_attempts"
-NO_CHANGES = "no_changes"
-# Status and reason the task moves with on an answer other than done.
-ANSWERS = {
-    "too_big": ("replan", "too_big"),
-    "needs_human": ("needs_human", "question"),
-    "blocked": ("needs_human", "blocked"),
-}
 
 
 @dataclass(frozen=True)
@@ -62,8 +52,6 @@ class Stop:
 
 @dataclass(frozen=True)
 class _Session:
-    """A session the task is about to run."""
-
     kind: str
     prompt: str
     # The paused session to go on with --resume; None starts a new one.
@@ -220,7 +208,6 @@ class _Task:
         return _Session(FIX, prompt)
 
     def _work(self) -> str:
-        """The diff of the task against its checkpoint for a prompt."""
         return git.diff(self.repo, self.checkpoint, self._new_files())
 
     def _new_files(self) -> list[str]:
@@ -275,18 +262,25 @@ class _Task:
             return False
         if session_step.outcome == "failed":
             settings_changed = reason == step.PROJECT_SETTINGS
-            self._move("needs_human", step.PROJECT_SETTINGS if settings_changed else SESSION_FAILED)
+            self._move(
+                "needs_human", step.PROJECT_SETTINGS if settings_changed else "session_failed"
+            )
             return False
         output = session_step.detail.get("answer")
         if output is None:
             logger.error("the session has ended without an answer")
-            self._move("needs_human", NO_ANSWER)
+            self._move("needs_human", "no_answer")
             return False
         answer = prompts.answer(output)
         if answer.status == "done":
             self._move("gating")
             return True
-        status, reason = ANSWERS[answer.status]
+        # Status and reason the task moves with on an answer other than done.
+        status, reason = {
+            "too_big": ("replan", "too_big"),
+            "needs_human": ("needs_human", "question"),
+            "blocked": ("needs_human", "blocked"),
+        }[answer.status]
         logger.warning("%s: %s", reason, answer.question or answer.summary)
         self._move(status, reason)
         return False
@@ -332,7 +326,7 @@ class _Task:
                 status = "needs_human"
             elif len(fixes) >= self.cfg.settings.fix_attempts:
                 logger.error("%d fixes have not passed the gate", len(fixes))
-                status, reason = "replan", FIX_ATTEMPTS
+                status, reason = "replan", "fix_attempts"
         self._move(status, reason)
         return self._fixer(verdict) if status == "fixing" else None
 
@@ -342,7 +336,7 @@ class _Task:
         added = self._new_files()
         if not git.diff(self.repo, self.checkpoint, added, "--name-only"):
             logger.error("the session has answered done without changing anything")
-            self._move("needs_human", NO_CHANGES)
+            self._move("needs_human", "no_changes")
             return None
         steps = self.store.steps(self.task.id)
         message = last_answer(steps)["commit_message"]
@@ -398,7 +392,6 @@ def last_answer(steps: list[Step]) -> dict:
 
 
 def _verdict(detail: dict) -> gates.Verdict:
-    """The verdict a gate step keeps in its detail."""
     return gates.Verdict(
         **detail
         | {
