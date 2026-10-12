@@ -620,12 +620,54 @@ uv run ruff check . && uv run ruff format --check .
 
 Предлагаемое сообщение коммита 3.5б: `feat(gates): check the style of the added Python lines`.
 
+### 3.5в Команды `run` и `resume` — готово 2026-10-12
+
+Решения человека (2026-10-12, перед шагом; план, раздел 3): нет места в лимитах — прогон ждёт в процессе и продолжает сам; задача после коммита остаётся `committed`; `AgentError` — `needs_human(session_failed)`; без зелёного selfcheck на установленной версии CLI прогон не стартует.
+
+Сделано:
+1. Новый модуль `src/agent_loop/runner.py`:
+   - `load_tasks(path)` — файл карточек: JSON-список объектов ровно с ключами `title`, `goal` (непустые строки), `criteria`, `files`, `tests`, `decisions` (списки строк); иначе `RunError` с номером задачи, недостающими и лишними ключами;
+   - `start(cfg, tasks_file)` — `selfcheck.require` → `hold_repo` (занят — отказ) → ветка (detached HEAD — отказ) → чистота отслеживаемых файлов (`status --porcelain --untracked-files=no`, есть изменения — отказ с их списком) → `create_run(repo, branch, base=HEAD)` и задачи → `hold(runs/<run>/lock)` → `commands.freeze` → `protected.save` → `approved` → `running` → `install` профиля, если есть → `with commands.services` → задачи;
+   - `resume(cfg, run_id=None)` — без id берётся последний `paused` прогон этого репозитория; отказ, если прогона нет, он из другого репозитория или не `paused`, если задача ждёт в `needs_human`/`replan`, если ветка не та или HEAD не там, где прогон его оставил (последний завершённый шаг `commit` или `base`). Профиль — `commands.frozen`, `protected` не переснимается, `install` не повторяется;
+   - `_work` — первая задача не в `committed`/`done`/`dropped`: `pending` → `implement.start`, остальные → `implement.resume`; `previous` — `prompts.previous_tasks` от `run.base` и `notes_for_next` закоммиченных задач (`implement.last_answer`). Нет таких задач — прогон `done`. Дальше по итогу задачи:
+     - `Stop("budget", resume_at)` → прогон `paused(budget)`, `time.sleep` до `resume_at`, `running`, та же задача снова; Ctrl+C во время ожидания — выход, прогон остаётся `paused(budget)`;
+     - `Stop("interrupt")`, задача `paused(interrupt)` или `paused(branch_changed)` → прогон `paused(<причина>)`;
+     - задача `needs_human`/`replan` → прогон `paused(needs_human|replan)`;
+     - другие паузы задачи (`context`, `budget` внутри сессии, `timeout`, `idle`, `guard_error`) — сразу `implement.resume`: сессия продолжается или задача уходит в `replan` по счётчикам `step`.
+2. `store`: миграция 5 — `runs.base` (HEAD на старте прогона: от него `previous_tasks`, проверка HEAD при `resume`, позже — финальное ревью ветки); `create_run(repo, branch, base)`; `Run.base` — `None` у прогона, созданного до колонки.
+3. `implement`: `AgentError` из сессии (шаг уже `failed` с `{"error": ...}`) → лог и `_take` → `needs_human(session_failed)`; `last_answer(steps)` — ответ последней сессии, общий для коммита и заметок прогона.
+4. `selfcheck.require(home)` — `AgentError`, если `selfcheck.json` нет или в нём другая версия, чем `claude --version`.
+5. `cli`: `loop run <tasks.json>` и `loop resume [run_id]` вместо заглушек; код выхода 0 — прогон `done`, 1 — пауза или отказ (`RunError`, `AgentError`, `ConfigError`, `CommandError` — одной строкой в лог), 130 — Ctrl+C. После команды всегда `reap`: прогон, остановленный ошибкой или Ctrl+C вне сессии, ставится на паузу как мёртвый (`paused(died)`, WIP, открытые шаги, `down`). Перед `run`/`resume` — `reap`, как у остальных команд прогонов.
+6. План: раздел 3 (решение 2026-10-12), раздел 14 (шаг 5(в) сделан).
+
+Решения шага (принял агент, можно пересмотреть): модуль `runner` (не в `cli`: слой команд только разбирает аргументы); ошибки посреди прогона (`ConfigError` из `collect`, упавшие `install`/`up`, `KeyboardInterrupt` в gate) не разбираются отдельно — прогон остаётся `running`, и `reap` после команды делает с ним то же, что с мёртвым: всё нужное для продолжения он уже умеет; `base` — колонкой в `runs`, а не из чекпоинта первого шага: понадобится ревью ветки на этапе 5; паузы `context`/`timeout`/`idle`/`guard_error` прогон не останавливают — счётчики `how_to_resume` отправят застрявшую задачу в `replan`.
+
+Чего нет:
+- `ConfigError` из `collect` повторится после `loop resume`: профиль заморожен, правка `loop.toml` на прогон не действует — начинать новый прогон (или править `runs/<run>/profile.json`).
+- `install`, упавший на старте, `loop resume` не повторяет.
+- На пути ошибки `down` выполняется дважды: `commands.services` и `reap`.
+- Прогон с задачей в `needs_human`/`replan` продолжить нечем: `loop answer` и планировщик — этап 4.
+- Прогон, умерший между `update-ref` и концом шага `commit` (из 3.5а): `resume` откажет — HEAD на коммите, которого нет в store. Разбирает человек.
+- `loop status` по-прежнему заглушка: id прогона — в логе старта и паузы.
+- Реальный прогон на рабочем репозитории не делался (S1b — на первом прогоне).
+
+Тесты: новый `tests/test_runner.py` — задачи по очереди до `done` (переходы прогона, `base`, карточка, сводка и заметки прошлой задачи в `previous`, `install`/`up`/`down`, копия `protected` и `profile.json`); три отказа на старте (изменённый отслеживаемый файл, detached HEAD, занятый каталог); десять сломанных файлов карточек; `needs_human`/`replan` ставят прогон на паузу, `resume` отказывает; ожидание лимитов и продолжение; Ctrl+C во время ожидания и `resume`; три остановки оператором и `resume`; пауза по контексту продолжается сразу; `resume` при чужом коммите и другой ветке отказывает, после возврата — продолжает; `resume` без прогона и с неизвестным id. `test_cli` — `loop run` с настоящим `implement` и gate (сессия подменена) коммитит работу; `ConfigError` посреди прогона — код 1 и `paused(died)`. `test_implement` — `AgentError` → `needs_human(session_failed)`; `test_selfcheck` — `require`; `test_store` — `base` нового прогона и `None` после миграции старой базы. Тесты заглушек `run`/`resume` ушли вместе с заглушками. Проверка стиля из gate на диффе шага находок не дала.
+
+Проверка:
+```
+uv run pytest -q            # 365 тестов
+uv run ruff check . && uv run ruff format --check .
+```
+
+Предлагаемое сообщение коммита 3.5в: `feat(runner): run and resume the tasks of a cards file on the current branch`.
+
 ## Дальше
 
-### Шаг 3.5в и после
+### Этап 3 закрыт
 
-3.5в — команды `run` и `resume` по контрактам из 3.2: `loop run tasks.json` — файл карточек (`title`, `goal`, `criteria`, `files`, `tests`, `decisions`, проверка полей), прогон `create_run` → `approved` → `running`; на старте `reap`, сверка ветки и HEAD, чистота отслеживаемых файлов, отказ без `sandbox-exec`; задачи по очереди через `implement.start` (`pending`) и `implement.resume` (остальные незавершённые); `previous` — `prompts.previous_tasks` от HEAD старта прогона и `notes_for_next` закоммиченных задач; `committed` → `done` до этапа 5 (или оставить); `Stop("budget", resume_at)` — прогон в `paused(budget)` до `resume_at`, `Stop("interrupt")` — прогон в `paused(interrupt)`; задача в `needs_human`/`replan` останавливает прогон; `AgentError` из `step.run` и `ConfigError` из `count_tests`/gate — решить, что с ними делать.
+Все шаги этапа 3 — коммиты в ветке `implementation-loop`. Перед этапом 4:
+1. Ревью ветки `implementation-loop` и мерж в `main` (как PR #1 для этапа 2).
+2. Первый реальный прогон: `loop selfcheck`, затем `loop run tasks.json` с одной-двумя небольшими задачами на рабочем репозитории с профилем (S1b: сколько раз за сессию приходит `rate_limit_event`). Профили рабочих репозиториев писать с `uv run --no-sync --no-cache` (из 3.3в).
+3. Этап 4 (планирование) — в новой ветке, имя спросить у человека. Вход `loop run` из файла карточек заменит утверждённый план; там же `loop answer` для `needs_human` и перепланирование для `replan`.
 
-Из 3.3в: профили рабочих репозиториев писать с `uv run --no-sync --no-cache`. Открыто к обсуждению: `needs_human` на изменение `docker-compose*.yml` и `[build-system]` (остаток риска `install`/`up`, раздел 10).
-
-Все шаги этапа 3 — коммиты в ветке `implementation-loop`.
+Открыто к обсуждению: `needs_human` на изменение `docker-compose*.yml` и `[build-system]` (остаток риска `install`/`up`, раздел 10).

@@ -53,7 +53,7 @@ def env(tmp_path):
     workdir = tmp_path / "repo"
     workdir.mkdir()
     db = Store(home / "loop.db")
-    run_id = db.create_run(workdir, "feature/x")
+    run_id = db.create_run(workdir, "feature/x", "abc123")
     task_id = db.add_task(run_id, "Add x", {"goal": "x"})
     cfg = Config(home, workdir, None, SETTINGS, {})
     protected.save(workdir, step.run_dir(home, run_id))

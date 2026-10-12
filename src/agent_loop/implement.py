@@ -187,7 +187,13 @@ class _Task:
                 if stop is not None:
                     return stop
                 self._enter(upcoming.stage)
-                outcome = self._session(upcoming)
+                try:
+                    outcome = self._session(upcoming)
+                except agent.AgentError as exc:
+                    # The step has failed with the error, its end sends the task to a human.
+                    logger.error("the session has failed: %s", exc)
+                    self._take(self.store.steps(self.task.id)[-1])
+                    return None
                 to_gate = self._take(self.store.steps(self.task.id)[-1])
                 if outcome.status == "completed" and outcome.reason == INTERRUPT:
                     logger.warning("stopped by the operator after the answer of the session")
@@ -346,8 +352,7 @@ class _Task:
                 self.store.finish_step(step_id, "paused", {"reason": gates.BRANCH_CHANGED})
                 self._pause(gates.BRANCH_CHANGED)
                 return
-            steps = self.store.steps(self.task.id)
-            answer = next(s for s in reversed(steps) if s.kind in (IMPLEMENT, FIX)).detail["answer"]
+            answer = last_answer(self.store.steps(self.task.id))
             message = gates.commit_message(answer["commit_message"], self.task.title)
             commit = git.commit(self.repo, self.checkpoint, added, message)
             logger.info("committed %s %s", commit[:12], message)
@@ -369,6 +374,11 @@ class _Task:
     def _move(self, status: str, reason: str | None = None) -> None:
         self.store.move_task(self.task.id, status, reason)
         self.status = status
+
+
+def last_answer(steps: list[Step]) -> dict:
+    """The answer of the last session of a task; a committed task is committed with it."""
+    return next(s for s in reversed(steps) if s.kind in (IMPLEMENT, FIX)).detail["answer"]
 
 
 def _verdict(detail: dict) -> gates.Verdict:

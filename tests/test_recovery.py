@@ -27,7 +27,7 @@ def db(home):
 
 
 def running_run(db, repo):
-    run_id = db.create_run(repo, "main")
+    run_id = db.create_run(repo, "main", "abc123")
     db.move_run(run_id, "approved")
     db.move_run(run_id, "running")
     task_id = db.add_task(run_id, "Add feature", {})

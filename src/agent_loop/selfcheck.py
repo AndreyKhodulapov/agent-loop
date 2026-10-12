@@ -94,6 +94,20 @@ def run(home: Path) -> str:
     return cli_version
 
 
+def require(home: Path) -> None:
+    """Raise `AgentError` unless the selfcheck has passed on the installed version of the CLI.
+
+    A new version may change the flags or the events, so a run does not start on it unchecked.
+    """
+    installed = agent.version()
+    result = home / RESULT_FILE
+    checked = json.loads(result.read_text())["version"] if result.is_file() else None
+    if checked != installed:
+        raise agent.AgentError(
+            f"claude {installed} has not passed the selfcheck, run `loop selfcheck` first"
+        )
+
+
 def _project_hooks(marker: Path) -> dict:
     hook = [{"hooks": [{"type": "command", "command": f"touch {shlex.quote(str(marker))}"}]}]
     return {"hooks": {"SessionStart": hook, "PreToolUse": hook}}

@@ -90,3 +90,18 @@ def test_selfcheck_without_claude(tmp_path, monkeypatch):
 
     with pytest.raises(agent.AgentError, match="claude is not found"):
         selfcheck.run(tmp_path / "home")
+
+
+def test_run_requires_the_selfcheck_of_the_installed_version(tmp_path, fake_claude):
+    fake_claude([])
+    home = tmp_path / "home"
+    home.mkdir()
+
+    with pytest.raises(agent.AgentError, match="claude 2.1.296 has not passed the selfcheck"):
+        selfcheck.require(home)
+    (home / selfcheck.RESULT_FILE).write_text(json.dumps({"version": "2.1.295"}))
+    with pytest.raises(agent.AgentError, match="claude 2.1.296 has not passed the selfcheck"):
+        selfcheck.require(home)
+
+    (home / selfcheck.RESULT_FILE).write_text(json.dumps({"version": "2.1.296"}))
+    selfcheck.require(home)

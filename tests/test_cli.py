@@ -1,3 +1,5 @@
+import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -7,7 +9,8 @@ import time
 import pytest
 from fakes import INIT, RESULT, read_calls
 
-from agent_loop import agent, cli, selfcheck
+from agent_loop import agent, cli, config, git, implement, selfcheck, step
+from agent_loop.store import Store
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +62,49 @@ def test_selfcheck_reports_result(monkeypatch, capsys):
     monkeypatch.setattr(selfcheck, "run", broken)
     assert cli.main(["selfcheck"]) == 1
     assert "failed: first: no rate_limit_event" in capsys.readouterr().err
+
+
+@pytest.fixture
+def in_repo(repo, tmp_path, monkeypatch):
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(selfcheck, "require", lambda home: None)
+    card = {"goal": "Make x fixed", "criteria": [], "files": [], "tests": [], "decisions": []}
+    (tmp_path / "tasks.json").write_text(json.dumps([{"title": "Fix x", **card}]))
+    return repo
+
+
+def test_run_commits_the_work_of_its_tasks(isolated, in_repo, tmp_path, monkeypatch):
+    def session(session, cfg, store, run_id, step_id):
+        (session.cwd / "app.py").write_text("x = 'fixed'\n")
+        answer = {"status": "done", "summary": "", "commit_message": "fix(app): fix x"}
+        detail = {"reason": None, "answer": answer | {"notes_for_next": ""}}
+        store.finish_step(step_id, "completed", detail)
+        return step.Outcome("completed", None, None, 1000)
+
+    monkeypatch.setattr(step, "run", session)
+
+    assert cli.main(["run", str(tmp_path / "tasks.json")]) == 0
+
+    assert git.git(in_repo, "log", "-1", "--format=%s").strip() == "fix(app): fix x"
+    with contextlib.closing(Store(isolated / "loop.db")) as store:
+        [run] = store.runs("done")
+        assert [task.status for task in store.tasks(run.id)] == ["committed"]
+
+
+def test_run_stopped_by_an_error_is_paused_as_a_dead_one(
+    isolated, in_repo, tmp_path, monkeypatch, capsys
+):
+    def broken(*args):
+        raise config.ConfigError("collect: no number in the last line of the output: ''")
+
+    monkeypatch.setattr(implement, "start", broken)
+
+    assert cli.main(["run", str(tmp_path / "tasks.json")]) == 1
+
+    assert "collect: no number" in capsys.readouterr().err
+    with contextlib.closing(Store(isolated / "loop.db")) as store:
+        [run] = store.runs("paused")
+        assert run.reason == "died"
 
 
 def test_gc_without_dead_runs(capsys):

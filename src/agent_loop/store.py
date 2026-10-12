@@ -118,6 +118,10 @@ MIGRATIONS = [
     """
     ALTER TABLE tasks ADD COLUMN tests INTEGER;
     """,
+    # HEAD at the start of the run: what the run has done is counted from it.
+    """
+    ALTER TABLE runs ADD COLUMN base TEXT;
+    """,
 ]
 
 
@@ -134,6 +138,8 @@ class Run:
     reason: str | None
     created_at: str
     updated_at: str
+    # None for a run created before the column.
+    base: str | None
 
 
 @dataclass(frozen=True)
@@ -205,13 +211,13 @@ class Store:
     def close(self) -> None:
         self._conn.close()
 
-    def create_run(self, repo: Path, branch: str) -> str:
+    def create_run(self, repo: Path, branch: str, base: str) -> str:
         run_id = secrets.token_hex(4)
         now = _now()
         self._conn.execute(
-            "INSERT INTO runs (id, repo, branch, status, created_at, updated_at)"
-            " VALUES (?, ?, ?, 'planning', ?, ?)",
-            (run_id, str(repo), branch, now, now),
+            "INSERT INTO runs (id, repo, branch, base, status, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, 'planning', ?, ?)",
+            (run_id, str(repo), branch, base, now, now),
         )
         return run_id
 

@@ -115,7 +115,7 @@ def env(repo, tmp_path):
     subprocess.run(["git", "commit", "-q", "-m", "tests"], cwd=repo, check=True)
     home = tmp_path / "home"
     db = Store(home / "loop.db")
-    run_id = db.create_run(repo, "main")
+    run_id = db.create_run(repo, "main", git.head(repo))
     task_id = db.add_task(run_id, "Fix x", CARD)
     protected.save(repo, step.run_dir(home, run_id))
     yield Env(Config(home, repo, None, SETTINGS, {}), db, run_id, task_id, repo, [])
@@ -281,6 +281,20 @@ def test_task_without_done_work_skips_the_gate(env, monkeypatch, outcome, status
 
     assert (env.task().status, env.task().reason) == (status, reason)
     assert [s.kind for s in env.steps()] == ["implement"]
+
+
+def test_session_that_exits_without_a_result_goes_to_a_human(env, monkeypatch):
+    def run(session, cfg, store, run_id, step_id):
+        error = "claude exited with code 1 without a result: overloaded"
+        store.finish_step(step_id, "failed", {"error": error})
+        raise agent.AgentError(error)
+
+    monkeypatch.setattr(step, "run", run)
+
+    assert env.start() is None
+
+    assert (env.task().status, env.task().reason) == ("needs_human", "session_failed")
+    assert [(s.kind, s.outcome) for s in env.steps()] == [("implement", "failed")]
 
 
 def test_paused_session_keeps_the_work_in_progress(env, monkeypatch):
