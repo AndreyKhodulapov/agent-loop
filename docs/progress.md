@@ -663,11 +663,68 @@ uv run ruff check . && uv run ruff format --check .
 
 ## Дальше
 
-### Этап 3 закрыт
+Решение человека (2026-10-12; план, раздел 14, этап 3а): до этапа 4 — ревью ветки, пробный прогон на реальном репозитории, затем мерж. Все правки — коммиты в `implementation-loop`.
 
-Все шаги этапа 3 — коммиты в ветке `implementation-loop`. Перед этапом 4:
-1. Ревью ветки `implementation-loop` и мерж в `main` (как PR #1 для этапа 2).
-2. Первый реальный прогон: `loop selfcheck`, затем `loop run tasks.json` с одной-двумя небольшими задачами на рабочем репозитории с профилем (S1b: сколько раз за сессию приходит `rate_limit_event`). Профили рабочих репозиториев писать с `uv run --no-sync --no-cache` (из 3.3в).
-3. Этап 4 (планирование) — в новой ветке, имя спросить у человека. Вход `loop run` из файла карточек заменит утверждённый план; там же `loop answer` для `needs_human` и перепланирование для `replan`.
+### 3а.1 Ревью ветки `implementation-loop` — следующая сессия
+
+Ревью всей ветки против `main` (коммиты этапа 3, от `bf7b81f`… до 3.5в), находки — в план как для PR #1, правки — коммитами в этой же ветке.
+
+### 3а.2 Пробный прогон на `api-service-foodtech` — после ревью
+
+Репозиторий: `~/PET_PROJECTS/api-service-foodtech` — Python 3.14, uv, FastAPI, SQLAlchemy async, Alembic, слои router → service → repository → DB, `ruff`, тесты на настоящем Postgres. Прогон ведёт агент: запускает `loop run` в фоне, следит за логом и `loop.db`, сам делает проверки и разбор. Ветку, профиль, файл контекста и карточки показывает человеку до запуска; `loop run` — только после его «да».
+
+Что известно о репозитории (2026-10-12):
+- тесты поднимают Postgres через testcontainers (под gate не работает — нужен docker socket), но `tests/conftest.py` берёт `TEST_DATABASE_URL`, если он задан: базу поднимает `up` профиля, тесты ходят на localhost (sandbox это разрешает);
+- `docker-compose.yml` не годится для `up`: фиксированные `container_name` столкнутся со стеком человека — `docker run`/`docker rm`;
+- CLAUDE.md в репозитории нет — нужен `context_file`; `.env` нет, `tech_task.md` в `.gitignore`;
+- Docker Desktop на момент записи не был запущен — запустить перед прогоном.
+
+Находка до прогона: каждый `{free_port}` в `[env]` получает свой порт, а один порт нужен в двух местах (URL тестов и `up`). Обход в профиле — порт только в `TEST_DATABASE_URL`, `up` достаёт его shell-подстановкой. Решить после прогона, нужна ли именованная подстановка порта.
+
+Шаги:
+1. Подготовка (агент):
+   - `~/.agent-loop/.env` (его ещё нет): `LOOP_KNOWLEDGE_DIR=~/andrey_personal_projects/MY-KNOWLEDGE-DATABASE/USEFUL_JOB_NOTES/agent_runs`;
+   - профиль `agent_runs/api-service-foodtech/loop.toml` (черновик ниже) и рядом `CLAUDE.md` проекта: слои, тесты и `ruff` через `uv run --no-sync --no-cache` (кэш uv в `$HOME` в sandbox сессии закрыт), `TEST_DATABASE_URL` уже в окружении, комментарии на английском;
+   - ручная проверка команд профиля: `install`, `up`, `collect` и `test` под sandbox gate (`commands.run`), `down`, контейнер удалён; `loop config` показывает профиль; `loop selfcheck` зелёный.
+2. Карточки `tasks.json` (пишет агент, утверждает человек), задача из TODO «divide dishes api to admin (auth) and public parts» плюс «api versioning»:
+   1. Авторизация администратора: настройка `ADMIN_TOKEN`, зависимость с Bearer-токеном (сравнение за постоянное время), 401 без токена или с чужим, тесты; без новых пакетов.
+   2. Разделение dishes: публичное чтение остаётся, создание и удаление — в `/admin/dishes` под авторизацией из задачи 1; тесты и README. Проверяет сводку и `notes_for_next` между задачами и проверку ослабления тестов на переносе тестов.
+   3. Версионирование: все маршруты, кроме `/health`, под `/api/v1`; тесты и README.
+3. Запуск: человек дал «да» → ветка `admin-dishes` от чистого `main` → `loop run tasks.json`. Проверяется по ходу:
+   - проход gate и коммит: сообщение, автор, состав файлов, без `.loop/` и артефактов команд;
+   - однократный Ctrl+C (`kill -INT` процессу цикла) посреди сессии задачи 2 → handoff, `paused(interrupt)`, `loop resume` → `--resume`;
+   - fixer — только если случится сам;
+   - S1b: сколько `rate_limit_event` за сессию (`runs/<id>/step-*.jsonl`), строки бюджета в логе;
+   - в конце: контейнер удалён, осиротевших `claude` нет, `git status` чистый.
+4. Остановка: при первой ошибке самого цикла (не агента) — стоп, находка, исправление шагом в `implementation-loop`, затем `loop resume` или новый прогон.
+5. Разбор (агент вместо ревью этапа 5): коммиты против карточек и `AGENTS.md`; по шагам из `loop.db` — ходы, стоимость, контекст, попытки fixer'а, паузы; находки — в план (раздел 2) и сюда. При успехе человек мержит `admin-dishes` в продукт.
+
+Риск: все роли на Opus с effort `high`, лимиты общие с сессией агента, ведущей прогон; при нехватке цикл сам встанет на ожидание.
+
+Черновик профиля (проверить руками на шаге 1):
+```toml
+doc_lang = "en"
+context_file = "CLAUDE.md"   # рядом с loop.toml
+deps_files = ["pyproject.toml", "uv.lock"]
+
+[commands]
+install = "uv sync --frozen"
+fmt     = "uv run --no-sync --no-cache ruff format ."
+lint    = "uv run --no-sync --no-cache ruff check ."
+collect = "uv run --no-sync --no-cache pytest --collect-only -q"
+test    = "uv run --no-sync --no-cache pytest -q"
+up      = "port=${TEST_DATABASE_URL##*:}; port=${port%%/*}; docker run -d --rm --name loop-{run_id}-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=restaurant_test -p 127.0.0.1:$port:5432 postgres:16-alpine && until docker exec loop-{run_id}-db pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done"
+down    = "docker rm -f loop-{run_id}-db"
+
+[timeouts]
+up = 120
+
+[env]
+TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port}/restaurant_test"
+```
+
+### 3а.3 Мерж и дальше
+
+Мерж `implementation-loop` в `main`. Этап 4 (планирование) — в новой ветке, имя спросить у человека; вход `loop run` из файла карточек заменит утверждённый план, там же `loop answer` для `needs_human` и перепланирование для `replan`. Go-репозиторий — отдельным прогоном позже.
 
 Открыто к обсуждению: `needs_human` на изменение `docker-compose*.yml` и `[build-system]` (остаток риска `install`/`up`, раздел 10).
