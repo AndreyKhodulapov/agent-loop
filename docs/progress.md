@@ -665,9 +665,37 @@ uv run ruff check . && uv run ruff format --check .
 
 Решение человека (2026-10-12; план, раздел 14, этап 3а): до этапа 4 — ревью ветки, пробный прогон на реальном репозитории, затем мерж. Все правки — коммиты в `implementation-loop`.
 
-### 3а.1 Ревью ветки `implementation-loop` — следующая сессия
+### 3а.1 Ревью ветки `implementation-loop` — готово 2026-10-12
 
-Ревью всей ветки против `main` (коммиты этапа 3, от `bf7b81f`… до 3.5в), находки — в план как для PR #1, правки — коммитами в этой же ветке.
+Ревью всей ветки против `main` (`git diff main...HEAD`: 38 файлов, +4968/−162) одним проходом в основном контексте. Тесты (365), `ruff check`, `ruff format --check` зелёные. Проверено и чисто: ссылок на план и задачи в коде нет, markdown в комментариях нет, слоистость `cli → runner → implement → {gates, step, prompts} → {commands, git, agent, guard, protected, budget} → {config, store, files}` без циклов, проглоченных исключений нет, тесты не ослаблены. `commit.gpgsign` не задан ни здесь, ни в `api-service-foodtech`. Не подтвердились гипотезы: `_context_full` на паузах gate, `how_to_resume` на шагах `died`, `recovery._pause` для открытых gate/commit-шагов, `_outcome` при ответе во время stop, счётчики попыток fixer'а.
+
+Находки по убыванию серьёзности (строки по состоянию на `29b60bc`):
+1. Критично. `gates.py:446`, `:452` — `_env_secrets` читает и отслеживаемые `.env*`. На `api-service-foodtech` даёт `{'postgres': 'POSTGRES_PASSWORD of .env.example'}` (значение ровно 8 символов), а `postgres` уже есть в README, `app/core/config.py`, `tests/conftest.py`: первая задача со строкой `postgres` в диффе встанет в `needs_human(secret_in_diff)`, `loop resume` откажет, `loop answer` ещё нет. `_mask` при этом портит вывод fixer'у: `postgresql+asyncpg://` → `<POSTGRES_PASSWORD of .env.example>ql+asyncpg://`.
+2. Высокая. `gates.py:44`, `:97`, `:99` — новые файлы под `SECRET_PATTERNS` (`*credentials*`, `.env*` ловят `tests/test_credentials.py`, `app/credentials.py`, `.env.example`) молча выпадают из коммита: warning в логе и поле `secrets` в detail gate-шага, fixer и оператор не узнают. Для следующей задачи файл уже в `untracked_before` и не закоммитится никогда. План (раздел 7) обещал `needs_human`, если без файла не собирается.
+3. Средняя. `gates.py:179` — запасное сообщение коммита `feat: {title}` не проверяется теми же правилами: русский заголовок карточки даст русское сообщение без модуля (R17).
+4. Средняя. `cli.py:116` — `_work` ловит четыре типа; `git.GitError` (например, `commit-tree` без `user.name`), `StoreError`, `FileNotFoundError` из `protected.restore` выпадают traceback'ом (R10). `reap` при этом прогон доубирает.
+5. Низкая. `recovery.py:84`, `commands.py:284` — на пути ошибки `down` выполняется дважды (`commands.services`, затем `reap` из `cli._work`): второй `docker rm -f` даёт в лог ложное `cannot stop the services`.
+6. Низкая. `prompts/__init__.py:68` — `prompts/AGENTS.md` симлинк `../../../AGENTS.md`, работает только из checkout; при сборке пакета сломается.
+7. Критерий глобальных переменных: собственный gate ветки (`gates._module_style` на диффе `main...HEAD`) нашёл 15 новых имён уровня модуля с 1–2 использованиями без ссылок из других файлов: `agent.py` `PROJECT_INSTRUCTIONS`, `IMPORT`, `CODE`; `gates.py` `DIFF_TOO_BIG`, `TEST_DIRS`, `SKIP`, `ASSERT`, `SECRET_KEY`; `implement.py` `NO_ANSWER`, `SESSION_FAILED`, `FIX_ATTEMPTS`, `NO_CHANGES`, `ANSWERS`; `selfcheck.py` `PROJECT_HOOK_MARKER`; `step.py` `STALL_REASONS`. В `main` та же манера (`IDLE_MARGIN`, `CTX_LOG_STEP`), regex на уровне модуля — идиома языка.
+8. Дублирование тестов: `tests/test_implement.py::test_commit_message_that_breaks_the_rules_is_made_of_the_title` повторяет случай `Co-Authored-By` из параметризации `tests/test_gates.py` с тем же именем. `test_cli::test_run_commits_the_work_of_its_tasks` пересекается со счастливым путём `test_runner`, допустимо как smoke CLI.
+9. Докстринги у тривиальных приватных помощников: `implement.py` `_Session`, `_work`, `_verdict`; `runner.py` `_wait`, `_head`.
+
+Вывод: блокер испытания — находка 1, воспроизводится на репозитории испытания без запуска агента; находку 2 закрыть до запуска (задача 1 про `ADMIN_TOKEN` с заметной вероятностью создаст файл под `*credentials*` или `.env*`). Находки 3–6 прогону не мешают, 7–9 — на решение человека.
+
+### 3а.1б Правки по ревью — следующая сессия
+
+Один коммит в `implementation-loop` на находки 1–2 (блокеры), затем отдельный на 3–6; 7–9 — по решению человека перед началом сессии.
+
+1. `gates._env_secrets`: значения брать только из неотслеживаемых `.env*` (`ls-files --others` без `--cached`): закоммиченный файл по определению не секрет. Тест: `.env.example` с `POSTGRES_PASSWORD=postgres` в коммите и строка `postgres` в работе — `pass`, вывод fixer'у не маскируется; неотслеживаемый `.env` маскируется и ловится в диффе, как сейчас.
+2. Выпавшие из коммита файлы (`Verdict.secrets`): в лог при коммите и в сводку задачи; `needs_human(secret_file_needed)`, если работа ссылается на выпавший файл (`git.words_in` по имени модуля/файла среди изменённых файлов). Обсудить с человеком, оставлять ли `*credentials*` в `SECRET_PATTERNS` или сузить до `*credentials*.json`/`*credentials*.yaml`.
+3. `gates.commit_message`: fallback прогнать через те же `COMMIT_MESSAGE`/`ATTRIBUTION`; не проходит — `needs_human(commit_message)` вместо коммита с произвольным текстом. Тест с русским заголовком карточки.
+4. `cli._work`: добавить `git.GitError`, `StoreError`, `FileNotFoundError` (копия `protected`) к ошибкам, которые логируются одной строкой; остальное — traceback, как сейчас.
+5. Двойной `down`: `runner.start`/`resume` при исключении внутри `commands.services` — оставить `down` одному из двух (проще: `reap` не зовёт `down`, если прогон был заперт этим же процессом, или `services` помечает в `run_dir`, что сервисы остановлены). Тест в `test_cli` на ошибку посреди прогона: `down` один раз.
+6. `prompts/AGENTS.md`: заменить симлинк на чтение `AGENTS.md` корня репозитория по пути от `prompts/__init__.py` или включить файл в пакет при сборке; решить, когда появится сборка. Пока — заметка в «Чего нет».
+7. Глобальные переменные (находка 7): по решению человека — либо унести одноразовые имена внутрь функций, либо зафиксировать в `AGENTS.md`, что именованные константы и compiled regex на уровне модуля допустимы, и ослабить `_module_style` соответственно (иначе gate будет гонять реальные задачи по этому поводу).
+8. Тесты: убрать дубль `Co-Authored-By` из `test_implement`, оставив интеграционную проверку на другом случае (например, слишком длинное сообщение); докстринги `_Session`, `_work`, `_verdict`, `_wait`, `_head` убрать.
+
+Для подготовки испытания (3а.2) учесть: агент не может править `.env.example` (`Read(.env*)` запрещён, `Edit` без чтения не пройдёт, sandbox закрывает запись в `.env*` из Bash) — в карточке задачи 1 сказать, где документировать `ADMIN_TOKEN` (README).
 
 ### 3а.2 Пробный прогон на `api-service-foodtech` — после ревью
 
