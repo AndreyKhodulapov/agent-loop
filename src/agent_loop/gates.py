@@ -5,7 +5,8 @@ past them and what the agent is free to do but must not: weaken the tests, grow 
 the size of one task, add a file with secrets. The work is the changes of tracked files against
 the checkpoint of the step and the files the step has added. Once the work keeps these
 invariants, the commands of the repository profile check that it installs, is formatted, passes
-the linter and the tests.
+the linter and the tests, and the added lines of Python modules are checked against the rules of
+the review template that code can tell.
 
 The commands read `.env*` of the repository, the agent does not: the values of its secret keys
 are masked in what goes to the fixer, and a value in the diff stops the work for the operator.
@@ -13,10 +14,13 @@ are masked in what goes to the fixer, and a value in the diff stops the work for
 
 from __future__ import annotations
 
+import ast
 import fnmatch
+import io
 import logging
 import re
 import shlex
+import tokenize
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -35,6 +39,7 @@ DIFF_TOO_BIG = "diff_too_big"
 WEAKENED_TESTS = "weakened_tests"
 FLAKY_TESTS = "flaky_tests"
 SECRET_IN_DIFF = "secret_in_diff"
+STYLE = "style"
 
 SECRET_PATTERNS = (".env*", "*.pem", "*.key", "*credentials*")
 TEST_DIRS = {"test", "tests", "__tests__"}
@@ -136,6 +141,8 @@ def check(
     artifacts = tuple(path for path in after if path not in added)
     if artifacts:
         logger.info("left by the commands, not the work: %s", ", ".join(artifacts))
+    # After the commands: `fmt` may have changed the work.
+    style = _style(repo, step.checkpoint, work, list(numstat))
     env_secrets = _env_secrets(repo)
     if env_secrets:
         # Taken again, the artifacts too: the commands could write what they read into the work.
@@ -150,6 +157,12 @@ def check(
             finding = "values from .env* are in the diff: " + ", ".join(leaked)
             logger.error("a human has to look: %s", finding)
             return Verdict("needs_human", SECRET_IN_DIFF, (finding,), secrets, lines, artifacts)
+    if style:
+        logger.warning("breaks the style: %s", "; ".join(style))
+        if status == "pass":
+            # A flaky test the task has not touched is not for the fixer.
+            status, reason, findings = "fixing", STYLE, ()
+        findings = (*findings, *style)
     findings = tuple(_mask(finding, env_secrets) for finding in findings)
     return Verdict(status, reason, findings, secrets, lines, artifacts)
 
@@ -276,6 +289,152 @@ def _run_commands(
         logger.warning("flaky tests the task has not touched, they need a task of their own")
         return "pass", FLAKY_TESTS, (flaky,)
     return "pass", None, ()
+
+
+def _style(repo: Path, checkpoint: str, work: list[str], changed: list[str]) -> list[str]:
+    """Findings in the added lines of the changed Python modules: decorative separators in
+    comments, markdown in comments and docstrings, references to plans, tasks and decisions, new
+    module-level names the module uses fewer than 3 times.
+
+    A name is not new if one of the changed modules had it at the module level before: a moved
+    global is not the work of the task. A name other files of the repository refer to is the API
+    of its module and needs no uses in it.
+    """
+    sources = [path for path in changed if path.endswith(".py")]
+    if not sources:
+        return []
+    # `diff.noprefix` or `diff.mnemonicPrefix` in the config would change the prefixes.
+    prefixes = ("--src-prefix=a/", "--dst-prefix=b/")
+    patch = git.diff(repo, checkpoint, work, "-U0", *prefixes, paths=sources)
+    listed = git.git(
+        repo,
+        "--literal-pathspecs",
+        "ls-tree",
+        "-r",
+        "-z",
+        "--name-only",
+        checkpoint,
+        "--",
+        *sources,
+    )
+    before = set()
+    for path in listed.split("\0")[:-1]:
+        try:
+            tree = ast.parse(git.git(repo, "cat-file", "blob", f"{checkpoint}:{path}"))
+        except SyntaxError:
+            continue
+        before.update(_module_names(tree))
+    findings = []
+    added = _added_lines(patch)
+    # A path git quotes in the patch is not found and not checked.
+    for path in sources:
+        if added.get(path):
+            findings += _module_style(repo, path, added[path], before)
+    return findings
+
+
+def _module_style(repo: Path, path: str, added: set[int], before: set[str]) -> list[str]:
+    source = (repo / path).read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        # The linter and the tests report it.
+        return []
+    lines = source.splitlines()
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ) and ast.get_docstring(node, clean=False):
+            docstrings.update(range(node.body[0].lineno, node.body[0].end_lineno + 1))
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    comments = {t.start[0]: t.string for t in tokens if t.type == tokenize.COMMENT}
+
+    findings = []
+    for n in sorted(added):
+        texts = []
+        if n in comments:
+            texts.append(comments[n])
+            if re.search(r"[-=*#~_]{3,}", comments[n][1:]):
+                findings.append((n, f"a decorative separator: {comments[n]}"))
+        if n in docstrings:
+            texts.append(lines[n - 1].strip())
+            if re.match(r"\s*#{1,6} ", lines[n - 1]):
+                findings.append((n, f"a markdown heading in a docstring: {texts[-1]}"))
+        for text in texts:
+            # `*args` and `**kwargs` are not emphasis: the star is not closed before a space.
+            if re.search(r"(?<![\w*])\*{1,2}(?=[^\s*])[^*\n]*[^\s*]\*{1,2}(?![\w*])", text):
+                findings.append((n, f"markdown emphasis: {text}"))
+            # Numbers alone are too common: `step 2`, `retry the task 3 times`.
+            if re.search(
+                r"\b(plan|progress)\.md\b|§\s*\d|\badr-?\s?\d"
+                r"|\b(task|step|stage|phase|decision|ticket|задач\w*|шаг\w*|этап\w*|решени\w*"
+                r"|раздел\w*|пункт\w*)\s+([#№]\d|\d+\.\d|\d+[a-zа-я]\b)",
+                text,
+                re.IGNORECASE,
+            ):
+                findings.append((n, f"a reference to a plan, task or decision: {text}"))
+
+    uses = Counter(
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    )
+    rare = {
+        name: line
+        for name, line in _module_names(tree).items()
+        if line in added
+        and name not in before
+        and uses[name] < 3
+        and not (name.startswith("__") and name.endswith("__"))
+        and name not in ("logger", "pytestmark", "pytest_plugins")
+    }
+    elsewhere = git.words_in(repo, rare, path) if rare else set()
+    for name, line in rare.items():
+        if name not in elsewhere:
+            findings.append(
+                (
+                    line,
+                    f"the module-level `{name}` has {uses[name]} uses in the module, fewer"
+                    " than 3: make it a local variable or a class attribute",
+                )
+            )
+    return [f"{path}:{n}: {finding}" for n, finding in sorted(findings)]
+
+
+def _module_names(tree: ast.Module) -> dict[str, int]:
+    """Names assigned at the module level, each with the line of its first assignment."""
+    names = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.setdefault(target.id, node.lineno)
+    return names
+
+
+def _added_lines(patch: str) -> dict[str, set[int]]:
+    """Numbers of the added lines by path in a patch made with `-U0`."""
+    added: dict[str, set[int]] = {}
+    lines: set[int] = set()
+    in_hunks = False
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            lines = set()
+            in_hunks = False
+        elif not in_hunks and line.startswith("+++ b/"):
+            # A name with a space ends with a tab.
+            lines = added.setdefault(line[len("+++ b/") :].removesuffix("\t"), set())
+        elif line.startswith("@@"):
+            in_hunks = True
+            start, count = re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))?", line).groups()
+            lines.update(range(int(start), int(start) + int(count or 1)))
+    return added
 
 
 def _env_secrets(repo: Path) -> dict[str, str]:

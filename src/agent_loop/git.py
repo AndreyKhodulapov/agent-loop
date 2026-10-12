@@ -11,7 +11,7 @@ import contextlib
 import os
 import subprocess
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 
 WIP_REFS = "refs/loop/wip"
@@ -106,6 +106,38 @@ def commit(repo: Path, base: str, added: list[str], message: str) -> str:
     git(repo, "update-ref", "-m", f"commit: {message}", "HEAD", commit, base)
     git(repo, "reset", "--quiet")
     return commit
+
+
+def words_in(repo: Path, words: Iterable[str], outside: str) -> set[str]:
+    """The `words` found as whole words in the files of the repository other than `outside`:
+    tracked files and untracked ones that are not ignored, as they are in the working tree."""
+    patterns = [arg for word in words for arg in ("-e", word)]
+    proc = subprocess.run(
+        [
+            "git",
+            *SAFE_CONFIG,
+            "grep",
+            "--untracked",
+            "-I",
+            "--only-matching",
+            "-h",
+            "--no-line-number",
+            "--no-column",
+            "--word-regexp",
+            "--fixed-strings",
+            *patterns,
+            "--",
+            ".",
+            f":(exclude,literal){outside}",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    # 1 is no match.
+    if proc.returncode > 1:
+        raise GitError(f"git grep: {proc.stderr.strip()}")
+    return set(proc.stdout.splitlines())
 
 
 def diff(repo: Path, base: str, added: list[str], *options: str, paths: Sequence[str] = ()) -> str:

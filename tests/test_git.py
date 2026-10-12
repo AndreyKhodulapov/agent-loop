@@ -112,6 +112,19 @@ def test_commit_does_not_move_a_branch_that_has_moved(repo):
     assert git.head(repo) == moved
 
 
+def test_words_in_finds_whole_words_outside_the_file(repo):
+    (repo / ".gitignore").write_text("*.log\n")
+    (repo / "notes.md").write_text("RATE is from `orders`\n")
+    (repo / "debug.log").write_text("TAX\n")
+    (repo / "orders.py").write_text("RATE = 2\nTAX = 1\nRATES = 3\nLIMIT = 4\n")
+
+    found = git.words_in(repo, ["RATE", "TAX", "RATES", "LIMIT", "x"], "orders.py")
+
+    # `x` is in the tracked app.py, `RATE` in the untracked notes.md; debug.log is ignored.
+    assert found == {"RATE", "x"}
+    assert git.words_in(repo, ["LIMIT"], "orders.py") == set()
+
+
 def test_git_error_carries_stderr(repo):
     with pytest.raises(git.GitError, match="rev-parse nope"):
         git.git(repo, "rev-parse", "nope")
@@ -154,6 +167,7 @@ def test_git_of_the_loop_runs_no_code_from_the_repository(repo, tmp_path):
     git.diff(repo, git.head(repo), [".gitattributes"], "--numstat")
     git.diff(repo, git.head(repo), [".gitattributes"], "-U0")
     git.commit(repo, git.head(repo), [".gitattributes"], "feat(app): x")
+    git.words_in(repo, ["x"], "old.py")
 
     assert not marker.exists()
     # The planted code is live for a plain git.

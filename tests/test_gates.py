@@ -59,7 +59,7 @@ def test_clean_work_passes_with_its_size(repo, work):
     (repo / "app.py").write_text("x = 2\n")
     (repo / "old.py").unlink()
     (repo / "pkg").mkdir()
-    (repo / "pkg" / "new.py").write_text("a = 1\nb = 2\n")
+    (repo / "pkg" / "new.py").write_text("print(1)\nprint(2)\n")
 
     verdict = check(repo, work)
 
@@ -72,7 +72,7 @@ def test_new_files_like_secrets_are_left_out(repo, work):
     (repo / "deploy" / "server.pem").write_text("key\n")
     (repo / "deploy" / "AWS_Credentials.json").write_text("{}\n")
     (repo / "deploy" / "store.p12").write_text("key\n")
-    (repo / "deploy" / "config.py").write_text("HOST = 1\n")
+    (repo / "deploy" / "config.py").write_text("print(1)\n")
 
     verdict = check(repo, work, Profile(secret_patterns=("*.p12",)))
 
@@ -379,6 +379,125 @@ def test_flaky_test_the_task_has_not_touched_passes_with_a_warning(repo, work, c
 
     assert (verdict.status, verdict.reason) == ("pass", gates.FLAKY_TESTS)
     assert "FAILED tests/test_db.py::test_pool" in verdict.findings[0]
+
+
+@pytest.mark.parametrize(
+    ("module", "finding"),
+    [
+        ("# --- helpers ---\nprint(1)\n", "1: a decorative separator: # --- helpers ---"),
+        ("print(1)\n#####\n", "2: a decorative separator: #####"),
+        ('"""Totals.\n\n## Usage\n"""\n', "3: a markdown heading in a docstring: ## Usage"),
+        (
+            'def total():\n    """The **sum** of the orders."""\n',
+            '2: markdown emphasis: """The **sum** of the orders."""',
+        ),
+        ("print(1)  # the *only* way\n", "1: markdown emphasis: # the *only* way"),
+        (
+            "print(1)  # as in step 3.5b\n",
+            "1: a reference to a plan, task or decision: # as in step 3.5b",
+        ),
+        (
+            '"""Totals, see plan.md."""\n',
+            '1: a reference to a plan, task or decision: """Totals, see plan.md."""',
+        ),
+        (
+            "# решение #12: без кэша\nprint(1)\n",
+            "1: a reference to a plan, task or decision: # решение #12: без кэша",
+        ),
+        (
+            "RATE = 2\nprint(RATE * RATE)\n",
+            "1: the module-level `RATE` has 2 uses in the module, fewer than 3: make it a local"
+            " variable or a class attribute",
+        ),
+    ],
+)
+def test_style_breaks_go_back_to_the_executor(repo, work, module, finding):
+    (repo / "orders.py").write_text(module)
+
+    verdict = check(repo, work)
+
+    assert (verdict.status, verdict.reason) == ("fixing", gates.STYLE)
+    assert verdict.findings == (f"orders.py:{finding}",)
+
+
+def write_orders(repo):
+    (repo / "orders.py").write_text(
+        '''"""Totals of the orders: `*args` and **kwargs, step 2 of 3."""
+
+import logging
+
+logger = logging.getLogger(__name__)
+__all__ = ["total"]
+RATE = 2
+
+
+def total(*args, **kwargs):
+    # Retry the task 3 times; a * b * c.
+    return sum(args) * RATE + RATE * RATE
+'''
+    )
+
+
+def move_global(repo):
+    (repo / "old.py").unlink()
+    (repo / "orders.py").write_text("y = 2\nprint(y)\n")
+
+
+def refer_to_global(repo):
+    (repo / "orders.py").write_text("RATE = 2\n")
+    (repo / "app.py").write_text("from orders import RATE\n")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        write_orders,
+        lambda repo: (repo / "app.py").write_text("x = 2\n"),
+        move_global,
+        refer_to_global,
+        lambda repo: (repo / "orders.py").write_text("def broken(:\n    # --- x ---\n"),
+        lambda repo: (repo / "notes.txt").write_text("# --- x ---\n"),
+    ],
+)
+def test_style_keeps_to_new_breaks_in_python(repo, work, change):
+    change(repo)
+
+    assert check(repo, work).status == "pass"
+
+
+def test_style_checks_the_added_lines_only(repo, work):
+    (repo / "orders.py").write_text("# --- old ---\nRATE = 2\n")
+    commit(repo, "orders")
+    work = dataclasses.replace(work, checkpoint=git.head(repo))
+    (repo / "orders.py").write_text("# --- old ---\nRATE = 2\nprint(1)  # **new**\n")
+
+    verdict = check(repo, work)
+
+    assert verdict.findings == ("orders.py:3: markdown emphasis: # **new**",)
+
+
+def test_style_breaks_go_to_the_fixer_with_the_failed_commands(repo, work):
+    profile = Profile(commands={"lint": "echo app.py:1: E501; exit 1"})
+    (repo / "orders.py").write_text("# ----\n")
+
+    verdict = check(repo, work, profile)
+
+    assert (verdict.status, verdict.reason) == ("fixing", "lint_failed")
+    assert verdict.findings == (
+        "lint: exit code 1\napp.py:1: E501",
+        "orders.py:1: a decorative separator: # ----",
+    )
+
+
+def test_style_breaks_leave_out_the_flaky_tests_the_task_has_not_touched(repo, work, calls):
+    profile = Profile(commands={"test": flaky(calls, "FAILED tests/test_db.py::test_pool")})
+    (repo / "orders.py").write_text("# ----\n")
+
+    verdict = check(repo, work, profile)
+
+    assert verdict == gates.Verdict(
+        "fixing", gates.STYLE, ("orders.py:1: a decorative separator: # ----",), lines=1
+    )
 
 
 @pytest.mark.parametrize(
