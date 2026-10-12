@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 
 import pytest
 
-from agent_loop import agent, budget, git, guard, implement, prompts, protected, step
+from agent_loop import agent, budget, gates, git, guard, implement, prompts, protected, step
 from agent_loop.config import Config, Profile, Settings
 from agent_loop.gates import Verdict
 from agent_loop.store import Store
@@ -190,18 +190,21 @@ def test_fixer_gets_the_findings_and_the_work(env, monkeypatch):
     assert len({s.checkpoint for s in env.steps()}) == 1
 
 
-def test_secrets_stay_out_of_the_work_of_the_fixer_and_the_commit(env, monkeypatch):
+def test_secrets_stay_out_of_the_prompts_and_stop_the_task(env, monkeypatch):
+    checkpoint = git.head(env.repo)
     env.script(
         monkeypatch,
-        (write("config/.env.local", "TOKEN=abcdefghijk\n"), answered()),
-        (write("app.py", "x = 'fixed'\n"), answered()),
+        (write("config/.env.local", "TOKEN=abcdefghijk\n"), paused("context", 130_000)),
     )
-
     env.start()
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered()))
 
-    assert "abcdefghijk" not in env.sessions[1].prompt
-    assert env.task().status == "committed"
-    assert "config/.env.local" not in git.git(env.repo, "ls-tree", "-r", "--name-only", "HEAD")
+    env.resume()
+
+    assert "abcdefghijk" not in env.sessions[-1].prompt
+    assert (env.task().status, env.task().reason) == ("needs_human", gates.SECRET_FILE)
+    assert [s.kind for s in env.steps()] == ["implement", "implement", "gate"]
+    assert git.head(env.repo) == checkpoint
     assert git.untracked(env.repo) == ["config/.env.local"]
 
 

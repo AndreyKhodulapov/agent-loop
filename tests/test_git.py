@@ -125,6 +125,19 @@ def test_words_in_finds_whole_words_outside_the_file(repo):
     assert git.words_in(repo, ["LIMIT"], "orders.py") == set()
 
 
+def test_strings_in_finds_strings_in_the_files_of_a_commit(repo):
+    (repo / "db.py").write_text('URL = "postgresql://localhost"\n')
+    git.git(repo, "add", "db.py")
+    git.git(repo, "commit", "-q", "-m", "db")
+    (repo / "app.py").write_text("x = 'hunter2-long'\n")
+
+    found = git.strings_in(repo, ["postgres", "hunter2-long", "-v"], "HEAD")
+
+    # Inside a word too; the working tree is not looked at.
+    assert found == {"postgres"}
+    assert git.strings_in(repo, ["postgres"], "HEAD~1") == set()
+
+
 def test_git_error_carries_stderr(repo):
     with pytest.raises(git.GitError, match="rev-parse nope"):
         git.git(repo, "rev-parse", "nope")

@@ -66,24 +66,33 @@ def test_clean_work_passes_with_its_size(repo, work):
     assert verdict == gates.Verdict("pass", lines=5)
 
 
-def test_new_files_like_secrets_are_left_out(repo, work):
+def test_new_files_like_secrets_need_a_human(repo, work, calls):
     (repo / ".env.local").write_text("TOKEN=2\n")
     (repo / "deploy").mkdir()
     (repo / "deploy" / "server.pem").write_text("key\n")
     (repo / "deploy" / "AWS_Credentials.json").write_text("{}\n")
+    (repo / "deploy" / "credentials").write_text("[default]\n")
     (repo / "deploy" / "store.p12").write_text("key\n")
-    (repo / "deploy" / "config.py").write_text("print(1)\n")
+    (repo / "deploy" / "credentials.py").write_text("print(1)\n")
+    profile = Profile(commands={"test": logged(calls, "test")}, secret_patterns=("*.p12",))
 
-    verdict = check(repo, work, Profile(secret_patterns=("*.p12",)))
+    verdict = check(repo, work, profile)
 
-    assert verdict.status == "pass"
-    assert verdict.secrets == (
+    secrets = (
         ".env.local",
         "deploy/AWS_Credentials.json",
+        "deploy/credentials",
         "deploy/server.pem",
         "deploy/store.p12",
     )
+    assert (verdict.status, verdict.reason) == ("needs_human", gates.SECRET_FILE)
+    assert verdict.findings == (
+        "new files look like secrets, the loop does not commit them: " + ", ".join(secrets),
+    )
+    assert verdict.secrets == secrets
     assert verdict.lines == 1
+    # With the files in the working tree the commands would pass for a commit without them.
+    assert not calls.exists()
 
 
 @pytest.mark.parametrize(
@@ -291,6 +300,8 @@ def test_values_from_env_are_masked_for_the_fixer(repo, work):
     (repo / ".env").write_text('DEBUG=true\nexport DB_PASSWORD="hunter2-long"\nAPI_KEY=abc\n')
     (repo / "conf").mkdir()
     (repo / "conf" / ".env.test").write_text("SENTRY_DSN=https://k@sentry.example\n")
+    # The operator's, from before the step.
+    work = dataclasses.replace(work, untracked=git.untracked(repo))
     profile = Profile(commands={"test": "cat .env conf/.env.test; exit 1"})
 
     verdict = check(repo, work, profile)
@@ -298,6 +309,23 @@ def test_values_from_env_are_masked_for_the_fixer(repo, work):
     assert verdict.findings == (
         'test: exit code 1\nDEBUG=true\nexport DB_PASSWORD="<DB_PASSWORD of .env>"\nAPI_KEY=abc'
         "\nSENTRY_DSN=<SENTRY_DSN of conf/.env.test>",
+    )
+
+
+def test_values_the_repository_has_are_no_secrets(repo, work):
+    (repo / ".env.example").write_text("POSTGRES_PASSWORD=postgres\n")
+    subprocess.run(["git", "add", ".env.example"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "env example"], cwd=repo, check=True)
+    work = dataclasses.replace(work, checkpoint=git.head(repo))
+    (repo / ".env").write_text("POSTGRES_PASSWORD=postgres\nAPI_TOKEN=hunter2-long\n")
+    (repo / "settings.toml").write_text('url = "postgresql://postgres:postgres@localhost/db"\n')
+    profile = Profile(commands={"test": "cat .env; exit 1"})
+
+    verdict = check(repo, work, profile)
+
+    assert (verdict.status, verdict.reason) == ("fixing", "test_failed")
+    assert verdict.findings == (
+        "test: exit code 1\nPOSTGRES_PASSWORD=postgres\nAPI_TOKEN=<API_TOKEN of .env>",
     )
 
 

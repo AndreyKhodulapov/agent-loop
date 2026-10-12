@@ -112,32 +112,22 @@ def words_in(repo: Path, words: Iterable[str], outside: str) -> set[str]:
     """The `words` found as whole words in the files of the repository other than `outside`:
     tracked files and untracked ones that are not ignored, as they are in the working tree."""
     patterns = [arg for word in words for arg in ("-e", word)]
-    proc = subprocess.run(
-        [
-            "git",
-            *SAFE_CONFIG,
-            "grep",
-            "--untracked",
-            "-I",
-            "--only-matching",
-            "-h",
-            "--no-line-number",
-            "--no-column",
-            "--word-regexp",
-            "--fixed-strings",
-            *patterns,
-            "--",
-            ".",
-            f":(exclude,literal){outside}",
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
+    return _grep(
+        repo,
+        "--untracked",
+        "--word-regexp",
+        "--fixed-strings",
+        *patterns,
+        "--",
+        ".",
+        f":(exclude,literal){outside}",
     )
-    # 1 is no match.
-    if proc.returncode > 1:
-        raise GitError(f"git grep: {proc.stderr.strip()}")
-    return set(proc.stdout.splitlines())
+
+
+def strings_in(repo: Path, strings: Iterable[str], rev: str) -> set[str]:
+    """The `strings` found in the files of `rev`, inside words too."""
+    patterns = [arg for string in strings for arg in ("-e", string)]
+    return _grep(repo, "--fixed-strings", *patterns, rev)
 
 
 def diff(repo: Path, base: str, added: list[str], *options: str, paths: Sequence[str] = ()) -> str:
@@ -178,3 +168,26 @@ def _work_index(repo: Path, base: str, added: list[str]) -> Iterator[dict[str, s
             # A file the step has added to the index with `git add -f` may be ignored.
             git(repo, "--literal-pathspecs", "add", "--force", "--", *added, env=env)
         yield env
+
+
+def _grep(repo: Path, *args: str) -> set[str]:
+    proc = subprocess.run(
+        [
+            "git",
+            *SAFE_CONFIG,
+            "grep",
+            "-I",
+            "--only-matching",
+            "-h",
+            "--no-line-number",
+            "--no-column",
+            *args,
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    # 1 is no match.
+    if proc.returncode > 1:
+        raise GitError(f"git grep: {proc.stderr.strip()}")
+    return set(proc.stdout.splitlines())

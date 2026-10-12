@@ -8,8 +8,12 @@ invariants, the commands of the repository profile check that it installs, is fo
 the linter and the tests, and the added lines of Python modules are checked against the rules of
 the review template that code can tell.
 
+A new file that looks like a secret stops the work for the operator before the commands: it stays
+out of the commit, while the commands would pass with it in the working tree.
+
 The commands read `.env*` of the repository, the agent does not: the values of its secret keys
 are masked in what goes to the fixer, and a value in the diff stops the work for the operator.
+A value the repository already has, such as the default password of `.env.example`, is no secret.
 """
 
 from __future__ import annotations
@@ -38,10 +42,20 @@ HOOK_CONFIG = "hook_config"
 DIFF_TOO_BIG = "diff_too_big"
 WEAKENED_TESTS = "weakened_tests"
 FLAKY_TESTS = "flaky_tests"
+SECRET_FILE = "secret_file"
 SECRET_IN_DIFF = "secret_in_diff"
 STYLE = "style"
 
-SECRET_PATTERNS = (".env*", "*.pem", "*.key", "*credentials*")
+# Any name with credentials in it would take `test_credentials.py` for a secret.
+SECRET_PATTERNS = (
+    ".env*",
+    "*.pem",
+    "*.key",
+    "*credentials",
+    "*credentials*.json",
+    "*credentials*.yaml",
+    "*credentials*.yml",
+)
 TEST_DIRS = {"test", "tests", "__tests__"}
 TEST_NAME = re.compile(r"^test_|_test\.|\.(test|spec)\.")
 # pytest, unittest, Go and JavaScript test frameworks.
@@ -95,8 +109,6 @@ def check(
     restored = protected.restore(repo, run_dir)
     added = git.new_files(repo, step.checkpoint, step.untracked)
     secrets = secret_files(added, profile)
-    if secrets:
-        logger.warning("left out of the commit, may hold secrets: %s", ", ".join(secrets))
     work = [path for path in added if path not in secrets]
     numstat = _numstat(git.diff(repo, step.checkpoint, work, "--numstat", "-z"))
     lines = sum(numstat.values())
@@ -115,6 +127,11 @@ def check(
             "configs of git hook managers have changed, their hooks would run on the"
             " operator's commit outside the sandbox:\n"
             + git.diff(repo, step.checkpoint, work, paths=hook_configs)
+        )
+    if secrets:
+        reason = reason or SECRET_FILE
+        findings.append(
+            "new files look like secrets, the loop does not commit them: " + ", ".join(secrets)
         )
     if findings:
         logger.error("a human has to look: %s", "; ".join(f.splitlines()[0] for f in findings))
@@ -143,7 +160,7 @@ def check(
         logger.info("left by the commands, not the work: %s", ", ".join(artifacts))
     # After the commands: `fmt` may have changed the work.
     style = _style(repo, step.checkpoint, work, list(numstat))
-    env_secrets = _env_secrets(repo)
+    env_secrets = _env_secrets(repo, step.checkpoint)
     if env_secrets:
         # Taken again, the artifacts too: the commands could write what they read into the work.
         after_secrets = secret_files(after, profile)
@@ -437,11 +454,13 @@ def _added_lines(patch: str) -> dict[str, set[int]]:
     return added
 
 
-def _env_secrets(repo: Path) -> dict[str, str]:
+def _env_secrets(repo: Path, checkpoint: str) -> dict[str, str]:
     """Values of the secret keys in the `.env*` files of the repository, ignored ones included,
     each with its key and file.
 
     Values shorter than 8 characters are left out: `true` or `admin` would be found everywhere.
+    So are the values the files of `checkpoint` have: they are published already. A value of a
+    tracked `.env*` changed in the working tree is not.
     """
     listed = git.git(repo, "ls-files", "-z", "--cached", "--others", ":(glob,icase)**/.env*")
     env_secrets = {}
@@ -451,7 +470,8 @@ def _env_secrets(repo: Path) -> dict[str, str]:
             value = value.strip().strip("\"'")
             if sep and SECRET_KEY.search(key) and len(value) >= 8:
                 env_secrets[value] = f"{key.strip()} of {path}"
-    return env_secrets
+    published = git.strings_in(repo, env_secrets, checkpoint) if env_secrets else set()
+    return {value: key for value, key in env_secrets.items() if value not in published}
 
 
 def _mask(text: str, env_secrets: dict[str, str]) -> str:
