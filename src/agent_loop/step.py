@@ -146,8 +146,9 @@ def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id:
             watcher.join()
             signal.signal(signal.SIGINT, previous_handler)
     outcome = _outcome(result, guard.outcome(directory), watch.killed, context_tokens)
-    store.finish_step(step_id, outcome.status, _detail(outcome))
-    _log_end(outcome)
+    detail = _detail(outcome, _cost_before(store, session.session_id))
+    store.finish_step(step_id, outcome.status, detail)
+    _log_end(outcome, detail)
     return outcome
 
 
@@ -273,17 +274,30 @@ def _outcome(
     return Outcome("completed", None, result, context)
 
 
-def _detail(outcome: Outcome) -> dict:
+def _detail(outcome: Outcome, cost_before: float = 0.0) -> dict:
     detail: dict = {"reason": outcome.reason, "context_tokens": outcome.context_tokens}
     result = outcome.result
     if result is not None:
         detail |= {
             "terminal_reason": result.terminal_reason,
             "num_turns": result.num_turns,
-            "cost_usd": result.cost_usd,
+            "cost_usd": result.cost_usd - cost_before,
+            "session_cost_usd": result.cost_usd,
             "answer": result.structured_output,
         }
     return detail
+
+
+def _cost_before(store: Store, session_id: str) -> float:
+    # On --resume the CLI reports the cost of the whole session so far, so a step costs the
+    # difference with the last total. A step terminated before its result has no total: its cost
+    # goes into the next step of the session.
+    totals = [
+        s.detail["session_cost_usd"]
+        for s in store.session_steps(session_id)
+        if s.detail is not None and "session_cost_usd" in s.detail
+    ]
+    return totals[-1] if totals else 0.0
 
 
 def _idle_timeout(settings_file: Path) -> float:
@@ -299,11 +313,10 @@ def _status(context_tokens: int, cfg: Config) -> str:
     return line
 
 
-def _log_end(outcome: Outcome) -> None:
+def _log_end(outcome: Outcome, detail: dict) -> None:
     if outcome.status == "paused":
         logger.warning("paused: %s", outcome.reason)
     elif outcome.status == "failed":
         logger.error("failed: %s", outcome.reason)
     else:
-        result = outcome.result
-        logger.info("completed in %d turns, $%.2f", result.num_turns, result.cost_usd)
+        logger.info("completed in %d turns, $%.2f", detail["num_turns"], detail["cost_usd"])

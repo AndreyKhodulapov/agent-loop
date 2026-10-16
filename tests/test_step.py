@@ -67,13 +67,13 @@ def env(tmp_path):
 
 @pytest.fixture
 def stderr_lines(capsys):
-    # capsys replaces sys.stderr only for the test body, so the handler is created there.
-    log.setup()
+    # capsys replaces sys.stderr only for the test body, so the test calls `log.setup()` there.
     yield lambda: capsys.readouterr().err.splitlines()
     logging.getLogger(log.LOGGER_NAME).handlers.clear()
 
 
 def test_events_feed_the_guard_and_the_store(env, fake_claude, stderr_lines):
+    log.setup()
     fake_claude([INIT, ASSISTANT, RATE_LIMIT, ANSWER])
 
     outcome = env.run()
@@ -93,6 +93,36 @@ def test_events_feed_the_guard_and_the_store(env, fake_claude, stderr_lines):
     assert recorded.detail["num_turns"] == 3
     assert (env.run_dir / f"step-{env.step_id}.jsonl").is_file()
     assert any("ctx 18k/150k · 5h " in line for line in stderr_lines())
+
+
+def test_resumed_session_step_costs_the_difference(env, fake_claude, stderr_lines):
+    # After --resume the CLI reports the cost of the whole session so far.
+    log.setup()
+    fake_claude(
+        [INIT, {**ANSWER, "total_cost_usd": 0.5}],
+        resume=[INIT, {**ANSWER, "total_cost_usd": 0.8}],
+    )
+    env.run()
+    task_id = env.step().task_id
+    # A step terminated before its result, then a step of another session.
+    killed = env.store.start_step(task_id, "implement", "abc123", [], env.session.session_id)
+    env.store.finish_step(killed, "paused", {"reason": "interrupt", "context_tokens": 0})
+    other = replace(env, session=replace(env.session, session_id="other"))
+    other.step_id = env.store.start_step(task_id, "fix", "abc123", [], "other")
+    other.run()
+    resumed = replace(env, session=replace(env.session, resume=True))
+    resumed.step_id = env.store.start_step(
+        task_id, "implement", "abc123", [], env.session.session_id
+    )
+
+    resumed.run()
+
+    costs = [
+        (s.detail.get("cost_usd"), s.detail.get("session_cost_usd"))
+        for s in env.store.steps(task_id)
+    ]
+    assert costs == [(0.5, 0.5), (None, None), (0.5, 0.5), (pytest.approx(0.3), 0.8)]
+    assert "completed in 3 turns, $0.30" in stderr_lines()[-1]
 
 
 @pytest.mark.parametrize(

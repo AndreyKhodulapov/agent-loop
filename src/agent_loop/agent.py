@@ -97,6 +97,7 @@ class Result:
     text: str | None
     structured_output: dict | None
     num_turns: int
+    # `total_cost_usd`: after --resume, the cost of the whole session so far.
     cost_usd: float
     permission_denials: list
 

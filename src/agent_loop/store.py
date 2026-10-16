@@ -347,6 +347,12 @@ class Store:
         ).fetchall()
         return [_step(row) for row in rows]
 
+    def session_steps(self, session_id: str) -> list[Step]:
+        rows = self._conn.execute(
+            "SELECT * FROM steps WHERE session_id = ? ORDER BY id", (session_id,)
+        ).fetchall()
+        return [_step(row) for row in rows]
+
     def open_steps(self, run_id: str) -> list[Step]:
         """Steps of the run that started and never finished."""
         rows = self._conn.execute(
