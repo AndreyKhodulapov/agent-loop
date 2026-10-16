@@ -353,6 +353,17 @@ def test_files_the_commands_leave_are_artifacts(repo, work):
     assert verdict == gates.Verdict("pass", lines=3, artifacts=("out/report.xml",))
 
 
+def test_files_the_commands_change_are_the_work(repo, work):
+    # The formatter touches a tracked file the task has not: the commit takes it too.
+    (repo / "app.py").write_text("x = 2\n")
+    profile = Profile(commands={"fmt": "echo '# ---- fmt ----' >> old.py"})
+
+    verdict = check(repo, work, profile)
+
+    assert (verdict.status, verdict.reason, verdict.lines) == ("fixing", gates.STYLE, 3)
+    assert verdict.findings == ("old.py:2: a decorative separator: # ---- fmt ----",)
+
+
 def test_commands_do_not_run_when_the_invariants_fail(repo, work, calls):
     profile = Profile(commands={"lint": logged(calls, "lint")})
     edit_test(repo, "def test_add", "@pytest.mark.skip\ndef test_add")

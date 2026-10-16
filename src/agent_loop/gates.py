@@ -134,7 +134,10 @@ def check(
     artifacts = tuple(path for path in after if path not in added)
     if artifacts:
         logger.info("left by the commands, not the work: %s", ", ".join(artifacts))
-    # After the commands: `fmt` may have changed the work.
+    # After the commands: `fmt` may have changed the work, and tracked files beyond it, which
+    # the commit takes as well.
+    numstat = _numstat(git.diff(repo, step.checkpoint, work, "--numstat", "-z"))
+    lines = sum(numstat.values())
     style = _style(repo, step.checkpoint, work, list(numstat))
     env_secrets = _env_secrets(repo, step.checkpoint)
     if env_secrets:

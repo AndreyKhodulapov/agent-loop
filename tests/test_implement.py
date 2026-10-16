@@ -383,12 +383,20 @@ def test_paused_session_keeps_the_work_in_progress(env, monkeypatch):
     assert git.git(env.repo, "rev-parse", f"{ref}^").strip() == env.steps()[0].checkpoint
 
 
-def test_interrupt_while_answering_stops_before_the_gate(env, monkeypatch):
-    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered(reason="interrupt")))
+@pytest.mark.parametrize(
+    "status, stop, moved_to",
+    [
+        ("done", implement.Stop("interrupt"), ("gating", None)),
+        # The answer, not the stop, tells where the task is.
+        ("blocked", None, ("needs_human", "blocked")),
+    ],
+)
+def test_interrupt_while_answering_stops_before_the_gate(env, monkeypatch, status, stop, moved_to):
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered(status, "interrupt")))
 
-    assert env.start() == implement.Stop("interrupt")
+    assert env.start() == stop
 
-    assert env.task().status == "gating"
+    assert (env.task().status, env.task().reason) == moved_to
     assert [s.kind for s in env.steps()] == ["implement"]
 
 

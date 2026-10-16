@@ -184,12 +184,12 @@ class _Task:
                     logger.error("the session has failed: %s", exc)
                     self._take(self.store.steps(self.task.id)[-1])
                     return None
-                to_gate = self._take(self.store.steps(self.task.id)[-1])
+                if not self._take(self.store.steps(self.task.id)[-1]):
+                    # The task waits for the operator or the planner, whoever stopped the run.
+                    return None
                 if outcome.status == "completed" and outcome.reason == INTERRUPT:
                     logger.warning("stopped by the operator after the answer of the session")
                     return Stop(INTERRUPT)
-                if not to_gate:
-                    return None
             self._enter("gating")
             upcoming = self._after_gate(self._gate())
             if upcoming is None:
