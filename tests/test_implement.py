@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -158,6 +159,22 @@ def test_done_work_that_passes_the_gate_is_committed(env, monkeypatch):
     assert "M app.py" in session.prompt
     assert not session.resume
     assert not (env.repo / guard.HANDOFF).exists()
+
+
+def test_actions_for_the_operator_are_reported_after_the_commit(env, monkeypatch, caplog):
+    actions = ["add JWT_SECRET= to .env.example", "set JWT_EXPIRE_MINUTES=60 in .env.example"]
+    env.script(
+        monkeypatch,
+        (write("app.py", "x = 'fixed'\n"), answered(operator_actions=actions)),
+    )
+
+    with caplog.at_level(logging.INFO, logger="agent_loop"):
+        assert env.start() is None
+
+    assert env.task().status == "committed"
+    committed = next(i for i, m in enumerate(caplog.messages) if m.startswith("committed"))
+    warnings = [r.getMessage() for r in caplog.records[committed:] if r.levelname == "WARNING"]
+    assert warnings == [f"the task needs this from the operator: {action}" for action in actions]
 
 
 def test_fixer_gets_the_findings_and_the_work(env, monkeypatch):

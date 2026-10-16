@@ -31,14 +31,17 @@ ANSWER_SCHEMA = {
         "notes_for_next": {"type": "string"},
         "question": {"type": "string"},
         "split": {"type": "array", "items": {"type": "string"}},
+        "operator_actions": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["status", "summary", "commit_message", "notes_for_next"],
     "additionalProperties": False,
 }
-# The prompt of a paused session resumed with --resume: its context holds the task.
+# The prompt of a paused session resumed with --resume: its context holds the task. The loop
+# has removed the handoff of the pause before the session goes on.
 RESUMED = (
     "agent-loop has resumed this session after a pause. Go on with the task from where you"
-    " stopped and answer as before."
+    " stopped and answer as before. The handoff you wrote at the pause is removed: if you are"
+    " stopped again, write the handoff anew in full."
 )
 
 
@@ -52,11 +55,15 @@ class Answer:
     notes_for_next: str
     question: str | None = None
     split: tuple[str, ...] = ()
+    # What the operator has to do by hand after the task: changes of the files closed to the
+    # session that the task needs.
+    operator_actions: tuple[str, ...] = ()
 
 
 def answer(structured_output: dict) -> Answer:
     # The CLI has validated the output against `ANSWER_SCHEMA`.
-    return Answer(**{**structured_output, "split": tuple(structured_output.get("split", ()))})
+    lists = {key: tuple(structured_output.get(key, ())) for key in ("split", "operator_actions")}
+    return Answer(**{**structured_output, **lists})
 
 
 def system_files(role: str, settings: Settings) -> tuple[Path, ...]:

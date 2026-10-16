@@ -32,7 +32,7 @@ from agent_loop import (
     step,
 )
 from agent_loop.config import Config, Profile
-from agent_loop.store import DB_FILE, Run, Store, StoreError
+from agent_loop.store import DB_FILE, Run, Store, StoreError, Task
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,7 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
         if task is None:
             store.move_run(run.id, "done")
             logger.info("all %d tasks are through", len(tasks))
+            _report_operator_actions(store, tasks)
             return None
         notes = [
             (t.title, implement.last_answer(store.steps(t.id))["notes_for_next"])
@@ -205,6 +206,19 @@ def _interrupted(store: Store, run: Run) -> str:
             "the run is paused (%s), `loop resume %s` goes on", implement.INTERRUPT, run.id
         )
     return implement.INTERRUPT
+
+
+def _report_operator_actions(store: Store, tasks: list[Task]) -> None:
+    """List what the tasks have left for the operator to do by hand, once more at the end of
+    the run: the warning after each commit is easy to lose among the lines of the run."""
+    actions = [
+        f"task {t.seq}: {action}"
+        for t in tasks
+        if t.status in ("committed", "done")
+        for action in prompts.answer(implement.last_answer(store.steps(t.id))).operator_actions
+    ]
+    if actions:
+        logger.warning("the tasks need this from the operator:\n%s", "\n".join(actions))
 
 
 def _head(store: Store, run: Run) -> str:

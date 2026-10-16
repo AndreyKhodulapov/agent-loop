@@ -859,7 +859,7 @@ up = 120
 TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port}/restaurant_test"
 ```
 
-### 3а.2б Правки по третьему прогону — в работе
+### 3а.2б Правки по третьему прогону — готово 2026-10-16
 
 Находки прогона `584816d9` по убыванию серьёзности:
 1. Серьёзно. Остановка между `update-ref HEAD` в `git.commit` и `store.finish_step` в `implement._commit` (SIGINT, `kill -9`, сбой) оставляет коммит задачи в git, а шаг `commit` — открытым. `recovery._pause` видит «HEAD has moved since task 2 started», пишет WIP поверх checkpoint и ставит шаг `paused(died)`; `runner.resume` сравнивает HEAD с последним завершённым коммитом из store и отказывает: `the run has left user-profile at ad9d0730e2e5, now user-profile is at ebd85b4bd1eb: put them back`. Оператор должен сам понять, что `ebd85b4` — коммит цикла, и сделать `git reset ad9d073`; после этого `resume` прогнал gate и закоммитил то же дерево (`cac526e`, дифф с `ebd85b4` пуст). Остановка между `update-ref` и `git reset` оставила бы ещё и индекс от старого HEAD.
@@ -928,7 +928,16 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Тесты: `test_step` — две итерации одной сессии с `total_cost_usd` 0.5 и 0.8: у шагов 0.5 и 0.3, `session_cost_usd` 0.5 и 0.8; убитый шаг между ними не меняет итог.
 
-#### Коммит 4. Промпты: невыполнимый критерий и handoff после `--resume` (находки 2, 5а)
+#### Коммит 4. Промпты: невыполнимый критерий и handoff после `--resume` (находки 2, 5а) — готово 2026-10-16
+
+Сделано:
+- `prompts.ANSWER_SCHEMA` и `Answer`: необязательное `operator_actions` (список строк, по умолчанию пустой кортеж, как `split`). `session.md`: при закрытом файле — доделать остальное и назвать правку в `operator_actions`, это не повод для `needs_human`; описание поля в списке ответа с примером `add JWT_SECRET= to .env.example`.
+- `implement._commit`: после `committed` каждое действие — `WARNING` «the task needs this from the operator: …». `runner._report_operator_actions`: в конце прогона после «all N tasks are through» один `WARNING` со списком `task N: …` по закоммиченным задачам; без действий строки нет. `recovery._finish_commit` действий не пишет — их покажет список в конце прогона.
+- `prompts.RESUMED`: handoff паузы удалён, при новой остановке писать заново целиком.
+- План: раздел 3 — строка решения 2026-10-16; раздел 8 — поле в схеме ответа; этап 4 — п. 3 (карточка не просит правок закрытых файлов).
+- Тесты: `test_prompts` — ответ с `operator_actions`; `test_implement` — новый `test_actions_for_the_operator_are_reported_after_the_commit` (задача `committed`, после строки `committed` ровно два `WARNING` с действиями); `test_runner` — `commits()` принимает действия, счастливый путь проверяет список после «all 2 tasks are through». caplog берёт INFO только с `caplog.at_level(logging.INFO, logger="agent_loop")`. Текст `RESUMED` отдельным тестом не проверяется: проверка константы на слово — шум, подключение `RESUMED` к возобновлённой сессии уже проверяет `test_paused_session_goes_on_with_its_context`.
+
+План коммита:
 
 1. Агент сделал ровно то, что велит `prompts/session.md`: «if the task needs such a change, say so in your answer» — и ответ ушёл в `summary`, которую цикл не читает. Рекомендация агента: необязательное поле ответа `operator_actions` (список строк: что оператор должен сделать руками после задачи) в `prompts.ANSWER_SCHEMA`; `session.md` направляет туда вместо «say so in your answer»; цикл пишет каждое действие строкой `WARNING` после коммита и ещё раз списком в конце прогона (`all N tasks are through`). Задача коммитится: строка в `.env.example` не стоит остановки прогона. Отклонено — `needs_human` на такой критерий: проще (одна фраза в `session.md`), но до `loop answer` (этап 4) прогон встаёт насовсем. Решение человека (2026-10-16): `operator_actions`, по рекомендации агента.
 2. `prompts.RESUMED`: прежний `.loop/handoff.md` удалён; если сессию снова остановят, handoff пишется заново целиком.
@@ -936,7 +945,14 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Тесты: `test_prompts` — схема с `operator_actions`, `RESUMED`; `test_implement` — ответ с `operator_actions`: задача `committed`, действия в логе после коммита; `test_runner` — список в конце прогона.
 
-#### Коммит 5. Псевдонимы типов и правило трёх использований (находка 4)
+#### Коммит 5. Псевдонимы типов и правило трёх использований (находка 4) — готово 2026-10-16
+
+Сделано:
+- `gates._module_names` (им пользуются и `rare` в `_module_style`, и `before` в `_style`): пропускает `X = Annotated[...]` (имя `Annotated` само по себе или через модуль: `typing.Annotated`, `t.Annotated` — `gates._typing_name`), `X: TypeAlias = ...`; `type X = ...` — `ast.TypeAlias`, он и раньше не был `Assign`. Другие подписки и объединения остаются под правилом: `Rows = list[dict]` с двумя использованиями — находка, случай закреплён тестом.
+- План, раздел 3: строка решения 2026-10-16.
+- Тесты: `test_gates` — в `test_style_keeps_to_new_breaks_in_python` четыре псевдонима (`type_alias(line)`), в `test_style_breaks_go_back_to_the_executor` подписка `list[dict]`. Без правки в `src` падают три случая (`Annotated`, `typing.Annotated`, `TypeAlias`).
+
+План коммита:
 
 1. `gates._module_style`: имена, чьё значение — псевдоним типа, не считаются глобалами: `X = Annotated[...]`, `X: TypeAlias = ...`, `type X = ...` (`ast.TypeAlias`). Подписки вроде `Literal[...]` и объединения `A | B` — только вместе с `Annotated`, если тесты на `api-service-foodtech` покажут нужду; без нужды не расширять.
 2. Константы остаются под правилом: `_EMAIL_PATTERN = r"..."` с одним использованием (находка задачи 1) — по-прежнему находка.

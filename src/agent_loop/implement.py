@@ -339,7 +339,8 @@ class _Task:
             self._move("needs_human", "no_changes")
             return None
         steps = self.store.steps(self.task.id)
-        message = last_answer(steps)["commit_message"]
+        answer = prompts.answer(last_answer(steps))
+        message = answer.commit_message
         if not gates.commit_message_ok(message):
             return self._ask_message(steps, message)
         step_id = self.store.start_step(self.task.id, COMMIT, self.checkpoint, self.untracked)
@@ -358,6 +359,8 @@ class _Task:
             logger.info("committed %s %s", commit[:12], message)
         self.store.finish_step(step_id, "completed", {"commit": commit, "message": message})
         self._move("committed")
+        for action in answer.operator_actions:
+            logger.warning("the task needs this from the operator: %s", action)
         return None
 
     def _ask_message(self, steps: list[Step], message: str) -> _Session | None:

@@ -1,5 +1,6 @@
 import contextlib
 import json
+import logging
 import subprocess
 import time
 from pathlib import Path
@@ -60,8 +61,9 @@ class Tasks:
         monkeypatch.setattr(implement, "resume", loop("resume"))
 
 
-def commits(notes=""):
-    """The task commits a module of its own and leaves `notes` for the next ones."""
+def commits(notes="", actions=()):
+    """The task commits a module of its own and leaves `notes` for the next ones and `actions`
+    for the operator."""
 
     def turn(store, task):
         repo = Path(store.run(task.run_id).repo)
@@ -69,6 +71,7 @@ def commits(notes=""):
         if task.status != "implementing":
             store.move_task(task.id, "implementing")
         answer = {"status": "done", "summary": "", "commit_message": "", "notes_for_next": notes}
+        answer["operator_actions"] = list(actions)
         step_id = store.start_step(task.id, implement.IMPLEMENT, checkpoint, [], "s")
         store.finish_step(step_id, "completed", {"reason": None, "answer": answer})
         store.move_task(task.id, "gating")
@@ -108,7 +111,7 @@ def the_run(home):
 
 
 def test_tasks_run_one_after_another_until_the_run_is_done(
-    home, repo, tmp_path, tasks_file, monkeypatch
+    home, repo, tmp_path, tasks_file, monkeypatch, caplog
 ):
     services = tmp_path / "services.log"
     profile = Profile(
@@ -116,9 +119,14 @@ def test_tasks_run_one_after_another_until_the_run_is_done(
     )
     cfg = Config(home, repo, None, Settings(), {}, profile)
     base = git.head(repo)
-    tasks = Tasks(monkeypatch, commits("tasks.py has helper()"), commits())
+    tasks = Tasks(
+        monkeypatch,
+        commits("tasks.py has helper()", ["add JWT_SECRET= to .env.example"]),
+        commits(actions=["add JWT_EXPIRE_MINUTES=60 to .env.example"]),
+    )
 
-    assert runner.start(cfg, tasks_file) is None
+    with caplog.at_level(logging.INFO, logger="agent_loop"):
+        assert runner.start(cfg, tasks_file) is None
 
     run, [first, second], run_moves = the_run(home)
     assert (run.branch, run.base) == ("main", base)
@@ -133,6 +141,12 @@ def test_tasks_run_one_after_another_until_the_run_is_done(
     run_dir = step.run_dir(home, run.id)
     assert (run_dir / protected.COPY_DIR).is_dir()
     assert (run_dir / "profile.json").is_file()
+    through = caplog.messages.index("all 2 tasks are through")
+    assert caplog.messages[through + 1] == (
+        "the tasks need this from the operator:\n"
+        "task 1: add JWT_SECRET= to .env.example\n"
+        "task 2: add JWT_EXPIRE_MINUTES=60 to .env.example"
+    )
 
 
 def detach(repo):

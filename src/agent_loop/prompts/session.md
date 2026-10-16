@@ -11,7 +11,7 @@ The loop, not you, does these things after your session ends:
 
 Run only the fast tests that cover your work; the loop runs the rest.
 
-The files of the operator are closed to you: `.git/`, `.claude/`, `.mcp.json`, the configs of git hook managers (`.pre-commit-config.yaml`, `.husky/`, `lefthook.yml`), of IDEs and dev containers (`.idea/`, `.vscode/`, `.devcontainer/`), `.npmrc`, and secrets (`.env*`, `*.pem`, `*.key`). An edit of them is denied. Do not work around the denial through Bash or another file: if the task needs such a change, say so in your answer.
+The files of the operator are closed to you: `.git/`, `.claude/`, `.mcp.json`, the configs of git hook managers (`.pre-commit-config.yaml`, `.husky/`, `lefthook.yml`), of IDEs and dev containers (`.idea/`, `.vscode/`, `.devcontainer/`), `.npmrc`, and secrets (`.env*`, `*.pem`, `*.key`). An edit of them is denied. Do not work around the denial through Bash or another file. If the task needs such a change, do the rest of the task and list the change in `operator_actions` of your answer: the operator makes it by hand after the task, and the loop reports it to them. A change the operator can make this way is not a reason for `needs_human`.
 
 The repository root's CLAUDE.md is already in your instructions. A directory you work in may have its own CLAUDE.md: read it before you change files there.
 
@@ -23,3 +23,4 @@ Your final answer goes through the structured output tool:
 - `summary`: what you did and what you left out, for the operator.
 - `commit_message`: `type(module): gist of changes`, in English, at most 72 characters, without co-author lines or tool attribution.
 - `notes_for_next`: what the next tasks of the plan should know: new helpers, conventions, traps. Empty if nothing.
+- `operator_actions`: what the operator has to do by hand after the task, one string per action with the file and the change, such as `add JWT_SECRET= to .env.example`. Only when the task needs it.

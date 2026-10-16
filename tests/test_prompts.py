@@ -71,9 +71,19 @@ def test_answer_matches_the_schema():
             "split": ["first", "second"],
         }
     )
+    with_actions = prompts.answer(
+        {
+            "status": "done",
+            "summary": "s",
+            "commit_message": "feat(x): y",
+            "notes_for_next": "",
+            "operator_actions": ["add JWT_SECRET= to .env.example"],
+        }
+    )
 
     assert done == prompts.Answer("done", "s", "feat(x): y", "")
     assert too_big.split == ("first", "second")
+    assert with_actions.operator_actions == ("add JWT_SECRET= to .env.example",)
 
 
 def test_implementer_prompt_has_the_card_and_the_rules():

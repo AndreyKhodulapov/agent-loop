@@ -437,6 +437,11 @@ def test_flaky_test_the_task_has_not_touched_passes_with_a_warning(repo, work, c
             "1: the module-level `RATE` has 2 uses in the module, fewer than 3: make it a local"
             " variable or a class attribute",
         ),
+        (
+            "Rows = list[dict]\n\n\ndef load(rows: Rows) -> Rows:\n    return rows\n",
+            "1: the module-level `Rows` has 2 uses in the module, fewer than 3: make it a local"
+            " variable or a class attribute",
+        ),
     ],
 )
 def test_style_breaks_go_back_to_the_executor(repo, work, module, finding):
@@ -477,6 +482,16 @@ def refer_to_global(repo):
     (repo / "app.py").write_text("from orders import RATE\n")
 
 
+def type_alias(line):
+    def change(repo):
+        (repo / "orders.py").write_text(
+            f"import typing\nfrom typing import Annotated, TypeAlias\n\n{line}\n\n\n"
+            "def register(password: Password) -> Password:\n    return password\n"
+        )
+
+    return change
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -484,6 +499,10 @@ def refer_to_global(repo):
         lambda repo: (repo / "app.py").write_text("x = 2\n"),
         move_global,
         refer_to_global,
+        type_alias('Password = Annotated[str, "at least 8 characters"]'),
+        type_alias("Password = typing.Annotated[str, typing.Any]"),
+        type_alias("Password: TypeAlias = str | None"),
+        type_alias("type Password = str"),
         lambda repo: (repo / "orders.py").write_text("def broken(:\n    # --- x ---\n"),
         lambda repo: (repo / "notes.txt").write_text("# --- x ---\n"),
     ],

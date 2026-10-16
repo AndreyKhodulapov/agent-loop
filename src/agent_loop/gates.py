@@ -406,12 +406,22 @@ def _module_style(repo: Path, path: str, added: set[int], before: set[str]) -> l
 
 
 def _module_names(tree: ast.Module) -> dict[str, int]:
-    """Names assigned at the module level, each with the line of its first assignment."""
+    """Names assigned at the module level, each with the line of its first assignment.
+
+    A type alias (`X = Annotated[...]`, `X: TypeAlias = ...`, `type X = ...`) is not among them:
+    the rule about globals is about state, and a type is not state.
+    """
     names = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign) and not (
+            isinstance(node.value, ast.Subscript) and _typing_name(node.value.value, "Annotated")
+        ):
             targets = node.targets
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.value is not None
+            and not _typing_name(node.annotation, "TypeAlias")
+        ):
             targets = [node.target]
         else:
             continue
@@ -419,6 +429,13 @@ def _module_names(tree: ast.Module) -> dict[str, int]:
             if isinstance(target, ast.Name):
                 names.setdefault(target.id, node.lineno)
     return names
+
+
+def _typing_name(node: ast.expr, name: str) -> bool:
+    # `Annotated` as imported, or through the module: `typing.Annotated`, `t.Annotated`.
+    return (isinstance(node, ast.Name) and node.id == name) or (
+        isinstance(node, ast.Attribute) and node.attr == name
+    )
 
 
 def _added_lines(patch: str) -> dict[str, set[int]]:
