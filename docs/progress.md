@@ -973,9 +973,9 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 2. `implement._loop`: ответ сессии с `interrupt` и статусом не `done` (`blocked`, `needs_human`, `too_big`) уводил задачу в `needs_human`/`replan`, а прогон вставал с причиной `interrupt` — на `loop resume` отказ «task N waits in needs_human» был верным, причина паузы прогона и предупреждение в логе — нет. Теперь `_take` решает первым: задача ушла ждать — цикл возвращает `None`, и `runner` ставит прогон на паузу по статусу задачи; `Stop(INTERRUPT)` — только когда работа идёт к gate.
 3. Тесты: `test_gates` — новый `test_files_the_commands_change_are_the_work` (`fmt` дописывает разделитель в `old.py`, которого задача не трогала: `lines == 3`, находка стиля `old.py:2`); `test_implement` — `test_interrupt_while_answering_stops_before_the_gate` параметризован ответом `blocked` с `interrupt` (`None`, задача `needs_human(blocked)`). Без правок в `src` оба новых случая падают.
 
-### 3а.3 Мерж и дальше
+### 3а.3 Мерж и дальше — мерж готов 2026-10-16
 
-Мерж `implementation-loop` в `main`. Этап 4 (планирование) — в новой ветке, имя спросить у человека; вход `loop run` из файла карточек заменит утверждённый план, там же `loop answer` для `needs_human` и перепланирование для `replan`. Go-репозиторий — отдельным прогоном позже.
+`implementation-loop` смержена в `main` (PR #2, `10e2836`). Этап 4 — ветка `planner`. Этап 4 (планирование) — в новой ветке, имя спросить у человека; вход `loop run` из файла карточек заменит утверждённый план, там же `loop answer` для `needs_human` и перепланирование для `replan`. Go-репозиторий — отдельным прогоном позже.
 
 Открыто к обсуждению: `needs_human` на изменение `docker-compose*.yml` и `[build-system]` (остаток риска `install`/`up`, раздел 10).
 
@@ -985,3 +985,23 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 - только файлы работы — новая подстановка `{changed_files}` рядом с `{changed_tests}`: `ruff format {changed_files}`, `ruff check {changed_files}`.
 
 Что сделать: заполнять `{changed_files}` существующими изменёнными файлами работы в `gates._run_commands`; команду с пустой подстановкой не запускать (`ruff format` без путей форматирует весь каталог). Ruff сам пропускает переданные явно не-Python файлы (проверено 2026-10-16: `README.md`, `pyproject.toml` не тронуты, код 0). Ограничения режима: тронутый файл форматируется целиком, а `lint` находит старые нарушения в тронутых файлах — для командного репозитория, где это нежелательно, остаётся «выключено». Проверка только изменённых строк (`ruff format --range` — один файл за вызов, разбор вывода `lint` по ханкам) — сложнее, не делать без нужды. Дополнительно обсудить: изменённые командами отслеживаемые файлы вне работы — находка gate, а не молчаливая часть коммита.
+
+## Этап 4. Планирование
+
+Ветка `planner` от `main` после мержа PR #2. Все шаги этапа — коммиты в ней.
+
+### 4.0 Долг по ревью `implementation-loop` — готово 2026-10-16
+
+Находки 3–8 ревью перед мержем (план, раздел 14, этап 4, шаг 0). Один коммит.
+1. `runner.resume`: прогон с `base = NULL` (создан до колонки) — `RunError` «has no record of the HEAD it started from, start a new run». Тип `Run.base` остаётся `str | None`: старые строки не мигрируются, тип говорит правду о таблице.
+2. `prompts/AGENTS.md` — симлинк: без правок, решить при первой упаковке (wheel уже проверен в 3а.1б).
+3. `cli._work`: `FileNotFoundError` убран из списка. Отсутствие файлов прогона ожидаемо только в `runner.resume` (оператор удалил `runs/<run>` руками; `loop gc` их не удаляет): там проверка `profile.json` и копии `protected` до `commands.frozen` и `RunError` с именем пропавшего. `protected.restore` по-прежнему бросает `FileNotFoundError` — теперь это ошибка программы с трейсбеком.
+4. `gates._weakened`: проверка — `assert` словом или `assert\w*(` (`assert_called_once()`, `self.assertEqual(`, `assert_that(`); `assertion`/`asserted` в комментарии не считаются. Раньше комментарий со словом `assertion` на месте удалённого `assert` гасил находку (−1 + 1 = 0).
+5. `commands._sandbox`, спайк на реальном `sandbox-exec` 2026-10-16: пути с пробелом, табом, `()[]` и обратной косой чертой — запись в репозиторий есть, `.git/hooks`, `*.pem`, `../` закрыты; `re.escape` даёт `\ `, seatbelt читает верно. Путь с `"` ломает разбор профиля: любая gate-команда падает с невнятной ошибкой — закрыто, а не открыто; правок нет. Фикстура `sandboxed` теперь кладёт репозиторий в `my repo`: все тесты sandbox идут по пути с пробелом.
+6. `test_cli`: `test_run_commits_the_work_of_its_tasks` → `test_run_through_all_its_tasks_exits_with_zero`, проверяет только код выхода и один прогон `done`; коммит проверяет `test_implement`.
+
+Тесты: `test_runner::test_resume_refuses_a_run_it_cannot_check` (параметры: `base = NULL`, удалённая копия `protected`, удалённый `profile.json`); `test_gates::test_weakened_tests_go_back_to_the_executor` — случай «`assert` заменён комментарием `# no assertion yet`»; из `test_cli::test_run_stopped_by_an_error_is_paused_as_a_dead_one` убран параметр `FileNotFoundError`.
+
+Предлагаемое сообщение коммита: `fix(runner): refuse to resume a run without its base or files, narrow the removed assert check`.
+
+Дальше — шаг 4.1: схема `plan.json`, роль планировщика, `loop plan` (интерактивный и `--from task.md` с `QUESTIONS.md` и `loop answer`), валидация на выходе. Перед стартом шага предложить человеку разбиение на коммиты.

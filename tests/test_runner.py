@@ -1,6 +1,8 @@
 import contextlib
 import json
 import logging
+import shutil
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -318,3 +320,27 @@ def test_resume_without_a_paused_run(home, cfg):
         runner.resume(cfg, None)
     with pytest.raises(runner.RunError, match="run 0a1b2c3d not found"):
         runner.resume(cfg, "0a1b2c3d")
+
+
+def forget_the_base(home, run_dir):
+    with contextlib.closing(sqlite3.connect(home / "loop.db")) as conn, conn:
+        conn.execute("UPDATE runs SET base = NULL")
+
+
+@pytest.mark.parametrize(
+    "spoil, error",
+    [
+        (forget_the_base, "has no record of the HEAD it started from"),
+        (lambda home, run_dir: shutil.rmtree(run_dir / protected.COPY_DIR), "protected of the run"),
+        (lambda home, run_dir: (run_dir / "profile.json").unlink(), "profile.json of the run"),
+    ],
+)
+def test_resume_refuses_a_run_it_cannot_check(home, cfg, tasks_file, monkeypatch, spoil, error):
+    Tasks(monkeypatch, moves("implementing", "paused", reason="interrupt"))
+    runner.start(cfg, tasks_file)
+    run, _, _ = the_run(home)
+
+    spoil(home, step.run_dir(home, run.id))
+
+    with pytest.raises(runner.RunError, match=error):
+        runner.resume(cfg, None)

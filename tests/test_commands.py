@@ -51,7 +51,8 @@ def sandboxed(tmp_path, monkeypatch):
     (home / ".ssh").mkdir(parents=True)
     (home / ".ssh" / "config").write_text("Host *\n")
     monkeypatch.setenv("HOME", str(home))
-    repo = tmp_path / "repo"
+    # A space in the path: the profile matches the repository by a regex.
+    repo = tmp_path / "my repo"
     (repo / ".git" / "hooks").mkdir(parents=True)
     (repo / "deploy").mkdir()
     (repo / "deploy" / "server.pem").write_text("key\n")

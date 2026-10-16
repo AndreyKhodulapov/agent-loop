@@ -112,8 +112,8 @@ def _resume(args: argparse.Namespace, cfg: config.Config) -> int:
 def _work(cfg: config.Config, run: Callable[[], str | None]) -> int:
     try:
         paused = run()
-    # A broken profile, a failed `install` or `up`, git or the store failing under the run, a
-    # removed copy of the protected files stop the run as well as a refusal to start.
+    # A broken profile, a failed `install` or `up`, git or the store failing under the run stop
+    # the run as well as a refusal to start.
     except (
         runner.RunError,
         agent.AgentError,
@@ -121,7 +121,6 @@ def _work(cfg: config.Config, run: Callable[[], str | None]) -> int:
         CommandError,
         git.GitError,
         StoreError,
-        FileNotFoundError,
     ) as exc:
         logger.error("%s", exc)
         return 1

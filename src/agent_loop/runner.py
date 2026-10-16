@@ -120,7 +120,20 @@ def resume(cfg: Config, run_id: str | None) -> str | None:
     selfcheck.require(cfg.home)
     with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
         run = _paused(store, repo, run_id)
+        if run.base is None:
+            raise RunError(
+                f"run {run.id} has no record of the HEAD it started from, start a new run"
+            )
         run_dir = step.run_dir(cfg.home, run.id)
+        # Removed by hand: without the copy `protected.restore` would take every protected file
+        # of the operator for a new one.
+        missing = [
+            name
+            for name in (commands.PROFILE_FILE, protected.COPY_DIR)
+            if not (run_dir / name).exists()
+        ]
+        if missing:
+            raise RunError(f"{', '.join(missing)} of the run is gone from {run_dir}")
         with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
             # They wait for `loop answer` and the planner.
             waiting = [t for t in store.tasks(run.id) if t.status in ("needs_human", "replan")]

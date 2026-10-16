@@ -192,6 +192,10 @@ def edit_test(repo, old, new):
             "assert lines removed: tests/test_app.py (1)",
         ),
         (
+            lambda repo: edit_test(repo, "    assert 2 - 1 == 1\n", "    # no assertion yet\n"),
+            "assert lines removed: tests/test_app.py (1)",
+        ),
+        (
             lambda repo: (repo / "tests" / "test_app.py").unlink(),
             "assert lines removed: tests/test_app.py (2)",
         ),

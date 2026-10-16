@@ -510,7 +510,8 @@ def _weakened(patch: str) -> list[str]:
         r"\b(mark\.(skip|skipif|xfail)|pytest\.(skip|xfail)|unittest\.skip\w*|skipTest"
         r"|t\.Skip\w*|xit|xdescribe|xtest|(it|test|describe)\.skip)\b"
     )
-    assertion = re.compile(r"\b(assert\w*|expect\(|require\.|t\.(Error|Fatal)\w*)")
+    # `assert_called_once()` and `self.assertEqual(` are checks, `assertion` in a comment is not.
+    assertion = re.compile(r"\b(assert\b|assert\w*\(|expect\(|require\.|t\.(Error|Fatal)\w*)")
     skips: Counter[str] = Counter()
     asserts: Counter[str] = Counter()
     path = None
