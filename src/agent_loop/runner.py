@@ -5,6 +5,7 @@ holds the lock of the working directory and its own lock, works with the profile
 start and keeps the services of the profile up while it works.
 
 The run pauses when a task needs the operator: a question, the planner, a moved branch, Ctrl+C.
+Ctrl+C outside a session pauses the run with its open steps as `recovery` pauses a dead one.
 When the limits leave no room for a session, the run waits in the process and goes on by itself.
 A run that stops on an error is left running for `recovery.reap` to pause, as a dead one.
 """
@@ -73,8 +74,9 @@ def load_tasks(path: Path) -> list[tuple[str, dict]]:
     return tasks
 
 
-def start(cfg: Config, tasks_file: Path) -> bool:
-    """Run the tasks of `tasks_file` on the current branch; True when all of them are through.
+def start(cfg: Config, tasks_file: Path) -> str | None:
+    """Run the tasks of `tasks_file` on the current branch; returns why the run has paused, None
+    when all the tasks are through.
 
     The tracked files must have no changes: they would become the work of the first task.
     """
@@ -98,14 +100,18 @@ def start(cfg: Config, tasks_file: Path) -> bool:
             store.move_run(run_id, "approved")
             store.move_run(run_id, "running")
             logger.info("%d tasks on %s, the run is %s", len(tasks), branch, run_id)
-            if "install" in profile.commands:
-                logger.info("installing the dependencies")
-                commands.run(profile, "install", repo)
-            with commands.services(profile, repo, run_dir):
-                return _work(cfg, store, store.run(run_id), profile)
+            run = store.run(run_id)
+            try:
+                if "install" in profile.commands:
+                    logger.info("installing the dependencies")
+                    commands.run(profile, "install", repo)
+                with commands.services(profile, repo, run_dir):
+                    return _work(cfg, store, run, profile)
+            except KeyboardInterrupt:
+                return _interrupted(store, run)
 
 
-def resume(cfg: Config, run_id: str | None) -> bool:
+def resume(cfg: Config, run_id: str | None) -> str | None:
     """Go on with the paused run `run_id`, or with the last paused run of the repository.
 
     The branch and HEAD must be where the run has left them. Returns as `start`.
@@ -130,11 +136,14 @@ def resume(cfg: Config, run_id: str | None) -> bool:
             profile = commands.frozen(run_dir)
             store.move_run(run.id, "running")
             logger.info("resuming the run paused for %s", run.reason)
-            with commands.services(profile, repo, run_dir):
-                return _work(cfg, store, run, profile)
+            try:
+                with commands.services(profile, repo, run_dir):
+                    return _work(cfg, store, run, profile)
+            except KeyboardInterrupt:
+                return _interrupted(store, run)
 
 
-def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> bool:
+def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
     repo = Path(run.repo)
     while True:
         tasks = store.tasks(run.id)
@@ -143,7 +152,7 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> bool:
         if task is None:
             store.move_run(run.id, "done")
             logger.info("all %d tasks are through", len(tasks))
-            return True
+            return None
         notes = [
             (t.title, implement.last_answer(store.steps(t.id))["notes_for_next"])
             for t in tasks
@@ -154,7 +163,7 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> bool:
         stop = go_on(cfg, store, run, task, len(tasks), profile, previous)
         if stop is not None and stop.reason == implement.BUDGET:
             if not _wait(store, run, stop.resume_at):
-                return False
+                return implement.INTERRUPT
             continue
         if stop is not None:
             return _pause(store, run, stop.reason)
@@ -172,16 +181,30 @@ def _wait(store: Store, run: Run, resume_at: int) -> bool:
     try:
         time.sleep(max(0, resume_at - time.time()))
     except KeyboardInterrupt:
+        # The run stays paused for the limits: they are what `loop resume` waits for.
         logger.warning("stopped while waiting for the limits, `loop resume` goes on")
         return False
     store.move_run(run.id, "running")
     return True
 
 
-def _pause(store: Store, run: Run, reason: str) -> bool:
+def _pause(store: Store, run: Run, reason: str) -> str:
     store.move_run(run.id, "paused", reason)
     logger.warning("the run is paused (%s), `loop resume %s` goes on", reason, run.id)
-    return False
+    return reason
+
+
+def _interrupted(store: Store, run: Run) -> str:
+    """Pause the run the operator has stopped outside a session: in `install` or `up`, the gate,
+    the commit or between the tasks."""
+    logger.warning("stopped by the operator")
+    # Ctrl+C in `down` comes after the run has paused or is done.
+    if store.run(run.id).status == "running":
+        recovery.pause(store, run, implement.INTERRUPT)
+        logger.warning(
+            "the run is paused (%s), `loop resume %s` goes on", implement.INTERRUPT, run.id
+        )
+    return implement.INTERRUPT
 
 
 def _head(store: Store, run: Run) -> str:

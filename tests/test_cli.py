@@ -9,7 +9,7 @@ import time
 import pytest
 from fakes import INIT, RESULT, read_calls
 
-from agent_loop import agent, cli, config, git, implement, selfcheck, step
+from agent_loop import agent, cli, commands, config, gates, git, implement, selfcheck, step
 from agent_loop.store import Store, StoreError
 
 
@@ -128,6 +128,58 @@ def test_run_stopped_inside_the_commit_goes_on_with_the_next_task(
     with contextlib.closing(Store(isolated / "loop.db")) as store:
         [run] = store.runs("done")
         assert [task.status for task in store.tasks(run.id)] == ["committed", "committed"]
+
+
+@pytest.mark.parametrize("where", ["up", "gate", "answer"])
+def test_operator_stop_pauses_the_run_with_the_exit_code_of_ctrl_c(
+    isolated, in_repo, tmp_path, monkeypatch, capsys, where
+):
+    stops = [where]
+
+    def stopped(name):
+        if name not in stops:
+            return False
+        stops.remove(name)
+        return True
+
+    def session(session, cfg, store, run_id, step_id):
+        (session.cwd / "app.py").write_text("x = 'fixed'\n")
+        answer = {"status": "done", "summary": "", "commit_message": "fix(app): fix x"}
+        reason = implement.INTERRUPT if stopped("answer") else None
+        detail = {"reason": reason, "answer": answer | {"notes_for_next": ""}}
+        store.finish_step(step_id, "completed", detail)
+        return step.Outcome("completed", reason, None, 1000)
+
+    real_run, real_check = commands.run, gates.check
+
+    def run(profile, name, repo):
+        if stopped(name):
+            raise KeyboardInterrupt
+        return real_run(profile, name, repo)
+
+    def check(*args):
+        if stopped("gate"):
+            raise KeyboardInterrupt
+        return real_check(*args)
+
+    monkeypatch.setattr(step, "run", session)
+    monkeypatch.setattr(commands, "run", run)
+    monkeypatch.setattr(gates, "check", check)
+    profile = tmp_path / "loop.toml"
+    profile.write_text('[commands]\nup = "true"\n')
+    flags = ["--profile", str(profile)]
+
+    assert cli.main([*flags, "run", str(tmp_path / "tasks.json")]) == 130
+
+    assert "is gone" not in capsys.readouterr().err
+    with contextlib.closing(Store(isolated / "loop.db")) as store:
+        [run] = store.runs("paused")
+        assert run.reason == implement.INTERRUPT
+        [task] = store.tasks(run.id)
+        paused = [s.detail["reason"] for s in store.steps(task.id) if s.outcome == "paused"]
+        assert paused == ([implement.INTERRUPT] if where == "gate" else [])
+    assert cli.main([*flags, "resume"]) == 0
+    assert git.git(in_repo, "log", "-1", "--format=%s").strip() == "fix(app): fix x"
 
 
 @pytest.mark.parametrize(

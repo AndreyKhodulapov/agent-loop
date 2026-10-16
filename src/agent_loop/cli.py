@@ -7,7 +7,7 @@ import signal
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_loop import agent, config, git, log, recovery, runner, selfcheck
+from agent_loop import agent, config, git, implement, log, recovery, runner, selfcheck
 from agent_loop.commands import CommandError
 from agent_loop.store import DB_FILE, Store, StoreError
 
@@ -109,9 +109,9 @@ def _resume(args: argparse.Namespace, cfg: config.Config) -> int:
     return _work(cfg, lambda: runner.resume(cfg, args.run_id))
 
 
-def _work(cfg: config.Config, run: Callable[[], bool]) -> int:
+def _work(cfg: config.Config, run: Callable[[], str | None]) -> int:
     try:
-        return 0 if run() else 1
+        paused = run()
     # A broken profile, a failed `install` or `up`, git or the store failing under the run, a
     # removed copy of the protected files stop the run as well as a refusal to start.
     except (
@@ -131,6 +131,10 @@ def _work(cfg: config.Config, run: Callable[[], bool]) -> int:
     finally:
         # A run that has stopped on the way is paused the way a dead one is.
         _reap(cfg)
+    if paused is None:
+        return 0
+    # The operator has stopped the run, in a session or outside it.
+    return 130 if paused == implement.INTERRUPT else 1
 
 
 def _show_config(args: argparse.Namespace, cfg: config.Config) -> int:

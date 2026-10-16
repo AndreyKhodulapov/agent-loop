@@ -118,7 +118,7 @@ def test_tasks_run_one_after_another_until_the_run_is_done(
     base = git.head(repo)
     tasks = Tasks(monkeypatch, commits("tasks.py has helper()"), commits())
 
-    assert runner.start(cfg, tasks_file) is True
+    assert runner.start(cfg, tasks_file) is None
 
     run, [first, second], run_moves = the_run(home)
     assert (run.branch, run.base) == ("main", base)
@@ -188,7 +188,7 @@ def test_task_that_waits_for_the_operator_pauses_the_run(
 ):
     tasks = Tasks(monkeypatch, moves("implementing", status, reason=reason))
 
-    assert runner.start(cfg, tasks_file) is False
+    assert runner.start(cfg, tasks_file) == status
 
     run, [first, second], run_moves = the_run(home)
     assert run_moves[-1] == ("paused", status)
@@ -209,7 +209,7 @@ def test_run_waits_for_the_limits_and_goes_on(home, cfg, tasks_file, monkeypatch
         commits(),
     )
 
-    assert runner.start(cfg, tasks_file) is True
+    assert runner.start(cfg, tasks_file) is None
 
     _, _, run_moves = the_run(home)
     assert run_moves == [
@@ -236,12 +236,12 @@ def test_ctrl_c_while_waiting_for_the_limits_leaves_the_run_paused(
     monkeypatch.setattr(time, "sleep", interrupted)
     Tasks(monkeypatch, moves(stop=implement.Stop(implement.BUDGET, int(time.time()) + 600)))
 
-    assert runner.start(cfg, tasks_file) is False
+    assert runner.start(cfg, tasks_file) == "interrupt"
     run, _, run_moves = the_run(home)
     assert run_moves[-1] == ("paused", "budget")
 
     tasks = Tasks(monkeypatch, commits(), commits())
-    assert runner.resume(cfg, run.id) is True
+    assert runner.resume(cfg, run.id) is None
     assert [name for name, _, _, _ in tasks.calls] == ["start", "start"]
 
 
@@ -258,12 +258,12 @@ def test_operator_stops_pause_the_run_and_resume_goes_on(
 ):
     Tasks(monkeypatch, turn)
 
-    assert runner.start(cfg, tasks_file) is False
+    assert runner.start(cfg, tasks_file) == reason
     _, _, run_moves = the_run(home)
     assert run_moves[-1] == ("paused", reason)
 
     tasks = Tasks(monkeypatch, commits(), commits())
-    assert runner.resume(cfg, None) is True
+    assert runner.resume(cfg, None) is None
     assert [name for name, _, _, _ in tasks.calls] == ["resume", "start"]
 
 
@@ -272,7 +272,7 @@ def test_task_paused_for_the_context_goes_on_at_once(home, cfg, tasks_file, monk
         monkeypatch, moves("implementing", "paused", reason="context"), commits(), commits()
     )
 
-    assert runner.start(cfg, tasks_file) is True
+    assert runner.start(cfg, tasks_file) is None
 
     _, _, run_moves = the_run(home)
     assert run_moves == [("approved", None), ("running", None), ("done", None)]
@@ -296,7 +296,7 @@ def test_resume_needs_the_branch_where_the_run_has_left_it(
     subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
 
     Tasks(monkeypatch, commits())
-    assert runner.resume(cfg, None) is True
+    assert runner.resume(cfg, None) is None
 
 
 def test_resume_without_a_paused_run(home, cfg):

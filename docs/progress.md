@@ -891,7 +891,18 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Тесты: `test_recovery` — открытый `commit` с коммитом цикла на HEAD: шаг `completed`, задача `committed`, индекс чистый, WIP-ref нет; с чужим коммитом на HEAD (родитель checkpoint, другое сообщение) — как сейчас. `test_implement` или `test_cli` — `KeyboardInterrupt` из `git reset` внутри `git.commit` (monkeypatch): после `_reap` задача `committed`, `resume` идёт к следующей задаче без отказа «put them back». `test_implement` — WIP-ref задачи, вставшей на паузу и затем закоммиченной, удалён.
 
-#### Коммит 2. Остановка оператором вне сессии (находка 5б)
+#### Коммит 2. Остановка оператором вне сессии (находка 5б) — готово 2026-10-16
+
+Сделано:
+- `recovery.pause(store, run, reason)` — бывший `_pause`, причина параметром; «the orchestrator of this run is gone» пишет только `reap`, он же передаёт `died`.
+- `runner.start`/`resume` возвращают причину паузы прогона (`None` — все задачи прошли) вместо `bool`. `KeyboardInterrupt` в `install`, `up`, gate, коммите, между задачами ловится в `runner` (`_interrupted`) и ставит свой прогон на паузу `recovery.pause(..., interrupt)` под его же lock; `down` к этому моменту уже отработал в `commands.services`. Ctrl+C в `down`, когда прогон уже на паузе или `done`, прогон не трогает.
+- Ctrl+C во время ожидания лимитов (`runner._wait`): прогон остаётся `paused(budget)` — `loop resume` ждёт именно лимитов, — но возвращается `interrupt`. Отступление от п. 2 («источник — причина паузы прогона»): здесь код 130 даёт путь, а не причина.
+- `cli._work`: `None` → 0, `interrupt` → 130, иначе 1. `except KeyboardInterrupt` в `cli` остаётся для Ctrl+C вне `runner` (до паузы прогона, во время самой паузы): такой прогон по-прежнему доуберёт `_reap` как `died`.
+- П. 3 проверен: `step.how_to_resume` и `runner._work` `died` и `interrupt` не различают. У шагов gate/commit `implement._resume_paused` возвращается до `how_to_resume`; `how_to_resume` смотрит только на `timeout`/`idle`/`guard_error` и контекст (у шагов из `recovery.pause` `context_tokens` нет в обоих случаях); `runner._work` смотрит на причину задачи только после `go_on` в живом прогоне.
+- План, раздел 3: строка решения 2026-10-16.
+- Тесты: `test_cli` — Ctrl+C в `up`, в gate и после ответа сессии (параметризация): код 130, прогон `paused(interrupt)`, у gate — шаг `paused(interrupt)`, в логе нет «is gone», `loop resume` коммитит задачу. Без правки в `src` падают все три. `test_runner` — ожидания `True`/`False` заменены причиной паузы (`None`, `status`, `reason`, `interrupt`). 380 тестов, `ruff check`, `ruff format --check`, `gates._style` по диффу — зелёные.
+
+План коммита:
 
 1. `cli._work`, `except KeyboardInterrupt`: прогон этого процесса ставится на паузу с причиной `interrupt`, не `died`, и без «the orchestrator of this run is gone». Способ — параметр причины у `recovery.reap`/`_pause` или отдельная функция в `recovery` для своего прогона; выбрать по коду, без второго пути сохранения WIP. Шаги, открытые при Ctrl+C, — `paused(interrupt)`.
 2. Код выхода остановки оператором — 130 везде: и `paused(interrupt)` после сессии (сейчас 1, мелочь второго прогона 3а.2), и `KeyboardInterrupt` вне сессии. Источник — причина паузы прогона, а не путь, которым он встал.

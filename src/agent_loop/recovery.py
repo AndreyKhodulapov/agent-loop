@@ -10,6 +10,8 @@ progress goes to the WIP ref of the task and the step is finished as paused, so 
 the session (`step.how_to_resume`). A commit step stopped after the commit of the task is on the
 branch is finished as completed instead: the task is committed. Services it has left up are
 stopped with `down` of the frozen profile.
+
+A live run that the operator stops outside a session pauses its open steps the same way.
 """
 
 from __future__ import annotations
@@ -74,8 +76,9 @@ def reap(store: Store, home: Path) -> list[str]:
             if store.run(run.id).status != "running":
                 continue
             with log.scope(run=run.id):
+                logger.warning("the orchestrator of this run is gone, pausing the run")
                 try:
-                    _pause(store, run)
+                    pause(store, run, DIED)
                 except git.GitError as exc:
                     # Its open steps stay open, so the next `loop` tries again; one broken run
                     # must not stop every command.
@@ -89,8 +92,8 @@ def reap(store: Store, home: Path) -> list[str]:
     return reaped
 
 
-def _pause(store: Store, run: Run) -> None:
-    logger.warning("the orchestrator of this run is gone, pausing the run")
+def pause(store: Store, run: Run, reason: str) -> None:
+    """Pause the running `run` and its open steps for `reason`, saving their work in progress."""
     tasks = {task.id: task for task in store.tasks(run.id)}
     for open_step in store.open_steps(run.id):
         task = tasks[open_step.task_id]
@@ -112,11 +115,11 @@ def _pause(store: Store, run: Run) -> None:
         ref = git.wip_ref(run.id, task.seq)
         git.save_wip(repo, ref, open_step.untracked, open_step.checkpoint)
         logger.info("task %d: work in progress saved in %s", task.seq, ref)
-        store.finish_step(open_step.id, "paused", {"reason": DIED})
-        # The orchestrator may have died between starting the step and moving the task.
+        store.finish_step(open_step.id, "paused", {"reason": reason})
+        # The orchestrator may have stopped between starting the step and moving the task.
         if "paused" in TASK_TRANSITIONS[task.status]:
-            store.move_task(task.id, "paused", DIED)
-    store.move_run(run.id, "paused", DIED)
+            store.move_task(task.id, "paused", reason)
+    store.move_run(run.id, "paused", reason)
 
 
 def _finish_commit(store: Store, run: Run, task_seq: int, commit_step: Step) -> bool:
