@@ -33,7 +33,14 @@ def test_defaults_without_any_source(tmp_path, home):
     assert cfg.settings == config.Settings()
     assert cfg.repo_root is None
     assert cfg.profile is None
+    assert cfg.repo == config.Profile()
     assert set(cfg.sources.values()) == {"default"}
+
+
+def test_relative_home_is_taken_from_the_working_directory(tmp_path):
+    cfg = config.load(tmp_path, environ={"LOOP_HOME": "home"})
+
+    assert cfg.home == tmp_path / "home"
 
 
 def test_env_example_is_valid(tmp_path, home):
@@ -73,6 +80,38 @@ def test_profile_from_knowledge_dir(repo, home, tmp_path):
 
     assert cfg.profile == profile
     assert cfg.settings.context_file == knowledge / repo.name / "CLAUDE.md"
+
+
+def test_repository_profile(repo, home):
+    (repo / "loop.toml").write_text(
+        'doc_lang = "ru"\n'
+        'deps_files = ["requirements*.txt", "uv.lock"]\n'
+        'secret_patterns = ["*.pem"]\n'
+        "[commands]\n"
+        'fmt = ""\n'
+        'lint = "flake8"\n'
+        'collect = "pytest --collect-only -q"\n'
+        'up = "docker compose -p {run_id} up -d --wait"\n'
+        "[timeouts]\n"
+        "lint = 120\n"
+        "[env]\n"
+        'POSTGRES_PORT = "{free_port}"\n'
+    )
+
+    cfg = load(repo, home)
+
+    assert cfg.settings.doc_lang == "ru"
+    assert cfg.repo == config.Profile(
+        commands={
+            "lint": "flake8",
+            "collect": "pytest --collect-only -q",
+            "up": "docker compose -p {run_id} up -d --wait",
+        },
+        timeouts={"lint": 120},
+        env={"POSTGRES_PORT": "{free_port}"},
+        deps_files=("requirements*.txt", "uv.lock"),
+        secret_patterns=("*.pem",),
+    )
 
 
 def test_two_profiles_for_one_repo_are_rejected(repo, home, tmp_path):
@@ -146,6 +185,17 @@ def test_invalid_env_file(tmp_path, home, content, message):
         ("fix_attempts = true\n", "expected a number"),
         ("doc_lang = 1\n", "expected a string"),
         ("doc_lang = \n", "loop.toml"),
+        ("doc_lnag = 'ru'\n", "unknown keys doc_lnag"),
+        ("[commands]\nbuild = 'make'\n", "unknown command build"),
+        ("[timeouts]\nlnit = 60\n", "unknown command lnit"),
+        ("[commands]\nlint = 1\n", "commands.lint=1: expected str"),
+        ("[timeouts]\nlint = '60'\n", "expected int"),
+        ("[timeouts]\nlint = true\n", "expected int"),
+        ("[timeouts]\nlint = 0\n", "timeouts.lint must be positive"),
+        ("[env]\nPORT = 5433\n", "env.PORT=5433: expected str"),
+        ("commands = 'lint'\n", "commands must be a table"),
+        ("deps_files = 'uv.lock'\n", "deps_files must be a list of strings"),
+        ("secret_patterns = [1]\n", "secret_patterns must be a list of strings"),
     ],
 )
 def test_invalid_profile(repo, home, content, message):

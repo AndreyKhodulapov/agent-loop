@@ -24,7 +24,7 @@ def db(db_path):
 
 @pytest.fixture
 def run_id(db):
-    return db.create_run(Path("/work/service"), "feature/x")
+    return db.create_run(Path("/work/service"), "feature/x", "abc123")
 
 
 def connect(path):
@@ -38,12 +38,13 @@ def user_version(path):
 
 def test_new_database_is_migrated_and_reopened_without_loss(db_path):
     first = store.Store(db_path)
-    run_id = first.create_run(Path("/work/service"), "main")
+    run_id = first.create_run(Path("/work/service"), "main", "abc123")
     first.close()
 
     second = store.Store(db_path)
     try:
         assert second.run(run_id).branch == "main"
+        assert second.run(run_id).base == "abc123"
     finally:
         second.close()
     assert user_version(db_path) == len(store.MIGRATIONS)
@@ -76,7 +77,12 @@ def test_failed_migration_leaves_previous_version(db_path, monkeypatch):
 def test_older_database_is_migrated_with_its_data(db_path, monkeypatch):
     monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS[:1])
     old = store.Store(db_path)
-    run_id = old.create_run(Path("/work/service"), "main")
+    run_id = "0a1b2c3d"
+    old._conn.execute(
+        "INSERT INTO runs (id, repo, branch, status, created_at, updated_at)"
+        " VALUES (?, '/work/service', 'main', 'planning', ?, ?)",
+        (run_id, "2026-10-11T10:00:00+00:00", "2026-10-11T10:00:00+00:00"),
+    )
     task_id = old.add_task(run_id, "store", CARD)
     old._conn.execute(
         "INSERT INTO steps (task_id, kind, checkpoint, started_at) VALUES (?, 'implement', ?, ?)",
@@ -89,8 +95,10 @@ def test_older_database_is_migrated_with_its_data(db_path, monkeypatch):
     try:
         db.record_limits(run_id, None, Limits(None, Window(0.64, 1791813600)))
         assert db.run(run_id).branch == "main"
+        assert db.run(run_id).base is None
         assert len(db.limit_snapshots(run_id)) == 1
         assert db.steps(task_id)[0].untracked == []
+        assert db.tasks(run_id)[0].tests is None
     finally:
         db.close()
     assert user_version(db_path) == len(store.MIGRATIONS)
@@ -203,7 +211,7 @@ def test_transition_targets_are_known_states(table):
 
 
 def test_tasks_are_numbered_per_run(db, run_id):
-    other = db.create_run(Path("/work/other"), "main")
+    other = db.create_run(Path("/work/other"), "main", "abc123")
 
     db.add_task(run_id, "first", CARD)
     db.add_task(other, "elsewhere", {})
@@ -216,6 +224,9 @@ def test_tasks_are_numbered_per_run(db, run_id):
     ]
     assert tasks[0].card == CARD
     assert [t.seq for t in db.tasks(other)] == [1]
+
+    db.set_tests(tasks[1].id, 228)
+    assert [t.tests for t in db.tasks(run_id)] == [None, 228]
 
 
 def test_step_is_started_and_finished_once(db, run_id):

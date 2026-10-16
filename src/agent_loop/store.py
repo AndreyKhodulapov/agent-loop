@@ -32,7 +32,8 @@ RUN_TRANSITIONS = {
 }
 
 # Pause comes from any stage that runs a session or a long command; the orchestrator resumes
-# into the stage of the step that was paused, its kind is in `steps`.
+# into the stage of the step that was paused, its kind is in `steps`, or sends a task that keeps
+# pausing back to the planner.
 TASK_TRANSITIONS = {
     "pending": {"implementing", "dropped"},
     "implementing": {"gating", "paused", "needs_human", "replan"},
@@ -40,7 +41,7 @@ TASK_TRANSITIONS = {
     "fixing": {"gating", "paused", "needs_human", "replan"},
     "committed": {"reviewing", "done"},
     "reviewing": {"fixing", "done", "paused"},
-    "paused": {"implementing", "gating", "fixing", "reviewing"},
+    "paused": {"implementing", "gating", "fixing", "reviewing", "replan"},
     "needs_human": {"implementing"},
     "replan": {"pending", "dropped"},
     "done": set(),
@@ -113,6 +114,14 @@ MIGRATIONS = [
     """
     ALTER TABLE steps ADD COLUMN untracked TEXT NOT NULL DEFAULT '[]';
     """,
+    # Tests found before the first step of a task: the gate checks that the task loses none.
+    """
+    ALTER TABLE tasks ADD COLUMN tests INTEGER;
+    """,
+    # HEAD at the start of the run: what the run has done is counted from it.
+    """
+    ALTER TABLE runs ADD COLUMN base TEXT;
+    """,
 ]
 
 
@@ -129,6 +138,8 @@ class Run:
     reason: str | None
     created_at: str
     updated_at: str
+    # None for a run created before the column.
+    base: str | None
 
 
 @dataclass(frozen=True)
@@ -142,6 +153,7 @@ class Task:
     reason: str | None
     created_at: str
     updated_at: str
+    tests: int | None
 
 
 @dataclass(frozen=True)
@@ -199,13 +211,13 @@ class Store:
     def close(self) -> None:
         self._conn.close()
 
-    def create_run(self, repo: Path, branch: str) -> str:
+    def create_run(self, repo: Path, branch: str, base: str) -> str:
         run_id = secrets.token_hex(4)
         now = _now()
         self._conn.execute(
-            "INSERT INTO runs (id, repo, branch, status, created_at, updated_at)"
-            " VALUES (?, ?, ?, 'planning', ?, ?)",
-            (run_id, str(repo), branch, now, now),
+            "INSERT INTO runs (id, repo, branch, base, status, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, 'planning', ?, ?)",
+            (run_id, str(repo), branch, base, now, now),
         )
         return run_id
 
@@ -248,6 +260,9 @@ class Store:
                 (dst, reason, now, task_id),
             )
             self._record(row["run_id"], task_id, row["status"], dst, reason, now)
+
+    def set_tests(self, task_id: int, count: int) -> None:
+        self._conn.execute("UPDATE tasks SET tests = ? WHERE id = ?", (count, task_id))
 
     def start_step(
         self,
@@ -329,6 +344,12 @@ class Store:
     def steps(self, task_id: int) -> list[Step]:
         rows = self._conn.execute(
             "SELECT * FROM steps WHERE task_id = ? ORDER BY id", (task_id,)
+        ).fetchall()
+        return [_step(row) for row in rows]
+
+    def session_steps(self, session_id: str) -> list[Step]:
+        rows = self._conn.execute(
+            "SELECT * FROM steps WHERE session_id = ? ORDER BY id", (session_id,)
         ).fetchall()
         return [_step(row) for row in rows]
 

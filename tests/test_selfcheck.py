@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, read_calls
 
-from agent_loop import agent, budget, guard, recovery, selfcheck
+from agent_loop import agent, budget, commands, guard, recovery, selfcheck
 
 WORDS = {"project_word": "Maple.", "appended_word": "copper", "second_word": "willow"}
 FIRST = [INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "structured_output": WORDS}]
@@ -33,8 +33,9 @@ def test_selfcheck_passes_and_records_version(tmp_path, fake_claude):
     first, resumed, stopped = read_calls(calls_path)
     session_id = first["argv"][first["argv"].index("--session-id") + 1]
     assert resumed["argv"][-2:] == ["--resume", session_id]
-    assert "maple" in (Path(first["cwd"]) / "CLAUDE.md").read_text()
-    assert "copper" in first["system"] and "willow" in first["system"]
+    assert "maple" in first["system"] and "copper" in first["system"]
+    assert "willow" in first["system"]
+    assert "hooks" in json.loads((Path(first["cwd"]) / ".claude" / "settings.json").read_text())
     hooks = json.loads(Path(stopped["argv"][stopped["argv"].index("--settings") + 1]).read_text())
     assert "PreToolUse" in hooks["hooks"]
     denied, allowed = read_calls(calls_path.with_name("hooks.jsonl"))
@@ -44,11 +45,17 @@ def test_selfcheck_passes_and_records_version(tmp_path, fake_claude):
 
 def test_selfcheck_lists_every_problem(tmp_path, fake_claude, monkeypatch):
     fake_claude(
-        new=[INIT, ASSISTANT, {**RESULT, "structured_output": {**WORDS, "second_word": "oak"}}],
+        new=[
+            INIT,
+            "project-hook",
+            ASSISTANT,
+            {**RESULT, "structured_output": {**WORDS, "second_word": "oak"}},
+        ],
         resume=[INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "result": "I do not know."}],
         hooked=[INIT, ASSISTANT, RATE_LIMIT, RESULT],
     )
     monkeypatch.setattr(recovery, "session_groups", lambda session_id: set())
+    monkeypatch.setattr(commands, "SANDBOXED", ())
     home = tmp_path / "home"
 
     with pytest.raises(agent.AgentError) as exc:
@@ -62,6 +69,8 @@ def test_selfcheck_lists_every_problem(tmp_path, fake_claude, monkeypatch):
     assert "guard: expected the hook to stop on the stop request, got None" in message
     assert f"guard: the agent has not written {guard.HANDOFF}" in message
     assert "guard: no structured answer" in message
+    assert "a hook from the project settings ran" in message
+    assert "gate: a sandboxed command wrote outside its repository" in message
     assert not (home / selfcheck.RESULT_FILE).exists()
 
 
@@ -81,3 +90,18 @@ def test_selfcheck_without_claude(tmp_path, monkeypatch):
 
     with pytest.raises(agent.AgentError, match="claude is not found"):
         selfcheck.run(tmp_path / "home")
+
+
+def test_run_requires_the_selfcheck_of_the_installed_version(tmp_path, fake_claude):
+    fake_claude([])
+    home = tmp_path / "home"
+    home.mkdir()
+
+    with pytest.raises(agent.AgentError, match="claude 2.1.296 has not passed the selfcheck"):
+        selfcheck.require(home)
+    (home / selfcheck.RESULT_FILE).write_text(json.dumps({"version": "2.1.295"}))
+    with pytest.raises(agent.AgentError, match="claude 2.1.296 has not passed the selfcheck"):
+        selfcheck.require(home)
+
+    (home / selfcheck.RESULT_FILE).write_text(json.dumps({"version": "2.1.296"}))
+    selfcheck.require(home)

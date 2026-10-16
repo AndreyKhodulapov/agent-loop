@@ -7,16 +7,15 @@ import signal
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_loop import agent, config, log, recovery, selfcheck
-from agent_loop.store import DB_FILE, Store
+from agent_loop import agent, config, git, implement, log, recovery, runner, selfcheck
+from agent_loop.commands import CommandError
+from agent_loop.store import DB_FILE, Store, StoreError
 
 logger = logging.getLogger(__name__)
 
 STUBS = {
     "plan": "plan a task with the planner and the plan critic",
     "approve": "approve the plan and freeze it",
-    "run": "run the approved plan",
-    "resume": "resume a paused run",
     "answer": "answer the questions of a run waiting for a human",
     "status": "show runs and their state",
     "stats": "show metrics of finished runs",
@@ -40,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     _exit_on_termination()
     # Every command that works with runs first pauses the ones that died, so a run is never
     # left as running without an orchestrator.
-    if args.command in STUBS:
+    if args.command in (*STUBS, "run", "resume"):
         _reap(cfg)
     return args.handler(args, cfg)
 
@@ -72,6 +71,16 @@ def _parser() -> argparse.ArgumentParser:
 
     for name, summary in STUBS.items():
         commands.add_parser(name, help=summary).set_defaults(handler=_stub(name))
+    run = commands.add_parser("run", help="run the tasks of a cards file on the current branch")
+    run.add_argument(
+        "tasks", type=Path, help="JSON list of title, goal, criteria, files, tests, decisions"
+    )
+    run.set_defaults(handler=_run)
+    resume = commands.add_parser("resume", help="resume a paused run")
+    resume.add_argument(
+        "run_id", nargs="?", help="the run to resume, the last paused one by default"
+    )
+    resume.set_defaults(handler=_resume)
     commands.add_parser(
         "config", help="show effective settings and where each came from"
     ).set_defaults(handler=_show_config)
@@ -90,6 +99,42 @@ def _stub(name: str) -> Callable[[argparse.Namespace, config.Config], int]:
         return 1
 
     return handler
+
+
+def _run(args: argparse.Namespace, cfg: config.Config) -> int:
+    return _work(cfg, lambda: runner.start(cfg, args.tasks))
+
+
+def _resume(args: argparse.Namespace, cfg: config.Config) -> int:
+    return _work(cfg, lambda: runner.resume(cfg, args.run_id))
+
+
+def _work(cfg: config.Config, run: Callable[[], str | None]) -> int:
+    try:
+        paused = run()
+    # A broken profile, a failed `install` or `up`, git or the store failing under the run, a
+    # removed copy of the protected files stop the run as well as a refusal to start.
+    except (
+        runner.RunError,
+        agent.AgentError,
+        config.ConfigError,
+        CommandError,
+        git.GitError,
+        StoreError,
+        FileNotFoundError,
+    ) as exc:
+        logger.error("%s", exc)
+        return 1
+    except KeyboardInterrupt:
+        logger.warning("stopped by the operator")
+        return 130
+    finally:
+        # A run that has stopped on the way is paused the way a dead one is.
+        _reap(cfg)
+    if paused is None:
+        return 0
+    # The operator has stopped the run, in a session or outside it.
+    return 130 if paused == implement.INTERRUPT else 1
 
 
 def _show_config(args: argparse.Namespace, cfg: config.Config) -> int:

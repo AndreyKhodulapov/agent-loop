@@ -11,7 +11,7 @@ import subprocess
 import tomllib
 import typing
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 DEFAULT_HOME = "~/.agent-loop"
@@ -50,12 +50,28 @@ class Settings:
 
 
 @dataclass(frozen=True)
+class Profile:
+    """What the repository profile tells about the repository: commands, their environment, files.
+
+    A command set to an empty string is left out, its step is skipped.
+    """
+
+    commands: dict[str, str] = field(default_factory=dict)
+    # Seconds, by command name.
+    timeouts: dict[str, int] = field(default_factory=dict)
+    env: dict[str, str] = field(default_factory=dict)
+    deps_files: tuple[str, ...] = ()
+    secret_patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     home: Path
     repo_root: Path | None
     profile: Path | None
     settings: Settings
     sources: dict[str, str]
+    repo: Profile = Profile()
 
 
 _FIELD_KINDS = {
@@ -124,7 +140,9 @@ def load(
     profile: Path | None = None,
     environ: Mapping[str, str] = os.environ,
 ) -> Config:
-    home = Path(environ.get("LOOP_HOME", DEFAULT_HOME)).expanduser()
+    # The guard hook runs in the working directory of the session, so a relative home would
+    # point elsewhere there.
+    home = cwd / Path(environ.get("LOOP_HOME", DEFAULT_HOME)).expanduser()
     values: dict[str, object] = {}
     sources: dict[str, str] = {}
 
@@ -143,8 +161,10 @@ def load(
 
     root = repo_root(cwd)
     profile_path = find_profile(profile, root, values.get("knowledge_dir"))
+    repo = Profile()
     if profile_path is not None:
-        apply(_profile_layer(profile_path), str(profile_path), profile_path.parent)
+        layer, repo = _read_profile(profile_path)
+        apply(layer, str(profile_path), profile_path.parent)
 
     apply({name: value for name, value in (flags or {}).items() if value is not None}, "flag", cwd)
 
@@ -152,7 +172,7 @@ def load(
     _validate(settings)
     for name in _FIELD_KINDS:
         sources.setdefault(name, "default")
-    return Config(home, root, profile_path, settings, sources)
+    return Config(home, root, profile_path, settings, sources, repo)
 
 
 def describe(config: Config) -> list[tuple[str, str, str]]:
@@ -170,7 +190,7 @@ def _env_layer(raw: dict[str, str], path: Path) -> dict[str, str]:
     return {by_key[key]: value for key, value in raw.items()}
 
 
-def _profile_layer(path: Path) -> dict[str, object]:
+def _read_profile(path: Path) -> tuple[dict[str, object], Profile]:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
@@ -179,8 +199,45 @@ def _profile_layer(path: Path) -> dict[str, object]:
         raise ConfigError(
             f"{path}: knowledge_dir is set only in .env, it is used to find the profile"
         )
-    # Tables ([commands], [timeouts], [env]) belong to the repository profile, not to settings.
-    return {name: value for name, value in data.items() if name in _FIELD_KINDS}
+    profile_keys = {f.name for f in fields(Profile)}
+    unknown = sorted(set(data) - set(_FIELD_KINDS) - profile_keys)
+    if unknown:
+        raise ConfigError(f"{path}: unknown keys {', '.join(unknown)}")
+    commands = _table(data, "commands", str, path)
+    timeouts = _table(data, "timeouts", int, path)
+    known = ("install", "fmt", "lint", "collect", "test", "test_full", "up", "down", "smoke")
+    for name in (*commands, *timeouts):
+        if name not in known:
+            raise ConfigError(f"{path}: unknown command {name}, known: {', '.join(known)}")
+    for name, seconds in timeouts.items():
+        if seconds <= 0:
+            raise ConfigError(f"{path}: timeouts.{name} must be positive")
+    profile = Profile(
+        commands={name: command for name, command in commands.items() if command.strip()},
+        timeouts=timeouts,
+        env=_table(data, "env", str, path),
+        deps_files=_patterns(data, "deps_files", path),
+        secret_patterns=_patterns(data, "secret_patterns", path),
+    )
+    return {name: value for name, value in data.items() if name in _FIELD_KINDS}, profile
+
+
+def _table(data: dict, name: str, kind: type, path: Path) -> dict:
+    table = data.get(name, {})
+    if not isinstance(table, dict):
+        raise ConfigError(f"{path}: {name} must be a table")
+    for key, value in table.items():
+        # bool is an int in Python, `timeout = true` is a mistake.
+        if not isinstance(value, kind) or isinstance(value, bool):
+            raise ConfigError(f"{path}: {name}.{key}={value!r}: expected {kind.__name__}")
+    return table
+
+
+def _patterns(data: dict, name: str, path: Path) -> tuple[str, ...]:
+    patterns = data.get(name, [])
+    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        raise ConfigError(f"{path}: {name} must be a list of strings")
+    return tuple(patterns)
 
 
 def _coerce(name: str, raw: object, base_dir: Path, source: str) -> object:

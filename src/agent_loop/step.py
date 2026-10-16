@@ -42,7 +42,9 @@ class Outcome:
     # completed, paused or failed
     status: str
     # Why the step paused (context, budget, interrupt, timeout, idle, guard_error) or what
-    # failed (project_settings or the error of the CLI).
+    # failed (project_settings or the error of the CLI). For a completed step, the stop the loop
+    # asked for while the agent was answering: after an interrupt the run stops once the step
+    # is through.
     reason: str | None
     # None when the session was terminated before its result.
     result: agent.Result | None
@@ -55,6 +57,8 @@ class Resume:
     # the handoff and the work in progress; replan: the task goes back to the planner.
     mode: str
     session_id: str | None = None
+    # Why the task goes back to the planner: context_pauses or stall_pauses.
+    reason: str | None = None
 
 
 @dataclass
@@ -142,8 +146,9 @@ def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id:
             watcher.join()
             signal.signal(signal.SIGINT, previous_handler)
     outcome = _outcome(result, guard.outcome(directory), watch.killed, context_tokens)
-    store.finish_step(step_id, outcome.status, _detail(outcome))
-    _log_end(outcome)
+    detail = _detail(outcome, _cost_before(store, session.session_id))
+    store.finish_step(step_id, outcome.status, detail)
+    _log_end(outcome, detail)
     return outcome
 
 
@@ -152,16 +157,24 @@ def how_to_resume(steps: list[Step], ctx_soft_tokens: int) -> Resume:
 
     The paused session keeps its context, so it is resumed, unless the context was full: then a
     new session starts from the handoff, and a task that has filled the context again is too big
-    for one session.
+    for one session. A task that stalls again and again goes back to the planner too.
     """
     last = steps[-1]
+    if last.outcome != "paused":
+        raise ValueError(f"step {last.id} has not paused, it is {last.outcome}")
+    # Pauses of a session that has run out of time, hung or lost its guard. Each resume may run
+    # into the same wall again, so a task that stalls 3 times goes back to the planner.
+    stall_reasons = ("timeout", "idle", guard.GUARD_ERROR)
+    stalls = sum(1 for s in steps if s.outcome == "paused" and s.detail["reason"] in stall_reasons)
+    if stalls >= 3:
+        return Resume("replan", reason="stall_pauses")
     if not _context_full(last, ctx_soft_tokens):
         return Resume("session", last.session_id)
     context_pauses = sum(
         1 for s in steps if s.outcome == "paused" and _context_full(s, ctx_soft_tokens)
     )
     if context_pauses >= CONTEXT_PAUSES_TO_REPLAN:
-        return Resume("replan")
+        return Resume("replan", reason="context_pauses")
     return Resume("handoff")
 
 
@@ -244,6 +257,12 @@ class _Watch:
 def _outcome(
     result: agent.Result | None, state: guard.State | None, killed: str | None, context: int
 ) -> Outcome:
+    # The answer is the truth about the step unless the guard has denied the agent a call: a
+    # stop that came while the agent was answering, or a session terminated after its answer,
+    # does not undo the work.
+    stopped = state is not None and (state.denied > 0 or state.reason == guard.GUARD_ERROR)
+    if result is not None and result.structured_output is not None and not stopped:
+        return Outcome("completed", state.reason if state is not None else killed, result, context)
     # A guard stop wins over the way the session ended: after a context stop the step must
     # resume in a new session, whatever terminated the old one.
     if state is not None:
@@ -255,17 +274,30 @@ def _outcome(
     return Outcome("completed", None, result, context)
 
 
-def _detail(outcome: Outcome) -> dict:
+def _detail(outcome: Outcome, cost_before: float = 0.0) -> dict:
     detail: dict = {"reason": outcome.reason, "context_tokens": outcome.context_tokens}
     result = outcome.result
     if result is not None:
         detail |= {
             "terminal_reason": result.terminal_reason,
             "num_turns": result.num_turns,
-            "cost_usd": result.cost_usd,
+            "cost_usd": result.cost_usd - cost_before,
+            "session_cost_usd": result.cost_usd,
             "answer": result.structured_output,
         }
     return detail
+
+
+def _cost_before(store: Store, session_id: str) -> float:
+    # On --resume the CLI reports the cost of the whole session so far, so a step costs the
+    # difference with the last total. A step terminated before its result has no total: its cost
+    # goes into the next step of the session.
+    totals = [
+        s.detail["session_cost_usd"]
+        for s in store.session_steps(session_id)
+        if s.detail is not None and "session_cost_usd" in s.detail
+    ]
+    return totals[-1] if totals else 0.0
 
 
 def _idle_timeout(settings_file: Path) -> float:
@@ -281,11 +313,10 @@ def _status(context_tokens: int, cfg: Config) -> str:
     return line
 
 
-def _log_end(outcome: Outcome) -> None:
+def _log_end(outcome: Outcome, detail: dict) -> None:
     if outcome.status == "paused":
         logger.warning("paused: %s", outcome.reason)
     elif outcome.status == "failed":
         logger.error("failed: %s", outcome.reason)
     else:
-        result = outcome.result
-        logger.info("completed in %d turns, $%.2f", result.num_turns, result.cost_usd)
+        logger.info("completed in %d turns, $%.2f", detail["num_turns"], detail["cost_usd"])

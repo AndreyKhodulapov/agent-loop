@@ -1,7 +1,7 @@
 import json
 import logging
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, USER, read_calls
@@ -13,6 +13,7 @@ from agent_loop.store import Step, Store
 
 SETTINGS = Settings()
 CONTEXT = 4 + 5232 + 13060
+ANSWER = {**RESULT, "structured_output": {"status": "done"}}
 FULL = {
     **ASSISTANT,
     "message": {
@@ -53,7 +54,7 @@ def env(tmp_path):
     workdir = tmp_path / "repo"
     workdir.mkdir()
     db = Store(home / "loop.db")
-    run_id = db.create_run(workdir, "feature/x")
+    run_id = db.create_run(workdir, "feature/x", "abc123")
     task_id = db.add_task(run_id, "Add x", {"goal": "x"})
     cfg = Config(home, workdir, None, SETTINGS, {})
     protected.save(workdir, step.run_dir(home, run_id))
@@ -66,14 +67,14 @@ def env(tmp_path):
 
 @pytest.fixture
 def stderr_lines(capsys):
-    # capsys replaces sys.stderr only for the test body, so the handler is created there.
-    log.setup()
+    # capsys replaces sys.stderr only for the test body, so the test calls `log.setup()` there.
     yield lambda: capsys.readouterr().err.splitlines()
     logging.getLogger(log.LOGGER_NAME).handlers.clear()
 
 
 def test_events_feed_the_guard_and_the_store(env, fake_claude, stderr_lines):
-    fake_claude([INIT, ASSISTANT, RATE_LIMIT, {**RESULT, "structured_output": {"status": "done"}}])
+    log.setup()
+    fake_claude([INIT, ASSISTANT, RATE_LIMIT, ANSWER])
 
     outcome = env.run()
 
@@ -92,6 +93,36 @@ def test_events_feed_the_guard_and_the_store(env, fake_claude, stderr_lines):
     assert recorded.detail["num_turns"] == 3
     assert (env.run_dir / f"step-{env.step_id}.jsonl").is_file()
     assert any("ctx 18k/150k · 5h " in line for line in stderr_lines())
+
+
+def test_resumed_session_step_costs_the_difference(env, fake_claude, stderr_lines):
+    # After --resume the CLI reports the cost of the whole session so far.
+    log.setup()
+    fake_claude(
+        [INIT, {**ANSWER, "total_cost_usd": 0.5}],
+        resume=[INIT, {**ANSWER, "total_cost_usd": 0.8}],
+    )
+    env.run()
+    task_id = env.step().task_id
+    # A step terminated before its result, then a step of another session.
+    killed = env.store.start_step(task_id, "implement", "abc123", [], env.session.session_id)
+    env.store.finish_step(killed, "paused", {"reason": "interrupt", "context_tokens": 0})
+    other = replace(env, session=replace(env.session, session_id="other"))
+    other.step_id = env.store.start_step(task_id, "fix", "abc123", [], "other")
+    other.run()
+    resumed = replace(env, session=replace(env.session, resume=True))
+    resumed.step_id = env.store.start_step(
+        task_id, "implement", "abc123", [], env.session.session_id
+    )
+
+    resumed.run()
+
+    costs = [
+        (s.detail.get("cost_usd"), s.detail.get("session_cost_usd"))
+        for s in env.store.steps(task_id)
+    ]
+    assert costs == [(0.5, 0.5), (None, None), (0.5, 0.5), (pytest.approx(0.3), 0.8)]
+    assert "completed in 3 turns, $0.30" in stderr_lines()[-1]
 
 
 @pytest.mark.parametrize(
@@ -129,6 +160,24 @@ def test_second_ctrl_c_terminates_the_session(env, fake_claude, monkeypatch, ign
     assert (env.run_dir / guard.STOP_FILE).read_text() == "interrupt"
     assert outcome == step.Outcome("paused", "interrupt", None, CONTEXT)
     assert env.step().outcome == "paused"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        [INIT, ASSISTANT, "interrupt", "tool:StructuredOutput", ANSWER],
+        [INIT, ASSISTANT, ANSWER, "interrupt", "interrupt", "sleep"],
+    ],
+    ids=["ctrl+c while answering", "terminated after the answer"],
+)
+def test_answer_completes_the_step_despite_a_stop(env, fake_claude, scenario):
+    fake_claude(scenario)
+
+    outcome = env.run()
+
+    assert (outcome.status, outcome.reason) == ("completed", "interrupt")
+    assert outcome.result.structured_output == {"status": "done"}
+    assert env.step().outcome == "completed"
 
 
 def set_idle_timeout(env, monkeypatch, seconds):
@@ -265,12 +314,25 @@ def ended(outcome, reason, session_id, context_tokens=50_000):
         ),
         (
             [ended("paused", "context", "s-1"), ended("paused", "context", "s-2")],
-            step.Resume("replan"),
+            step.Resume("replan", reason="context_pauses"),
         ),
         ([ended("paused", "interrupt", "s-1", 140_000)], step.Resume("handoff")),
         (
             [ended("paused", "context", "s-1"), ended("paused", "timeout", "s-2", 120_000)],
-            step.Resume("replan"),
+            step.Resume("replan", reason="context_pauses"),
+        ),
+        (
+            [ended("paused", "timeout", "s-1"), ended("paused", "idle", "s-1")],
+            step.Resume("session", "s-1"),
+        ),
+        (
+            [
+                ended("paused", "timeout", "s-1"),
+                ended("paused", "interrupt", "s-1"),
+                ended("paused", "idle", "s-1"),
+                ended("paused", "guard_error", "s-1"),
+            ],
+            step.Resume("replan", reason="stall_pauses"),
         ),
     ],
     ids=[
@@ -281,7 +343,16 @@ def ended(outcome, reason, session_id, context_tokens=50_000):
         "second context pause",
         "interrupt past the soft context limit",
         "timeout past the soft context limit after a context pause",
+        "second stall",
+        "third stall",
     ],
 )
 def test_how_to_resume(steps, expected):
     assert step.how_to_resume(steps, SETTINGS.ctx_soft_tokens) == expected
+
+
+def test_how_to_resume_takes_only_a_paused_step():
+    failed = replace(ended("failed", None, "s-1"), detail={"error": "no result"})
+
+    with pytest.raises(ValueError, match="has not paused, it is failed"):
+        step.how_to_resume([failed], SETTINGS.ctx_soft_tokens)
