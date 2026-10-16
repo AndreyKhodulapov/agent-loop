@@ -410,6 +410,8 @@ def test_paused_session_goes_on_with_its_context(env, monkeypatch):
     assert resumed.session_id == stopped.session_id == env.steps()[1].session_id
     assert resumed.prompt == prompts.RESUMED
     assert resumed.system_files == prompts.system_files("implementer", SETTINGS)
+    # The work in progress of a committed task is in its commit.
+    assert git.git(env.repo, "for-each-ref", git.WIP_REFS) == ""
 
 
 def test_session_with_a_full_context_goes_on_from_the_handoff(env, monkeypatch):

@@ -63,6 +63,11 @@ def wip_ref(run_id: str, task_seq: int) -> str:
     return f"{WIP_REFS}/{run_id}/{task_seq}"
 
 
+def delete_ref(repo: Path, ref: str) -> None:
+    # A ref that is not there is not an error to git.
+    git(repo, "update-ref", "-d", ref)
+
+
 def new_files(repo: Path, base: str, untracked_before: list[str]) -> list[str]:
     """Files a step has added on top of `base`, relative to the repository root.
 

@@ -7,8 +7,9 @@ after a reboot.
 
 A dead run is paused the way a live one pauses: its orphaned session is terminated, the work in
 progress goes to the WIP ref of the task and the step is finished as paused, so the task resumes
-the session (`step.how_to_resume`). Services it has left up are stopped with `down` of the frozen
-profile.
+the session (`step.how_to_resume`). A commit step stopped after the commit of the task is on the
+branch is finished as completed instead: the task is committed. Services it has left up are
+stopped with `down` of the frozen profile.
 """
 
 from __future__ import annotations
@@ -23,8 +24,8 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from agent_loop import agent, commands, git, log, step
-from agent_loop.store import TASK_TRANSITIONS, Run, Store
+from agent_loop import agent, commands, git, implement, log, step
+from agent_loop.store import TASK_TRANSITIONS, Run, Step, Store
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,10 @@ def _pause(store: Store, run: Run) -> None:
         # The step is finished only after the work is saved: if saving fails, the next `loop`
         # finds the step open and tries again.
         repo = Path(run.repo)
+        if open_step.kind == implement.COMMIT and _finish_commit(store, run, task.seq, open_step):
+            logger.info("task %d: its commit is on the branch, the task is committed", task.seq)
+            store.move_task(task.id, "committed")
+            continue
         if git.head(repo) != open_step.checkpoint:
             logger.warning(
                 "HEAD has moved since task %d started, its work in progress goes on top of %s",
@@ -112,6 +117,27 @@ def _pause(store: Store, run: Run) -> None:
         if "paused" in TASK_TRANSITIONS[task.status]:
             store.move_task(task.id, "paused", DIED)
     store.move_run(run.id, "paused", DIED)
+
+
+def _finish_commit(store: Store, run: Run, task_seq: int, commit_step: Step) -> bool:
+    """Finish an open commit step as completed if the loop has made its commit; False if not.
+
+    The loop may have stopped after the branch moved to the commit and before the step was
+    finished, maybe before the index was reset to the commit. The commit is the loop's when its
+    parent is the checkpoint and its message is the one the task was to be committed with.
+    """
+    repo = Path(run.repo)
+    head = git.head(repo)
+    if head == commit_step.checkpoint:
+        return False
+    message = implement.last_answer(store.steps(commit_step.task_id))["commit_message"]
+    parents, body = git.git(repo, "log", "-1", "--format=%P%n%B", head).split("\n", 1)
+    if parents != commit_step.checkpoint or body.rstrip("\n") != message:
+        return False
+    git.git(repo, "reset", "--quiet")
+    git.delete_ref(repo, git.wip_ref(run.id, task_seq))
+    store.finish_step(commit_step.id, "completed", {"commit": head, "message": message})
+    return True
 
 
 def _terminate(session_id: str) -> None:

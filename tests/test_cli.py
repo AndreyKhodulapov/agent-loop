@@ -91,6 +91,45 @@ def test_run_commits_the_work_of_its_tasks(isolated, in_repo, tmp_path, monkeypa
         assert [task.status for task in store.tasks(run.id)] == ["committed"]
 
 
+def test_run_stopped_inside_the_commit_goes_on_with_the_next_task(
+    isolated, in_repo, tmp_path, monkeypatch
+):
+    card = {"goal": "Add a module", "criteria": [], "files": [], "tests": [], "decisions": []}
+    tasks = [{"title": f"Add m{i}", **card} for i in (1, 2)]
+    (tmp_path / "tasks.json").write_text(json.dumps(tasks))
+    modules = iter(["m1", "m2"])
+
+    def session(session, cfg, store, run_id, step_id):
+        module = next(modules)
+        (session.cwd / f"{module}.py").write_text("x = 1\n")
+        answer = {"status": "done", "summary": "", "commit_message": f"feat({module}): add it"}
+        detail = {"reason": None, "answer": answer | {"notes_for_next": ""}}
+        store.finish_step(step_id, "completed", detail)
+        return step.Outcome("completed", None, None, 1000)
+
+    monkeypatch.setattr(step, "run", session)
+    real_git = git.git
+    stops = iter([True])
+
+    # Ctrl+C after the branch has moved to the commit of the first task.
+    def stopped_before_the_reset(repo, *args, **kwargs):
+        if args[0] == "reset" and next(stops, False):
+            raise KeyboardInterrupt
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(git, "git", stopped_before_the_reset)
+
+    assert cli.main(["run", str(tmp_path / "tasks.json")]) == 130
+    assert cli.main(["resume"]) == 0
+
+    log = git.git(in_repo, "log", "-3", "--format=%s").splitlines()
+    assert log == ["feat(m2): add it", "feat(m1): add it", "init"]
+    assert git.git(in_repo, "status", "--porcelain") == ""
+    with contextlib.closing(Store(isolated / "loop.db")) as store:
+        [run] = store.runs("done")
+        assert [task.status for task in store.tasks(run.id)] == ["committed", "committed"]
+
+
 @pytest.mark.parametrize(
     "error",
     [

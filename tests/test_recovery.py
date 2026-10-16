@@ -120,6 +120,42 @@ def test_dead_run_is_paused_with_its_session_stopped_and_work_saved(home, db, re
     assert (repo / "feature.py").is_file()
 
 
+# The loop stopped after the branch moved to the commit and before the index was reset to it.
+@pytest.mark.parametrize(
+    ("message", "committed"), [("feat(app): x", True), ("by hand", False)], ids=["loop's", "other"]
+)
+def test_commit_step_stopped_after_the_commit(home, db, repo, message, committed):
+    run_id, task_id = running_run(db, repo)
+    checkpoint = git.head(repo)
+    ref = git.wip_ref(run_id, 1)
+    session = db.start_step(task_id, "implement", checkpoint, [], "s-1")
+    db.finish_step(session, "completed", {"answer": {"commit_message": "feat(app): x"}})
+    db.move_task(task_id, "gating")
+    # Left by an earlier pause of the task.
+    git.save_wip(repo, ref, [], checkpoint)
+    db.start_step(task_id, "commit", checkpoint, [])
+    (repo / "app.py").write_text("x = 'fixed'\n")
+    commit = git.commit(repo, checkpoint, [], message)
+    git.git(repo, "read-tree", checkpoint)
+
+    assert recovery.reap(db, home) == [run_id]
+
+    commit_step = db.steps(task_id)[-1]
+    [task] = db.tasks(run_id)
+    assert db.run(run_id).status == "paused"
+    assert git.head(repo) == commit
+    if committed:
+        assert commit_step.outcome == "completed"
+        assert commit_step.detail == {"commit": commit, "message": "feat(app): x"}
+        assert task.status == "committed"
+        assert git.git(repo, "status", "--porcelain") == ""
+        assert git.git(repo, "for-each-ref", git.WIP_REFS) == ""
+    else:
+        assert (commit_step.outcome, commit_step.detail) == ("paused", {"reason": "died"})
+        assert (task.status, task.reason) == ("paused", "died")
+        assert git.git(repo, "rev-parse", f"{ref}^").strip() == checkpoint
+
+
 # A run that stops on an error in the process has stopped its services on the way out.
 @pytest.mark.parametrize("left_up", [True, False])
 def test_live_run_is_left_alone_and_dead_one_stops_its_services(home, db, repo, tmp_path, left_up):

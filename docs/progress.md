@@ -859,7 +859,7 @@ up = 120
 TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port}/restaurant_test"
 ```
 
-### 3а.2б Правки по третьему прогону — следующая сессия
+### 3а.2б Правки по третьему прогону — в работе
 
 Находки прогона `584816d9` по убыванию серьёзности:
 1. Серьёзно. Остановка между `update-ref HEAD` в `git.commit` и `store.finish_step` в `implement._commit` (SIGINT, `kill -9`, сбой) оставляет коммит задачи в git, а шаг `commit` — открытым. `recovery._pause` видит «HEAD has moved since task 2 started», пишет WIP поверх checkpoint и ставит шаг `paused(died)`; `runner.resume` сравнивает HEAD с последним завершённым коммитом из store и отказывает: `the run has left user-profile at ad9d0730e2e5, now user-profile is at ebd85b4bd1eb: put them back`. Оператор должен сам понять, что `ebd85b4` — коммит цикла, и сделать `git reset ad9d073`; после этого `resume` прогнал gate и закоммитил то же дерево (`cac526e`, дифф с `ebd85b4` пуст). Остановка между `update-ref` и `git reset` оставила бы ещё и индекс от старого HEAD.
@@ -873,7 +873,16 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Решение человека (2026-10-16): находки 1–5 разложить на правки. Декомпозиция агента: пять коммитов в `implementation-loop` (правки этапа 3а — там же, решение 2026-10-12), порядок — по серьёзности, каждый коммит самостоятелен. Человек принял рекомендации агента, включая п. 1 коммита 4 (2026-10-16).
 
-#### Коммит 1. Коммит задачи, прерванный на полпути (находки 1, 5в)
+#### Коммит 1. Коммит задачи, прерванный на полпути (находки 1, 5в) — готово 2026-10-16
+
+Сделано:
+- `recovery._finish_commit`: у открытого шага `commit` HEAD с родителем-checkpoint и сообщением из `implement.last_answer` — коммит цикла: `git reset --quiet`, WIP-ref задачи удаляется, шаг `completed` с `{"commit", "message"}`, задача `committed`, WIP не пишется. Иначе прежний путь: WIP поверх checkpoint, `paused(died)`.
+- `git.delete_ref` (`update-ref -d`; ref, которого нет, git ошибкой не считает). `implement._commit` удаляет WIP-ref сразу после `git.commit`, до `finish_step`: остановка между ними попадает в `_finish_commit`, который удаляет его ещё раз.
+- План, раздел 3: строка решения 2026-10-16 (в разделе 9 про доуборку только `down`, поэтому решение — в таблице рядом с «Уборка после аварии»).
+- Тесты: `test_recovery` — открытый `commit` с коммитом цикла и с чужим коммитом (параметризация); `test_cli` — `KeyboardInterrupt` из `git reset` внутри `git.commit`, код 130, `loop resume` коммитит вторую задачу; `test_implement` — после паузы и коммита WIP-ref нет. Без правки в `src` три новых проверки падают. 377 тестов, `ruff check`, `ruff format --check` зелёные.
+
+Не делалось: блокировка SIGINT вокруг коммита (п. 2). Причина паузы после Ctrl+C внутри коммита по-прежнему `died` — это коммит 2.
+
 
 1. `recovery._pause`: открытый шаг `commit`, у которого HEAD ветки прогона не равен checkpoint, родитель HEAD — checkpoint и сообщение HEAD равно `commit_message` последнего ответа задачи (`implement.last_answer`), — коммит цикла. Тогда `git reset --quiet` (индекс к HEAD, рабочее дерево не трогать), шаг `completed` с `{"commit", "message"}` как в `_commit`, задача `gating → committed`, WIP не пишется. Иначе — как сейчас: чужой HEAD, WIP поверх checkpoint, `paused(died)`.
 2. Блокировка SIGINT вокруг коммита не нужна: `kill -9` и сбой оставляют то же окно, а п. 1 закрывает все три.

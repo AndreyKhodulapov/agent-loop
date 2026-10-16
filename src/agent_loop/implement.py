@@ -353,6 +353,8 @@ class _Task:
                 self._pause(gates.BRANCH_CHANGED)
                 return None
             commit = git.commit(self.repo, self.checkpoint, added, message)
+            # The work of the task is in its commit now.
+            git.delete_ref(self.repo, git.wip_ref(self.run.id, self.task.seq))
             logger.info("committed %s %s", commit[:12], message)
         self.store.finish_step(step_id, "completed", {"commit": commit, "message": message})
         self._move("committed")
