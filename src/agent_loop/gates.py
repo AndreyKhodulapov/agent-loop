@@ -157,6 +157,8 @@ def check(
             status, reason, findings = "fixing", STYLE, ()
         findings = (*findings, *style)
     findings = tuple(_mask(finding, env_secrets) for finding in findings)
+    if status == "pass":
+        logger.info("passed with %d changed lines", lines)
     return Verdict(status, reason, findings, secrets, lines, artifacts)
 
 

@@ -959,6 +959,10 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Тесты: `test_gates` — параметризация существующего теста правила: `Password = Annotated[str, ...]` с двумя использованиями — нет находки; строковая константа с двумя — находка.
 
+#### Коммит 6. Gate с `pass` в логе (находка первого прогона 3а.2) — готово 2026-10-16
+
+`gates.check` пишет `INFO` «passed with N changed lines» перед возвратом вердикта `pass` (и при `pass` с предупреждением о flaky-тестах). Тест: `test_clean_work_passes_with_its_size` проверяет строку через caplog. План, раздел 2: находка помечена закрытой.
+
 ### 3а.3 Мерж и дальше
 
 Мерж `implementation-loop` в `main`. Этап 4 (планирование) — в новой ветке, имя спросить у человека; вход `loop run` из файла карточек заменит утверждённый план, там же `loop answer` для `needs_human` и перепланирование для `replan`. Go-репозиторий — отдельным прогоном позже.

@@ -1,4 +1,5 @@
 import dataclasses
+import logging
 import subprocess
 
 import pytest
@@ -55,15 +56,17 @@ def check(repo, step, profile=None, tests_before=None):
     return gates.check(repo, repo.parent / "run", "main", step, profile, SETTINGS, tests_before)
 
 
-def test_clean_work_passes_with_its_size(repo, work):
+def test_clean_work_passes_with_its_size(repo, work, caplog):
     (repo / "app.py").write_text("x = 2\n")
     (repo / "old.py").unlink()
     (repo / "pkg").mkdir()
     (repo / "pkg" / "new.py").write_text("print(1)\nprint(2)\n")
 
-    verdict = check(repo, work)
+    with caplog.at_level(logging.INFO, logger="agent_loop"):
+        verdict = check(repo, work)
 
     assert verdict == gates.Verdict("pass", lines=5)
+    assert caplog.messages[-1] == "passed with 5 changed lines"
 
 
 def test_new_files_like_secrets_need_a_human(repo, work, calls):
