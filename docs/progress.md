@@ -1006,7 +1006,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Закоммичено человеком: `6883ca4`.
 
-### 4.1 Планировщик — разбиение утверждено 2026-10-16, 4.1а–г готовы, дальше 4.1д
+### 4.1 Планировщик — разбиение утверждено 2026-10-16, 4.1а–д готовы 2026-10-17
 
 Решения человека (2026-10-16), по рекомендациям агента; записаны в план, раздел 3. Пять коммитов в `planner`, порядок обязателен: каждый опирается на предыдущий.
 
@@ -1141,8 +1141,38 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 - После выхода — шаг `-p --resume` со схемой ответа 4.1в: та же проверка, повторы и сохранение плана. Вопросов в этом режиме нет: их задаёт сам разговор.
 - Тесты: сборка команды; конец разговора → шаг со схемой на подделке.
 
-#### 4.1д `loop answer` для задачи в `needs_human` (~200 строк)
+#### 4.1д `loop answer` для задачи в `needs_human` — готово 2026-10-17
 
-Решение агента (человек оставил на его усмотрение): в 4.1, последним коммитом — без него прогон, вставший на вопрос исполнителя, продолжается только руками. `loop answer <run> "ответ"` (или из файла): ответ сохраняется в шаге задачи, задача `needs_human → implementing`, `loop resume` даёт исполнителю вопрос и ответ в промпте (`prompts.implementer`). Тот же `loop answer` без текста при `planning` — путь 4.1в: различать по статусу прогона.
+Решение агента (человек оставил на его усмотрение), записано в план, раздел 3. От задуманного отличается: ответ не аргументом командной строки, а в том же `QUESTIONS.md`, что у планировщика; `loop answer` сам продолжает прогон, `loop resume` после него не нужен; спросившая сессия продолжается через `--resume`, а не новая сессия с вопросом в промпте.
+
+Сделано (+340/−115 строк с тестами, 12 файлов; оценка была ~200, выросло на переносе `QUESTIONS.md` в общий модуль и на переносе тела `resume` в `_go_on`):
+1. `replies.py` — `QUESTIONS.md` прогона, вынесен из `planner`: `ask(run_dir, run_id, questions)` пишет вопросы, если в файле не они (начатые ответы остаются), возвращает путь; `read(...)` — ответы по порядку, `RepliesError` при пропущенном ответе или файле без этих вопросов (тогда он пишется заново). Заголовок файла общий: `# Questions of run <id>`. `planner` пользуется им, `_replies`, `_read_questions`, `QUESTIONS_FILE`, `ANSWER_HEADING` из `planner` убраны; ошибки файла ответов теперь `RepliesError`, а не `PlanError` (`cli._work` его ловит).
+2. `implement`:
+   - `question(store, task)` — на что отвечает оператор: только `needs_human` с причиной `question` (вопрос последней сессии, иначе её `summary`) или `blocked` (`summary`); иначе `None`.
+   - `reply(store, task, question, text)` — сначала задача `needs_human → implementing` или `fixing` (по виду спросившей сессии), потом шаг `REPLY = "reply"` (`session_id` спросившей сессии, `detail` — `question` и `reply`). Порядок нарочно: прогон, вставший между ними, снова берёт ответ сессии, и задача снова ждёт ответа.
+   - `resume`: последний шаг `reply` → `--resume` спросившей сессии с `prompts.operator_reply(reply)`.
+   - `_ask_message`: сессии до последнего шага `reply` не считаются — иначе ответ, на котором сессия спросила, сошёл бы за ответ на просьбу о другом сообщении коммита, и плохое сообщение после ответа оператора сразу давало бы `needs_human(commit_message)`.
+   - `_last_session(steps)` — общий для `last_answer`, `reply` и `resume`.
+3. `store.TASK_TRANSITIONS`: `needs_human → fixing` (вопрос или `blocked` fixer'а).
+4. `runner`:
+   - `_work`: задача в `needs_human` с вопросом — вопрос в `QUESTIONS.md`, в лог путь и `loop answer <run>`; прочие `needs_human` и `replan` — как раньше.
+   - Тело `resume` вынесено в `_go_on(cfg, store, run, answered)`. `resume` на задаче с вопросом — `RunError` с подсказкой «`loop answer <run>` gives it the reply». С `answered`: задача без вопроса — тот же `RunError` без подсказки, прогон без ждущей задачи — «no task of run X waits for a reply»; после проверок ветки и HEAD ответ читается из `QUESTIONS.md`, записывается `implement.reply`, прогон продолжается.
+   - `answer`: `_waiting(..., ("planning", "paused"))` — без номера последний по `created_at` из обоих статусов; `planning` → `planner.answer`, `paused` → `_go_on(answered=True)`. `_waiting` принимает кортеж статусов.
+5. `prompts.operator_reply(reply)` — ответ в fenced-блоке и «Go on with the task and answer as before»; `session.md`: ответ оператора на вопрос или `blocked` приходит в эту же сессию.
+6. `cli`: справка `answer` — «give the replies in QUESTIONS.md to the planner or to a task».
+
+Тесты (433 зелёных, ruff чистый; флаки `test_step` и `test_commands` из 4.1в–г в этот раз не выстрелили): `test_implement` — `question` по всем исходам без gate (параметр в `test_task_without_done_work_skips_the_gate`), ответ уходит в спросившую сессию исполнителя и fixer'а и после ответа плохое сообщение коммита спрашивается заново, задача, вставшая до записи ответа, спрашивает снова; `test_runner` — вопрос → `QUESTIONS.md` → `resume` отказывает с подсказкой → `answer` без ответа → `answer` с ответом продолжает прогон, шаг `reply`; `answer` на задаче без вопроса и на прогоне без ждущей задачи, без прогонов вообще. В `test_task_that_waits_for_the_operator_pauses_the_run` параметр `needs_human/question` заменён на `needs_human/secret_file` (вопрос проверяет новый тест), регулярка с `$`: подсказки `loop answer` у таких задач нет. `test_planner` — `RepliesError` и `replies.FILE`.
+
+Чего нет:
+- Ответ задаче с другими причинами `needs_human` (находки gate: `secret_file`, `secret_in_diff`, конфиги git-hook'ов, ослабленные тесты; `session_failed`, `no_answer`, `no_changes`, `commit_message`, `project_settings`): такой прогон по-прежнему не продолжить. Выход — новый прогон; если понадобится, `loop answer` для них — новая сессия с находкой и ответом в промпте.
+- `replan` ждёт перепланирования (4.2).
+- Без номера `loop answer` берёт последний прогон в `planning` или `paused`; брошенный прогон в `planning`, созданный позже вставшего на вопрос, перехватит ответ — тогда номер прогона указать явно.
+- Проверки на реальном CLI нет (подделки `step.run`), как в 4.1в.
+
+Предлагаемое сообщение коммита: `feat(runner): add loop answer for a task that waits on its question`.
+
+Как было задумано:
+
+- `loop answer <run> "ответ"` (или из файла): ответ сохраняется в шаге задачи, задача `needs_human → implementing`, `loop resume` даёт исполнителю вопрос и ответ в промпте (`prompts.implementer`). Тот же `loop answer` без текста при `planning` — путь 4.1в: различать по статусу прогона.
 
 После 4.1 планы есть, но `loop run` по-прежнему берёт файл карточек: `loop approve`, критик и запуск утверждённого плана — 4.2. Для ручной проверки 4.1 можно скормить `tasks` из `plan.json` в `loop run` (формат карточек совпадает).

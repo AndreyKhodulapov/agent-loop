@@ -10,8 +10,10 @@ the answer goes through the gate again, as the session may have changed the file
 
 A stopped task goes on from its status and its last step: a paused session is resumed or
 replaced by a new one that starts from the handoff, a step whose end the loop has not taken yet
-is taken. Before each session the loop checks the subscription limits: when they leave no room,
-the task keeps its status and the run waits.
+is taken. A task that waits for the operator on a question or a block goes on with the reply of
+the operator, a step of its own, in the session that has asked. Before each session the loop
+checks the subscription limits: when they leave no room, the task keeps its status and the run
+waits.
 
 All steps of a task share the checkpoint and the untracked files of its start: until the commit,
 the work of the task is its work against that checkpoint, whichever session has done it. Files
@@ -34,6 +36,7 @@ IMPLEMENT = "implement"
 GATE = "gate"
 FIX = "fix"
 COMMIT = "commit"
+REPLY = "reply"
 INTERRUPT = "interrupt"
 BUDGET = "budget"
 
@@ -131,6 +134,10 @@ class _Task:
                 # The run stopped between pausing the step and pausing the task.
                 self._pause(last.detail["reason"])
             return self._resume_paused(steps, previous)
+        if last.kind == REPLY:
+            asked = _last_session(steps)
+            prompt = prompts.operator_reply(last.detail["reply"])
+            return self._loop(_Session(asked.kind, prompt, asked.session_id))
         if last.kind == COMMIT:
             # The run stopped between the commit and the move of the task.
             if self.status == "gating":
@@ -363,7 +370,9 @@ class _Task:
         return None
 
     def _ask_message(self, steps: list[Step], message: str) -> _Session | None:
-        sessions = [s for s in steps if s.kind in (IMPLEMENT, FIX)]
+        # The answer before a reply of the operator is not one to another message.
+        since = max((s.id for s in steps if s.kind == REPLY), default=0)
+        sessions = [s for s in steps if s.kind in (IMPLEMENT, FIX) and s.id > since]
         last = sessions[-1]
         # A session answers once, unless it has been asked for another message already.
         if any(s.session_id == last.session_id and s.outcome == "completed" for s in sessions[:-1]):
@@ -392,7 +401,34 @@ class _Task:
 
 def last_answer(steps: list[Step]) -> dict:
     """The answer of the last session of a task; a committed task is committed with it."""
-    return next(s for s in reversed(steps) if s.kind in (IMPLEMENT, FIX)).detail["answer"]
+    return _last_session(steps).detail["answer"]
+
+
+def question(store: Store, task: Task) -> str | None:
+    """What the operator replies to for `task` to go on: the question of its last session, or why
+    the session is blocked; None when the task does not wait for a reply."""
+    if task.status != "needs_human" or task.reason not in ("question", "blocked"):
+        return None
+    answer = prompts.answer(last_answer(store.steps(task.id)))
+    return answer.question or answer.summary
+
+
+def reply(store: Store, task: Task, question: str, text: str) -> None:
+    """Record the reply `text` of the operator to the `question` of `task`: the session that has
+    asked goes on with it when the task resumes."""
+    steps = store.steps(task.id)
+    asked = _last_session(steps)
+    # Moved first: a run stopped before the reply is recorded takes the answer of the session
+    # again, and the task waits for the reply once more.
+    store.move_task(task.id, "implementing" if asked.kind == IMPLEMENT else "fixing")
+    step_id = store.start_step(
+        task.run_id, task.id, REPLY, steps[0].checkpoint, steps[0].untracked, asked.session_id
+    )
+    store.finish_step(step_id, "completed", {"question": question, "reply": text})
+
+
+def _last_session(steps: list[Step]) -> Step:
+    return next(s for s in reversed(steps) if s.kind in (IMPLEMENT, FIX))
 
 
 def _verdict(detail: dict) -> gates.Verdict:

@@ -148,6 +148,18 @@ def planner_answers(questions: list[str], replies: list[str]) -> str:
     return "\n\n".join(sections)
 
 
+def operator_reply(reply: str) -> str:
+    """The prompt that gives the session of a task the `reply` of the operator to its question
+    or block."""
+    return "\n\n".join(
+        [
+            "# Reply of the operator",
+            _fenced(reply, "markdown"),
+            "Go on with the task and answer as before.",
+        ]
+    )
+
+
 def implementer(
     task: Task,
     total: int,

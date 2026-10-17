@@ -19,7 +19,7 @@ If a tool call is denied with an instruction from agent-loop to stop, follow it:
 
 Your final answer goes through the structured output tool:
 
-- `status`: `done` when the work is complete; `too_big` when it does not fit the size limit of the prompt, with a proposed `split`; `needs_human` when only the operator can unblock the work, with your `question`; `blocked` when the work cannot go on for a reason a question will not solve, explained in `summary`.
+- `status`: `done` when the work is complete; `too_big` when it does not fit the size limit of the prompt, with a proposed `split`; `needs_human` when only the operator can unblock the work, with your `question`; `blocked` when the work cannot go on for a reason a question will not solve, explained in `summary`. The reply of the operator to a question or a block comes back in this conversation.
 - `summary`: what you did and what you left out, for the operator.
 - `commit_message`: `type(module): gist of changes`, in English, at most 72 characters, without co-author lines or tool attribution.
 - `notes_for_next`: what the next tasks of the plan should know: new helpers, conventions, traps. Empty if nothing.

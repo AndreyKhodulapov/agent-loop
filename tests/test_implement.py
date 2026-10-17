@@ -326,23 +326,72 @@ def test_tests_weakened_twice_go_to_a_human(env, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("outcome", "status", "reason"),
+    ("outcome", "status", "reason", "question"),
     [
-        (answered("too_big", split=["a", "b"]), "replan", "too_big"),
-        (answered("needs_human", question="which x?"), "needs_human", "question"),
-        (answered("blocked"), "needs_human", "blocked"),
-        (step.Outcome("completed", None, result(None), 0), "needs_human", "no_answer"),
-        (step.Outcome("failed", step.PROJECT_SETTINGS, None, 0), "needs_human", "project_settings"),
-        (step.Outcome("failed", "API error", result(None), 0), "needs_human", "session_failed"),
+        (answered("too_big", split=["a", "b"]), "replan", "too_big", None),
+        (answered("needs_human", question="which x?"), "needs_human", "question", "which x?"),
+        (answered("blocked"), "needs_human", "blocked", "did x"),
+        (step.Outcome("completed", None, result(None), 0), "needs_human", "no_answer", None),
+        (
+            step.Outcome("failed", step.PROJECT_SETTINGS, None, 0),
+            "needs_human",
+            "project_settings",
+            None,
+        ),
+        (
+            step.Outcome("failed", "API error", result(None), 0),
+            "needs_human",
+            "session_failed",
+            None,
+        ),
     ],
 )
-def test_task_without_done_work_skips_the_gate(env, monkeypatch, outcome, status, reason):
+def test_task_without_done_work_skips_the_gate(env, monkeypatch, outcome, status, reason, question):
     env.script(monkeypatch, (None, outcome))
 
     assert env.start() is None
 
     assert (env.task().status, env.task().reason) == (status, reason)
     assert [s.kind for s in env.steps()] == ["implement"]
+    assert implement.question(env.store, env.task()) == question
+
+
+@pytest.mark.parametrize("kind", [implement.IMPLEMENT, implement.FIX])
+def test_reply_of_the_operator_goes_to_the_session_that_has_asked(env, monkeypatch, kind):
+    asking = (None, answered("needs_human", question="which x?"))
+    # The fixer comes after a gate that has failed.
+    env.script(monkeypatch, *([(None, answered())] if kind == implement.FIX else []), asking)
+    env.start()
+
+    implement.reply(env.store, env.task(), "which x?", "the one in app.py")
+
+    assert env.task().status == ("implementing" if kind == implement.IMPLEMENT else "fixing")
+    env.script(
+        monkeypatch,
+        (write("app.py", "x = 'fixed'\n"), answered(commit_message="feat: x")),
+        (None, answered()),
+    )
+    assert env.resume() is None
+    assert env.task().status == "committed"
+    *_, asked, replied, again = env.sessions
+    assert (replied.session_id, replied.resume) == (asked.session_id, True)
+    assert replied.prompt == prompts.operator_reply("the one in app.py")
+    # The answer that has asked is not one to another commit message.
+    assert (again.session_id, again.prompt) == (asked.session_id, prompts.commit_message("feat: x"))
+    reply = next(s for s in env.steps() if s.kind == implement.REPLY)
+    assert reply.detail == {"question": "which x?", "reply": "the one in app.py"}
+
+
+def test_task_stopped_before_the_reply_is_recorded_asks_again(env, monkeypatch):
+    env.script(monkeypatch, (None, answered("needs_human", question="which x?")))
+    env.start()
+    # `implement.reply` moves the task before it records the reply.
+    env.store.move_task(env.task_id, "implementing")
+
+    assert env.resume() is None
+
+    assert (env.task().status, env.task().reason) == ("needs_human", "question")
+    assert len(env.sessions) == 1
 
 
 def test_session_that_exits_without_a_result_goes_to_a_human(env, monkeypatch):

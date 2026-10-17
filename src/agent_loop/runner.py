@@ -2,10 +2,10 @@
 
 `start` begins a run with the tasks of a cards file, `resume` goes on with a paused one.
 `plan_request` begins a run with the request of the operator, from a file or in a conversation
-with the planner, which stays in planning while `planner` works on it, and `answer` gives the
-planner the replies of the operator to its questions. A run holds the lock of the working
-directory and its own lock, works with the profile frozen at its start and keeps the services of
-the profile up while it works.
+with the planner, which stays in planning while `planner` works on it. `answer` gives the replies
+of the operator to the planner of a planning run, or to the task a paused run waits for, and goes
+on. A run holds the lock of the working directory and its own lock, works with the profile frozen
+at its start and keeps the services of the profile up while it works.
 
 The run pauses when a task needs the operator: a question, the planner, a moved branch, Ctrl+C.
 Ctrl+C outside a session pauses the run with its open steps as `recovery` pauses a dead one.
@@ -33,6 +33,7 @@ from agent_loop import (
     prompts,
     protected,
     recovery,
+    replies,
     selfcheck,
     step,
 )
@@ -155,12 +156,19 @@ def plan_request(cfg: Config, request_file: Path | None, new: bool = False) -> s
 
 
 def answer(cfg: Config, run_id: str | None) -> str | None:
-    """Give the planner of the planning run `run_id`, or of the last one of the repository, the
-    replies of the operator to its questions; returns as `plan_request`."""
+    """Give the replies of the operator in `QUESTIONS.md` of the run `run_id`, or of the last
+    planning or paused run of the repository, and go on with it.
+
+    The replies of a planning run go to its planner, as `planner.answer`; the reply of a paused
+    run goes to the task that waits for it, and the run resumes. Returns as `plan_request` or
+    `resume`.
+    """
     repo = _repo(cfg)
     selfcheck.require(cfg.home)
     with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
-        run = _waiting(store, repo, run_id, "planning")
+        run = _waiting(store, repo, run_id, ("planning", "paused"))
+        if run.status == "paused":
+            return _go_on(cfg, store, run, answered=True)
         run_dir = step.run_dir(cfg.home, run.id)
         with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
             return planner.answer(cfg, store, run)
@@ -174,41 +182,53 @@ def resume(cfg: Config, run_id: str | None) -> str | None:
     repo = _repo(cfg)
     selfcheck.require(cfg.home)
     with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
-        run = _waiting(store, repo, run_id, "paused")
-        if run.base is None:
+        return _go_on(cfg, store, _waiting(store, repo, run_id, ("paused",)), answered=False)
+
+
+def _go_on(cfg: Config, store: Store, run: Run, answered: bool) -> str | None:
+    """Resume the paused `run`; when the operator has `answered`, the task that waits for the
+    reply gets it first."""
+    repo = Path(run.repo)
+    if run.base is None:
+        raise RunError(f"run {run.id} has no record of the HEAD it started from, start a new run")
+    run_dir = step.run_dir(cfg.home, run.id)
+    # Removed by hand: without the copy `protected.restore` would take every protected file of
+    # the operator for a new one.
+    missing = [
+        name
+        for name in (commands.PROFILE_FILE, protected.COPY_DIR)
+        if not (run_dir / name).exists()
+    ]
+    if missing:
+        raise RunError(f"{', '.join(missing)} of the run is gone from {run_dir}")
+    with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
+        # They wait for `loop answer` and the planner.
+        waiting = [t for t in store.tasks(run.id) if t.status in ("needs_human", "replan")]
+        task = waiting[0] if waiting else None
+        question = None if task is None else implement.question(store, task)
+        if task is not None and (question is None or not answered):
+            hint = "" if question is None else f", `loop answer {run.id}` gives it the reply"
+            raise RunError(f"task {task.seq} waits in {task.status} ({task.reason}){hint}")
+        if answered and task is None:
+            raise RunError(f"no task of run {run.id} waits for a reply")
+        branch, head, expected = git.branch(repo), git.head(repo), _head(store, run)
+        if branch != run.branch or head != expected:
             raise RunError(
-                f"run {run.id} has no record of the HEAD it started from, start a new run"
+                f"the run has left {run.branch} at {expected[:12]}, now {branch} is at"
+                f" {head[:12]}: put them back"
             )
-        run_dir = step.run_dir(cfg.home, run.id)
-        # Removed by hand: without the copy `protected.restore` would take every protected file
-        # of the operator for a new one.
-        missing = [
-            name
-            for name in (commands.PROFILE_FILE, protected.COPY_DIR)
-            if not (run_dir / name).exists()
-        ]
-        if missing:
-            raise RunError(f"{', '.join(missing)} of the run is gone from {run_dir}")
-        with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
-            # They wait for `loop answer` and the planner.
-            waiting = [t for t in store.tasks(run.id) if t.status in ("needs_human", "replan")]
-            if waiting:
-                task = waiting[0]
-                raise RunError(f"task {task.seq} waits in {task.status} ({task.reason})")
-            branch, head, expected = git.branch(repo), git.head(repo), _head(store, run)
-            if branch != run.branch or head != expected:
-                raise RunError(
-                    f"the run has left {run.branch} at {expected[:12]}, now {branch} is at"
-                    f" {head[:12]}: put them back"
-                )
-            profile = commands.frozen(run_dir)
-            store.move_run(run.id, "running")
-            logger.info("resuming the run paused for %s", run.reason)
-            try:
-                with commands.services(profile, repo, run_dir):
-                    return _work(cfg, store, run, profile)
-            except KeyboardInterrupt:
-                return _interrupted(store, run)
+        if answered:
+            [reply] = replies.read(run_dir, run.id, [question])
+            implement.reply(store, task, question, reply)
+            logger.info("task %d goes on with the reply of the operator", task.seq)
+        profile = commands.frozen(run_dir)
+        store.move_run(run.id, "running")
+        logger.info("resuming the run paused for %s", run.reason)
+        try:
+            with commands.services(profile, repo, run_dir):
+                return _work(cfg, store, run, profile)
+        except KeyboardInterrupt:
+            return _interrupted(store, run)
 
 
 def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
@@ -239,7 +259,18 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
         [task] = [t for t in store.tasks(run.id) if t.id == task.id]
         if task.status in ("needs_human", "replan"):
             logger.warning("task %d waits in %s (%s)", task.seq, task.status, task.reason)
-            return _pause(store, run, task.status)
+            question = implement.question(store, task)
+            if question is None:
+                return _pause(store, run, task.status)
+            path = replies.ask(step.run_dir(cfg.home, run.id), run.id, [question])
+            store.move_run(run.id, "paused", task.status)
+            logger.warning(
+                "the run is paused, reply to task %d in %s and run `loop answer %s`",
+                task.seq,
+                path,
+                run.id,
+            )
+            return task.status
         # Other pauses go on at once: the task resumes its session or goes to the planner.
         if task.status == "paused" and task.reason in (implement.INTERRUPT, gates.BRANCH_CHANGED):
             return _pause(store, run, task.reason)
@@ -328,21 +359,22 @@ def _conversation(store: Store, home: Path, repo: Path) -> Run | None:
     return None
 
 
-def _waiting(store: Store, repo: Path, run_id: str | None, status: str) -> Run:
-    """The run `run_id` of `repo` in `status`, or the last such run of `repo`."""
+def _waiting(store: Store, repo: Path, run_id: str | None, statuses: tuple[str, ...]) -> Run:
+    """The run `run_id` of `repo` in one of `statuses`, or the last such run of `repo`."""
+    expected = " or ".join(statuses)
     if run_id is None:
-        runs = [r for r in store.runs(status) if r.repo == str(repo)]
+        runs = [r for status in statuses for r in store.runs(status) if r.repo == str(repo)]
         if not runs:
-            raise RunError(f"no {status} run in {repo}")
-        return runs[-1]
+            raise RunError(f"no {expected} run in {repo}")
+        return max(runs, key=lambda r: r.created_at)
     try:
         run = store.run(run_id)
     except StoreError as exc:
         raise RunError(str(exc)) from exc
     if run.repo != str(repo):
         raise RunError(f"run {run_id} works in {run.repo}")
-    if run.status != status:
-        raise RunError(f"run {run_id} is {run.status}, not {status}")
+    if run.status not in statuses:
+        raise RunError(f"run {run_id} is {run.status}, not {expected}")
     return run
 
 

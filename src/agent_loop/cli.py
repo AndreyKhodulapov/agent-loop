@@ -7,7 +7,18 @@ import signal
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_loop import agent, config, git, implement, log, planner, recovery, runner, selfcheck
+from agent_loop import (
+    agent,
+    config,
+    git,
+    implement,
+    log,
+    planner,
+    recovery,
+    replies,
+    runner,
+    selfcheck,
+)
 from agent_loop.commands import CommandError
 from agent_loop.store import DB_FILE, Store, StoreError
 
@@ -85,9 +96,11 @@ def _parser() -> argparse.ArgumentParser:
         help="start a new conversation instead of going on with the last one",
     )
     plan.set_defaults(handler=_plan)
-    answer = commands.add_parser("answer", help="answer the questions of the planner")
+    answer = commands.add_parser(
+        "answer", help="give the replies in QUESTIONS.md to the planner or to a task"
+    )
     answer.add_argument(
-        "run_id", nargs="?", help="the run to answer, the last planning one by default"
+        "run_id", nargs="?", help="the run to answer, the last planning or paused one by default"
     )
     answer.set_defaults(handler=_answer)
     run = commands.add_parser("run", help="run the tasks of a cards file on the current branch")
@@ -144,6 +157,7 @@ def _work(cfg: config.Config, run: Callable[[], str | None]) -> int:
     except (
         runner.RunError,
         planner.PlanError,
+        replies.RepliesError,
         agent.AgentError,
         config.ConfigError,
         CommandError,

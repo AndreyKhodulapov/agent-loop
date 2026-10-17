@@ -5,7 +5,18 @@ from dataclasses import dataclass
 import pytest
 from test_plan import PLAN
 
-from agent_loop import agent, budget, git, guard, implement, planner, prompts, protected, step
+from agent_loop import (
+    agent,
+    budget,
+    git,
+    guard,
+    implement,
+    planner,
+    prompts,
+    protected,
+    replies,
+    step,
+)
 from agent_loop.config import Config, Settings
 from agent_loop.store import Store
 
@@ -74,7 +85,7 @@ class Env:
         monkeypatch.setattr(agent, "talk", talk)
 
     def questions_file(self):
-        return self.run_dir / planner.QUESTIONS_FILE
+        return self.run_dir / replies.FILE
 
 
 @pytest.fixture
@@ -150,7 +161,7 @@ def test_questions_go_to_the_operator_and_the_replies_to_the_session(env, monkey
     text = env.questions_file().read_text()
     assert "## Question 2\n\nAre prices\nin cents?\n\n### Answer\n" in text
     env.questions_file().write_text(text.replace("### Answer\n", "### Answer\n\nThe admin\n", 1))
-    with pytest.raises(planner.PlanError, match="no answer to question 2"):
+    with pytest.raises(replies.RepliesError, match="no answer to question 2"):
         env.answer()
     # The replies of the operator stay when the planning goes on before the answer.
     assert env.go_on() == planner.QUESTIONS
@@ -173,7 +184,7 @@ def test_questions_file_that_lost_its_questions_is_written_anew(env, monkeypatch
     env.go_on()
     env.questions_file().write_text("# my notes\n")
 
-    with pytest.raises(planner.PlanError, match="written anew"):
+    with pytest.raises(replies.RepliesError, match="written anew"):
         env.answer()
 
     assert "## Question 1\n\nWho may remove a dish?" in env.questions_file().read_text()

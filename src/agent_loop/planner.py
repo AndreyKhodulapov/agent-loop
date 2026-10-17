@@ -16,14 +16,12 @@ replaced as `step.how_to_resume` decides, an answer the loop has not taken yet i
 from __future__ import annotations
 
 import logging
-import re
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from agent_loop import agent, budget, git, guard, implement, log, plan, prompts, step
+from agent_loop import agent, budget, git, guard, implement, log, plan, prompts, replies, step
 from agent_loop.config import Config
-from agent_loop.files import write_atomic
 from agent_loop.store import Run, Step, Store
 
 logger = logging.getLogger(__name__)
@@ -34,10 +32,8 @@ QUESTIONS = "questions"
 # The plan still has errors after the retries: the run waits for the operator.
 REJECTED = "rejected"
 REQUEST_FILE = "request.md"
-QUESTIONS_FILE = "QUESTIONS.md"
 DRAFT_FILE = "plan-draft.json"
 RETRIES = 2
-ANSWER_HEADING = "### Answer"
 ANSWER_SCHEMA = {
     "type": "object",
     "properties": {
@@ -136,16 +132,10 @@ class _Planner:
         if output is None or output["status"] != QUESTIONS or _errors(output):
             raise PlanError(f"the planner of run {self.run.id} has no questions to answer")
         questions = output["questions"]
-        path = self.run_dir / QUESTIONS_FILE
-        replies = self._replies(questions)
-        if replies is None:
-            raise PlanError(f"{path} is written anew with the questions, answer them there")
-        missing = [str(number) for number, reply in enumerate(replies, start=1) if not reply]
-        if missing:
-            raise PlanError(f"{path}: no answer to question {', '.join(missing)}")
+        answers = replies.read(self.run_dir, self.run.id, questions)
         logger.info("the planner goes on with the answers to %d questions", len(questions))
         return self._loop(
-            _Session(prompts.planner_answers(questions, replies), steps[-1].session_id)
+            _Session(prompts.planner_answers(questions, answers), steps[-1].session_id)
         )
 
     def _loop(self, upcoming: _Session | str | None) -> str | None:
@@ -201,10 +191,10 @@ class _Planner:
             )
             return QUESTIONS
         if not errors and output["status"] == QUESTIONS:
-            self._replies(output["questions"])
+            path = replies.ask(self.run_dir, self.run.id, output["questions"])
             logger.warning(
                 "the planner has questions: answer them in %s and run `loop answer %s`",
-                self.run_dir / QUESTIONS_FILE,
+                path,
                 self.run.id,
             )
             return QUESTIONS
@@ -237,23 +227,6 @@ class _Planner:
             else "change the request and plan again",
         )
         return REJECTED
-
-    def _replies(self, questions: list[str]) -> list[str] | None:
-        """The replies in `QUESTIONS.md` to `questions`, empty where the operator has not written
-        one yet; None when the file did not hold these questions and is written anew."""
-        path = self.run_dir / QUESTIONS_FILE
-        pairs = _read_questions(path) if path.is_file() else []
-        if [question for question, _ in pairs] == [question.strip() for question in questions]:
-            return [reply for _, reply in pairs]
-        sections = [
-            f"# Questions of the planner, run {self.run.id}",
-            f"Write each answer under its `{ANSWER_HEADING}` line, then run"
-            f" `loop answer {self.run.id}`.",
-        ]
-        for number, question in enumerate(questions, start=1):
-            sections += [f"## Question {number}", question.strip(), ANSWER_HEADING]
-        write_atomic(path, "\n\n".join(sections) + "\n\n")
-        return None
 
     def _session(self, upcoming: _Session) -> step.Outcome:
         session = self._agent_session(upcoming, ANSWER_SCHEMA)
@@ -302,13 +275,3 @@ def _errors(output: dict) -> list[str]:
     if "plan" not in output:
         return ["the answer has the status plan without the plan"]
     return plan.validate(output["plan"])
-
-
-def _read_questions(path: Path) -> list[tuple[str, str]]:
-    """(question, reply) pairs of a `QUESTIONS.md`, both stripped."""
-    sections = re.split(r"^## Question \d+$", path.read_text(encoding="utf-8"), flags=re.M)
-    pairs = []
-    for section in sections[1:]:
-        question, _, reply = section.partition(f"\n{ANSWER_HEADING}\n")
-        pairs.append((question.strip(), reply.strip()))
-    return pairs

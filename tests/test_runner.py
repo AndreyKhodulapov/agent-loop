@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_loop import git, implement, protected, recovery, runner, selfcheck, step
+from agent_loop import git, implement, protected, recovery, replies, runner, selfcheck, step
 from agent_loop.config import Config, Profile, Settings
 from agent_loop.store import Store
 
@@ -198,7 +198,7 @@ def test_broken_tasks_file_is_rejected(tmp_path, content, error):
         runner.load_tasks(path)
 
 
-@pytest.mark.parametrize("status, reason", [("needs_human", "question"), ("replan", "too_big")])
+@pytest.mark.parametrize("status, reason", [("needs_human", "secret_file"), ("replan", "too_big")])
 def test_task_that_waits_for_the_operator_pauses_the_run(
     home, cfg, tasks_file, monkeypatch, status, reason
 ):
@@ -210,8 +210,50 @@ def test_task_that_waits_for_the_operator_pauses_the_run(
     assert run_moves[-1] == ("paused", status)
     assert (first.status, second.status) == (status, "pending")
     assert len(tasks.calls) == 1
-    with pytest.raises(runner.RunError, match=f"task 1 waits in {status} \\({reason}\\)"):
+    with pytest.raises(runner.RunError, match=f"task 1 waits in {status} \\({reason}\\)$"):
         runner.resume(cfg, None)
+    with pytest.raises(runner.RunError, match=f"task 1 waits in {status} \\({reason}\\)$"):
+        runner.answer(cfg, None)
+
+
+def asks(question):
+    """The session of the task asks the operator `question`."""
+
+    def turn(store, task):
+        store.move_task(task.id, "implementing")
+        answer = {"status": "needs_human", "summary": "", "commit_message": ""}
+        answer |= {"notes_for_next": "", "question": question}
+        checkpoint = git.head(Path(store.run(task.run_id).repo))
+        step_id = store.start_step(task.run_id, task.id, implement.IMPLEMENT, checkpoint, [], "s")
+        store.finish_step(step_id, "completed", {"reason": None, "answer": answer})
+        store.move_task(task.id, "needs_human", "question")
+
+    return turn
+
+
+def test_task_that_asks_goes_on_with_the_reply_of_the_operator(home, cfg, tasks_file, monkeypatch):
+    Tasks(monkeypatch, asks("Which x?"))
+
+    assert runner.start(cfg, tasks_file) == "needs_human"
+
+    run, _, _ = the_run(home)
+    questions = step.run_dir(home, run.id) / replies.FILE
+    assert "## Question 1\n\nWhich x?\n\n### Answer\n" in questions.read_text()
+    with pytest.raises(runner.RunError, match=f"\\(question\\), `loop answer {run.id}`"):
+        runner.resume(cfg, None)
+    with pytest.raises(replies.RepliesError, match="no answer to question 1"):
+        runner.answer(cfg, None)
+    questions.write_text(questions.read_text() + "The one in app.py\n")
+    tasks = Tasks(monkeypatch, commits(), commits())
+
+    assert runner.answer(cfg, None) is None
+
+    assert [name for name, _, _, _ in tasks.calls] == ["resume", "start"]
+    with opened(home) as store:
+        first, _ = store.tasks(run.id)
+        reply = store.steps(first.id)[1]
+    assert (reply.kind, reply.session_id) == (implement.REPLY, "s")
+    assert reply.detail == {"question": "Which x?", "reply": "The one in app.py"}
 
 
 def test_run_waits_for_the_limits_and_goes_on(home, cfg, tasks_file, monkeypatch):
@@ -275,8 +317,10 @@ def test_operator_stops_pause_the_run_and_resume_goes_on(
     Tasks(monkeypatch, turn)
 
     assert runner.start(cfg, tasks_file) == reason
-    _, _, run_moves = the_run(home)
+    run, _, run_moves = the_run(home)
     assert run_moves[-1] == ("paused", reason)
+    with pytest.raises(runner.RunError, match=f"no task of run {run.id} waits for a reply"):
+        runner.answer(cfg, None)
 
     tasks = Tasks(monkeypatch, commits(), commits())
     assert runner.resume(cfg, None) is None
@@ -320,6 +364,8 @@ def test_resume_without_a_paused_run(home, cfg):
         runner.resume(cfg, None)
     with pytest.raises(runner.RunError, match="run 0a1b2c3d not found"):
         runner.resume(cfg, "0a1b2c3d")
+    with pytest.raises(runner.RunError, match="no planning or paused run in"):
+        runner.answer(cfg, None)
 
 
 def forget_the_base(home, run_dir):

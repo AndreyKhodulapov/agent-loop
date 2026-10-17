@@ -42,7 +42,7 @@ TASK_TRANSITIONS = {
     "committed": {"reviewing", "done"},
     "reviewing": {"fixing", "done", "paused"},
     "paused": {"implementing", "gating", "fixing", "reviewing", "replan"},
-    "needs_human": {"implementing"},
+    "needs_human": {"implementing", "fixing"},
     "replan": {"pending", "dropped"},
     "done": set(),
     "dropped": set(),
