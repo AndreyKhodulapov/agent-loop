@@ -1,8 +1,6 @@
-import json
-
 import pytest
 
-from agent_loop import plan, runner
+from agent_loop import plan
 
 TASK = {
     "title": "Schema of dishes",
@@ -81,11 +79,8 @@ def test_tasks_of_a_plan_are_the_tasks_of_the_run(tmp_path):
     run_dir = tmp_path / "runs" / "r1"
     run_dir.mkdir(parents=True)
     plan.save(run_dir, PLAN)
-    cards = tmp_path / "cards.json"
-    cards.write_text(json.dumps(plan.load(run_dir)["tasks"]))
 
     tasks = plan.cards(plan.load(run_dir))
 
     assert [title for title, _ in tasks] == ["Schema of dishes", "Router of dishes"]
-    # The tasks of `plan.json` go to `loop run` as they are.
-    assert runner.load_tasks(cards) == tasks
+    assert tasks[0][1] == {key: value for key, value in TASK.items() if key != "title"}

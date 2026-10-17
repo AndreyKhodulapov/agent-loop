@@ -109,10 +109,8 @@ def _parser() -> argparse.ArgumentParser:
         "run_id", nargs="?", help="the run to approve, the last planning one with a plan by default"
     )
     approve.set_defaults(handler=_approve)
-    run = commands.add_parser("run", help="run the tasks of a cards file on the current branch")
-    run.add_argument(
-        "tasks", type=Path, help="JSON list of title, goal, criteria, files, tests, decisions"
-    )
+    run = commands.add_parser("run", help="run the tasks of an approved plan on the current branch")
+    run.add_argument("run_id", nargs="?", help="the run to start, the last approved one by default")
     run.set_defaults(handler=_run)
     resume = commands.add_parser("resume", help="resume a paused run")
     resume.add_argument(
@@ -152,7 +150,7 @@ def _approve(args: argparse.Namespace, cfg: config.Config) -> int:
 
 
 def _run(args: argparse.Namespace, cfg: config.Config) -> int:
-    return _work(cfg, lambda: runner.start(cfg, args.tasks))
+    return _work(cfg, lambda: runner.start(cfg, args.run_id))
 
 
 def _resume(args: argparse.Namespace, cfg: config.Config) -> int:

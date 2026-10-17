@@ -1177,7 +1177,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 После 4.1 планы есть, но `loop run` по-прежнему берёт файл карточек: `loop approve`, критик и запуск утверждённого плана — 4.2. Для ручной проверки 4.1 можно скормить `tasks` из `plan.json` в `loop run` (формат карточек совпадает).
 
-### 4.2 Критик, утверждение, перепланирование — разбиение утверждено 2026-10-17, 4.2а–б готовы 2026-10-17
+### 4.2 Критик, утверждение, перепланирование — разбиение утверждено 2026-10-17, 4.2а–в готовы 2026-10-17
 
 Решения человека (2026-10-17, по рекомендациям агента; записаны в план, раздел 3): пять коммитов в `planner`, порядок обязателен; `loop approve` утверждает план и с оставшимися блокирующими находками критика — с предупреждением, находки в `PLAN.md`. Пункт 3 этапа 4 (в карточке нет правок закрытых файлов) уже закрыт в 4.1б — отдельного коммита нет.
 
@@ -1222,9 +1222,26 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Предлагаемое сообщение коммита: `feat(planner): add loop approve that fixes the plan hash and renders PLAN.md`.
 
-#### 4.2в `loop run` из утверждённого плана — дальше
+#### 4.2в `loop run` из утверждённого плана — готово 2026-10-17
 
-Как задумано: `loop run [run]` берёт прогон `run` или последний `approved` прогон репозитория; `plan.json` с другим хешом — отказ. Файл карточек и `runner.load_tasks` убираются (решение 3.5: вход заменит утверждённый план); тесты `runner`/`cli`/`implement` переходят на хелпер, создающий утверждённый прогон. `protected.save` и `commands.freeze` — при старте `run`, как сейчас (у прогона из `loop plan` `protected` уже сохранён при создании — проверить, что повторное сохранение не теряет правки оператора между планом и запуском, или сохранять заново).
+Решение человека (2026-10-17, по рекомендации агента; записано в план, раздел 3): ветка и base прогона — текущие при `loop run`, а не при `loop plan`.
+
+Сделано (+141/−145 строк с тестами, 7 файлов):
+1. `runner.start(cfg, run_id)`: прогон `run_id` или последний `approved` прогон репозитория (`_waiting(..., ("approved",))`: «no approved run in …», «run X is planning, not approved»). Дальше проверки по порядку: detached HEAD, изменения в отслеживаемых файлах, на месте ли `plan.json` и `critique.json` («… of the run is gone from …»), хеш `plan.json` равен `Run.plan_hash` (иначе «… has changed since it was approved: put it back or plan anew»: утверждённый прогон заново не утвердить, переход `approved → planning` не предусмотрен). Затем `commands.freeze`, `protected.save`, `store.start`, `PLAN.md` перерисовывается (ветка могла смениться), дальше как раньше.
+2. `store.start(run_id, branch, base)` — `approved → running` с веткой и base одной транзакцией. `previous_tasks` и `_head` считают от base, поэтому base — HEAD при запуске, а не при планировании.
+3. `protected.save` перенесён из `plan_request` в `start`: планировщик копию не использует (только чтение, `restore` зовут `step.run` и gate задачи), а правки оператора в защищённых файлах между планом и запуском — его, цикл не должен их откатывать. `plan_request` сам создаёт каталог прогона под `request.md`. В живой базе прогонов в `planning`/`approved` нет (проверено 2026-10-17), так что старой копии, на которой `protected.save` упал бы `FileExistsError`, ни у кого нет.
+4. `runner._write_plan(cfg, run, approved)` — общий для `approve` и `start`: читает `critique.json`, пишет `PLAN.md`, возвращает находки и пути.
+5. `runner.load_tasks` и файл карточек убраны; `cli`: `loop run [run_id]`. Докстринги `runner`, `plan` и комментарий `Run.plan_hash` (старые прогоны из файла карточек в базе остаются с `NULL`).
+
+Тесты (442 зелёных: −10 параметров `test_broken_tasks_file_is_rejected` вместе с тестом, +2 параметра отказа; ruff чистый): `test_runner` — фикстура `approved` (`planned` + `runner.approve`, у `planned` параметр `tasks`) вместо файла карточек; первый тест: между утверждением и запуском оператор создаёт ветку `dishes`, коммитит и кладёт `.claude/settings.json` — прогон идёт на `dishes` от нового HEAD, копия `protected` с файлом оператора, `PLAN.md` с новой веткой; отказы старта параметризованы ещё изменённым `plan.json` и удалённым `critique.json`, после отказа прогон остаётся `approved` без копии `protected`; `start` без утверждённого прогона и на прогоне в `planning`; один тест запускает `start` по номеру прогона. `test_cli` — хелпер `approved` (план через `planned` и `loop approve`), `loop run` без аргументов. `test_plan` — сравнение с `load_tasks` заменено проверкой карточки.
+
+Чего нет:
+- Проверки на реальном CLI. Вместе с непроверенным из 4.2а–б: `loop plan --from request.md` → `loop approve` → `git checkout -b <ветка>` → `loop run` на тестовом репозитории; в логе `N tasks on <ветка>`, в `PLAN.md` новая ветка.
+- `loop approve` по-прежнему не проверяет `plan.json`, поправленный руками до утверждения (схема, `plan.validate`); файл не по схеме упадёт `KeyError` с трейсбеком. Решать, если оператор начнёт править план руками.
+- Прогон, у которого `loop run` упал между `protected.save` и `store.start` (окно в несколько строк, например Ctrl+C), остаётся `approved` с копией `protected`, и следующий `loop run` упадёт `FileExistsError`. Выход — удалить `runs/<run>/protected` руками.
+- Облегчённый режим `loop run --quick task.md` (раздел 3, 2026-10-11) не сделан: он не входит в разбиение 4.2.
+
+Предлагаемое сообщение коммита: `feat(runner): run the tasks of an approved plan instead of a cards file`.
 
 #### 4.2г Перепланирование посреди прогона — дальше
 

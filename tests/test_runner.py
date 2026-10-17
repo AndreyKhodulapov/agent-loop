@@ -1,6 +1,5 @@
 import contextlib
 import hashlib
-import json
 import logging
 import shutil
 import sqlite3
@@ -51,10 +50,11 @@ def cfg(home, repo):
 
 
 @pytest.fixture
-def tasks_file(tmp_path):
-    path = tmp_path / "tasks.json"
-    path.write_text(json.dumps([{"title": title, **CARD} for title in ("First", "Second")]))
-    return path
+def approved(home, repo, cfg):
+    """An approved run of `repo` with the tasks First and Second."""
+    run_id = planned(home, repo, tasks=[{"title": title, **CARD} for title in ("First", "Second")])
+    runner.approve(cfg, run_id)
+    return run_id
 
 
 class Tasks:
@@ -126,13 +126,20 @@ def the_run(home):
 
 
 def test_tasks_run_one_after_another_until_the_run_is_done(
-    home, repo, tmp_path, tasks_file, monkeypatch, caplog
+    home, repo, tmp_path, approved, monkeypatch, caplog
 ):
     services = tmp_path / "services.log"
     profile = Profile(
         commands={name: f"echo {name} >> {services}" for name in ("install", "up", "down")}
     )
     cfg = Config(home, repo, None, Settings(), {}, profile)
+    # Between the approval and the run the operator branches off, commits and sets up the CLI.
+    subprocess.run(["git", "checkout", "-q", "-b", "dishes"], cwd=repo, check=True)
+    (repo / "app.py").write_text("x = 2\n")
+    subprocess.run(["git", "commit", "-q", "-am", "by hand"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/\n")
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.json").write_text("{}")
     base = git.head(repo)
     tasks = Tasks(
         monkeypatch,
@@ -141,10 +148,10 @@ def test_tasks_run_one_after_another_until_the_run_is_done(
     )
 
     with caplog.at_level(logging.INFO, logger="agent_loop"):
-        assert runner.start(cfg, tasks_file) is None
+        assert runner.start(cfg, None) is None
 
     run, [first, second], run_moves = the_run(home)
-    assert (run.branch, run.base) == ("main", base)
+    assert (run.branch, run.base) == ("dishes", base)
     assert run_moves == [("approved", None), ("running", None), ("done", None)]
     assert (first.title, first.card, first.status) == ("First", CARD, "committed")
     assert second.status == "committed"
@@ -154,7 +161,8 @@ def test_tasks_run_one_after_another_until_the_run_is_done(
     assert "- First: tasks.py has helper()" in previous
     assert services.read_text() == "install\nup\ndown\n"
     run_dir = step.run_dir(home, run.id)
-    assert (run_dir / protected.COPY_DIR).is_dir()
+    assert (run_dir / protected.COPY_DIR / ".claude" / "settings.json").read_text() == "{}"
+    assert f"Run `{run.id}` on `dishes`." in (run_dir / "PLAN.md").read_text()
     assert (run_dir / "profile.json").is_file()
     through = caplog.messages.index("all 2 tasks are through")
     assert caplog.messages[through + 1] == (
@@ -171,53 +179,41 @@ def detach(repo):
 @pytest.mark.parametrize(
     "spoil, error",
     [
-        (lambda repo: (repo / "app.py").write_text("x = 2\n"), "the tracked files have changes"),
-        (detach, "HEAD is detached"),
-        (recovery.hold_repo, "another run works in"),
+        (
+            lambda repo, run_dir: (repo / "app.py").write_text("x = 2\n"),
+            "the tracked files have changes",
+        ),
+        (lambda repo, run_dir: detach(repo), "HEAD is detached"),
+        (lambda repo, run_dir: recovery.hold_repo(repo), "another run works in"),
+        (
+            lambda repo, run_dir: (run_dir / "plan.json").write_text("{}"),
+            "plan.json has changed since it was approved",
+        ),
+        (lambda repo, run_dir: (run_dir / "critique.json").unlink(), "critique.json of the run"),
     ],
 )
-def test_run_does_not_start_where_it_would_mix_with_other_work(
-    home, repo, cfg, tasks_file, spoil, error
+def test_run_does_not_start_off_its_plan_or_where_it_would_mix_with_other_work(
+    home, repo, cfg, approved, spoil, error
 ):
-    held = spoil(repo)
+    run_dir = step.run_dir(home, approved)
+    held = spoil(repo, run_dir)
 
     with pytest.raises(runner.RunError, match=error):
-        runner.start(cfg, tasks_file)
+        runner.start(cfg, None)
 
-    assert not (home / "runs").exists()
+    with opened(home) as store:
+        assert store.run(approved).status == "approved"
+    assert not (run_dir / protected.COPY_DIR).exists()
     del held
-
-
-@pytest.mark.parametrize(
-    "content, error",
-    [
-        ("[{", "tasks: "),
-        ("{}", "expected a list of tasks"),
-        ("[]", "expected a list of tasks"),
-        ('["x"]', "task 1: expected an object"),
-        (json.dumps([CARD]), r"task 1: missing \['title'\], unknown \[\]"),
-        (json.dumps([{"title": "t", **CARD, "notes": ""}]), r"missing \[\], unknown \['notes'\]"),
-        (json.dumps([{**CARD, "title": " "}]), "title must be a non-empty string"),
-        (json.dumps([{"title": "t", **CARD, "goal": 1}]), "goal must be a non-empty string"),
-        (json.dumps([{"title": "t", **CARD, "files": "app.py"}]), "files must be a list of"),
-        (json.dumps([{"title": "t", **CARD, "tests": [1]}]), "tests must be a list of strings"),
-    ],
-)
-def test_broken_tasks_file_is_rejected(tmp_path, content, error):
-    path = tmp_path / "tasks.json"
-    path.write_text(content)
-
-    with pytest.raises(runner.RunError, match=error):
-        runner.load_tasks(path)
 
 
 @pytest.mark.parametrize("status, reason", [("needs_human", "secret_file"), ("replan", "too_big")])
 def test_task_that_waits_for_the_operator_pauses_the_run(
-    home, cfg, tasks_file, monkeypatch, status, reason
+    home, cfg, approved, monkeypatch, status, reason
 ):
     tasks = Tasks(monkeypatch, moves("implementing", status, reason=reason))
 
-    assert runner.start(cfg, tasks_file) == status
+    assert runner.start(cfg, None) == status
 
     run, [first, second], run_moves = the_run(home)
     assert run_moves[-1] == ("paused", status)
@@ -244,10 +240,10 @@ def asks(question):
     return turn
 
 
-def test_task_that_asks_goes_on_with_the_reply_of_the_operator(home, cfg, tasks_file, monkeypatch):
+def test_task_that_asks_goes_on_with_the_reply_of_the_operator(home, cfg, approved, monkeypatch):
     Tasks(monkeypatch, asks("Which x?"))
 
-    assert runner.start(cfg, tasks_file) == "needs_human"
+    assert runner.start(cfg, None) == "needs_human"
 
     run, _, _ = the_run(home)
     questions = step.run_dir(home, run.id) / replies.FILE
@@ -269,7 +265,7 @@ def test_task_that_asks_goes_on_with_the_reply_of_the_operator(home, cfg, tasks_
     assert reply.detail == {"question": "Which x?", "reply": "The one in app.py"}
 
 
-def test_run_waits_for_the_limits_and_goes_on(home, cfg, tasks_file, monkeypatch):
+def test_run_waits_for_the_limits_and_goes_on(home, cfg, approved, monkeypatch):
     resume_at = int(time.time()) + 600
     slept = []
     monkeypatch.setattr(time, "sleep", slept.append)
@@ -280,7 +276,7 @@ def test_run_waits_for_the_limits_and_goes_on(home, cfg, tasks_file, monkeypatch
         commits(),
     )
 
-    assert runner.start(cfg, tasks_file) is None
+    assert runner.start(cfg, None) is None
 
     _, _, run_moves = the_run(home)
     assert run_moves == [
@@ -299,7 +295,7 @@ def test_run_waits_for_the_limits_and_goes_on(home, cfg, tasks_file, monkeypatch
 
 
 def test_ctrl_c_while_waiting_for_the_limits_leaves_the_run_paused(
-    home, cfg, tasks_file, monkeypatch
+    home, cfg, approved, monkeypatch
 ):
     def interrupted(seconds):
         raise KeyboardInterrupt
@@ -307,7 +303,7 @@ def test_ctrl_c_while_waiting_for_the_limits_leaves_the_run_paused(
     monkeypatch.setattr(time, "sleep", interrupted)
     Tasks(monkeypatch, moves(stop=implement.Stop(implement.BUDGET, int(time.time()) + 600)))
 
-    assert runner.start(cfg, tasks_file) == "interrupt"
+    assert runner.start(cfg, None) == "interrupt"
     run, _, run_moves = the_run(home)
     assert run_moves[-1] == ("paused", "budget")
 
@@ -325,11 +321,11 @@ def test_ctrl_c_while_waiting_for_the_limits_leaves_the_run_paused(
     ],
 )
 def test_operator_stops_pause_the_run_and_resume_goes_on(
-    home, cfg, tasks_file, monkeypatch, turn, reason
+    home, cfg, approved, monkeypatch, turn, reason
 ):
     Tasks(monkeypatch, turn)
 
-    assert runner.start(cfg, tasks_file) == reason
+    assert runner.start(cfg, None) == reason
     run, _, run_moves = the_run(home)
     assert run_moves[-1] == ("paused", reason)
     with pytest.raises(runner.RunError, match=f"no task of run {run.id} waits for a reply"):
@@ -340,23 +336,21 @@ def test_operator_stops_pause_the_run_and_resume_goes_on(
     assert [name for name, _, _, _ in tasks.calls] == ["resume", "start"]
 
 
-def test_task_paused_for_the_context_goes_on_at_once(home, cfg, tasks_file, monkeypatch):
+def test_task_paused_for_the_context_goes_on_at_once(home, cfg, approved, monkeypatch):
     tasks = Tasks(
         monkeypatch, moves("implementing", "paused", reason="context"), commits(), commits()
     )
 
-    assert runner.start(cfg, tasks_file) is None
+    assert runner.start(cfg, approved) is None
 
     _, _, run_moves = the_run(home)
     assert run_moves == [("approved", None), ("running", None), ("done", None)]
     assert [name for name, _, _, _ in tasks.calls] == ["start", "resume", "start"]
 
 
-def test_resume_needs_the_branch_where_the_run_has_left_it(
-    home, repo, cfg, tasks_file, monkeypatch
-):
+def test_resume_needs_the_branch_where_the_run_has_left_it(home, repo, cfg, approved, monkeypatch):
     Tasks(monkeypatch, commits(), moves("implementing", "paused", reason="interrupt"))
-    runner.start(cfg, tasks_file)
+    runner.start(cfg, None)
 
     (repo / "app.py").write_text("x = 2\n")
     subprocess.run(["git", "commit", "-q", "-am", "by hand"], cwd=repo, check=True)
@@ -373,6 +367,8 @@ def test_resume_needs_the_branch_where_the_run_has_left_it(
 
 
 def test_resume_without_a_paused_run(home, cfg):
+    with pytest.raises(runner.RunError, match="no approved run in"):
+        runner.start(cfg, None)
     with pytest.raises(runner.RunError, match="no paused run in"):
         runner.resume(cfg, None)
     with pytest.raises(runner.RunError, match="run 0a1b2c3d not found"):
@@ -394,9 +390,9 @@ def forget_the_base(home, run_dir):
         (lambda home, run_dir: (run_dir / "profile.json").unlink(), "profile.json of the run"),
     ],
 )
-def test_resume_refuses_a_run_it_cannot_check(home, cfg, tasks_file, monkeypatch, spoil, error):
+def test_resume_refuses_a_run_it_cannot_check(home, cfg, approved, monkeypatch, spoil, error):
     Tasks(monkeypatch, moves("implementing", "paused", reason="interrupt"))
-    runner.start(cfg, tasks_file)
+    runner.start(cfg, None)
     run, _, _ = the_run(home)
 
     spoil(home, step.run_dir(home, run.id))
@@ -405,15 +401,15 @@ def test_resume_refuses_a_run_it_cannot_check(home, cfg, tasks_file, monkeypatch
         runner.resume(cfg, None)
 
 
-def planned(home, repo, findings=()):
-    """A planning run of `repo` whose planner has saved the plan with the findings of its
-    critic."""
+def planned(home, repo, findings=(), tasks=PLAN["tasks"]):
+    """A planning run of `repo` whose planner has saved the plan of `tasks` with the findings of
+    its critic."""
     with opened(home) as store:
         run_id = store.create_run(repo, "main", git.head(repo))
     run_dir = step.run_dir(home, run_id)
     run_dir.mkdir(parents=True)
     plan.save(run_dir, {"findings": list(findings)}, planner.CRITIQUE_FILE)
-    plan.save(run_dir, PLAN)
+    plan.save(run_dir, {**PLAN, "tasks": list(tasks)})
     return run_id
 
 
@@ -448,6 +444,8 @@ def test_approve_takes_only_a_planning_run_with_its_plan(home, cfg, repo):
         unplanned = store.create_run(repo, "main", git.head(repo))
     with pytest.raises(runner.RunError, match=f"run {unplanned} has no plan yet"):
         runner.approve(cfg, unplanned)
+    with pytest.raises(runner.RunError, match=f"run {unplanned} is planning, not approved"):
+        runner.start(cfg, unplanned)
     run_id = planned(home, repo)
     busy = f"`loop plan` of run {run_id} has not exited"
     with (

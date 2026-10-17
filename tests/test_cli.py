@@ -1,5 +1,4 @@
 import contextlib
-import json
 import os
 import signal
 import subprocess
@@ -9,6 +8,7 @@ import time
 import pytest
 from fakes import INIT, RESULT, read_calls
 from test_plan import PLAN
+from test_runner import planned
 
 from agent_loop import agent, cli, commands, config, gates, git, implement, selfcheck, step
 from agent_loop.store import Store, StoreError
@@ -69,9 +69,14 @@ def test_selfcheck_reports_result(monkeypatch, capsys):
 def in_repo(repo, tmp_path, monkeypatch):
     monkeypatch.chdir(repo)
     monkeypatch.setattr(selfcheck, "require", lambda home: None)
-    card = {"goal": "Make x fixed", "criteria": [], "files": [], "tests": [], "decisions": []}
-    (tmp_path / "tasks.json").write_text(json.dumps([{"title": "Fix x", **card}]))
     return repo
+
+
+def approved(home, repo, *titles):
+    """Approve a plan of `repo` with a task under each of `titles`."""
+    card = {"goal": "Make x fixed", "criteria": ["x"], "files": [], "tests": [], "decisions": []}
+    planned(home, repo, tasks=[{"title": title, **card} for title in titles])
+    assert cli.main(["approve"]) == 0
 
 
 def test_run_through_all_its_tasks_exits_with_zero(isolated, in_repo, tmp_path, monkeypatch):
@@ -83,8 +88,9 @@ def test_run_through_all_its_tasks_exits_with_zero(isolated, in_repo, tmp_path, 
         return step.Outcome("completed", None, None, 1000)
 
     monkeypatch.setattr(step, "run", session)
+    approved(isolated, in_repo, "Fix x")
 
-    assert cli.main(["run", str(tmp_path / "tasks.json")]) == 0
+    assert cli.main(["run"]) == 0
 
     with contextlib.closing(Store(isolated / "loop.db")) as store:
         assert len(store.runs("done")) == 1
@@ -93,9 +99,7 @@ def test_run_through_all_its_tasks_exits_with_zero(isolated, in_repo, tmp_path, 
 def test_run_stopped_inside_the_commit_goes_on_with_the_next_task(
     isolated, in_repo, tmp_path, monkeypatch
 ):
-    card = {"goal": "Add a module", "criteria": [], "files": [], "tests": [], "decisions": []}
-    tasks = [{"title": f"Add m{i}", **card} for i in (1, 2)]
-    (tmp_path / "tasks.json").write_text(json.dumps(tasks))
+    approved(isolated, in_repo, "Add m1", "Add m2")
     modules = iter(["m1", "m2"])
 
     def session(session, cfg, store, run_id, step_id):
@@ -118,7 +122,7 @@ def test_run_stopped_inside_the_commit_goes_on_with_the_next_task(
 
     monkeypatch.setattr(git, "git", stopped_before_the_reset)
 
-    assert cli.main(["run", str(tmp_path / "tasks.json")]) == 130
+    assert cli.main(["run"]) == 130
     assert cli.main(["resume"]) == 0
 
     log = git.git(in_repo, "log", "-3", "--format=%s").splitlines()
@@ -168,7 +172,9 @@ def test_operator_stop_pauses_the_run_with_the_exit_code_of_ctrl_c(
     profile.write_text('[commands]\nup = "true"\n')
     flags = ["--profile", str(profile)]
 
-    assert cli.main([*flags, "run", str(tmp_path / "tasks.json")]) == 130
+    approved(isolated, in_repo, "Fix x")
+
+    assert cli.main([*flags, "run"]) == 130
 
     assert "is gone" not in capsys.readouterr().err
     with contextlib.closing(Store(isolated / "loop.db")) as store:
@@ -202,7 +208,9 @@ def test_run_stopped_by_an_error_is_paused_as_a_dead_one(
         f'[commands]\nup = "echo up >> {services}"\ndown = "echo down >> {services}"\n'
     )
 
-    assert cli.main(["--profile", str(profile), "run", str(tmp_path / "tasks.json")]) == 1
+    approved(isolated, in_repo, "Fix x")
+
+    assert cli.main(["--profile", str(profile), "run"]) == 1
 
     assert str(error) in capsys.readouterr().err
     assert services.read_text() == "up\ndown\n"

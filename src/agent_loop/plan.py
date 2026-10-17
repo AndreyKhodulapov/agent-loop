@@ -2,8 +2,8 @@
 
 A plan is the answer of a planner session, checked by the CLI against `PLAN_SCHEMA`: the `goal`
 of the request, its acceptance `criteria`, which also decide whether a replan needs the
-operator, the `decisions` the tasks share, and the `tasks`. A task is its `title` and a card as
-in the cards file of `loop run`, so the tasks of `plan.json` can go to `loop run` as they are.
+operator, the `decisions` the tasks share, and the `tasks`. A task is its `title` and its card,
+as `prompts` takes it: the `goal` and the lists `criteria`, `files`, `tests`, `decisions`.
 
 `validate` finds what the schema cannot tell: its errors go back to the planner session.
 `loop approve` keeps the `digest` of `plan.json` with the run: a run starts only from the file

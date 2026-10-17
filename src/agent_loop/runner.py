@@ -1,12 +1,12 @@
 """A run: the tasks of the run one after another on the current branch of the repository.
 
-`start` begins a run with the tasks of a cards file, `resume` goes on with a paused one.
 `plan_request` begins a run with the request of the operator, from a file or in a conversation
 with the planner, which stays in planning while `planner` works on it. `answer` gives the replies
 of the operator to the planner of a planning run, or to the task a paused run waits for, and goes
-on. `approve` makes the plan of a planning run the tasks of the run. A run holds the lock of the
-working directory and its own lock, works with the profile frozen at its start and keeps the
-services of the profile up while it works.
+on. `approve` makes the plan of a planning run the tasks of the run, `start` runs them and
+`resume` goes on with a paused run. A run holds the lock of the working directory and its own
+lock, works with the profile frozen at its start and keeps the services of the profile up while
+it works.
 
 The run pauses when a task needs the operator: a question, the planner, a moved branch, Ctrl+C.
 Ctrl+C outside a session pauses the run with its open steps as `recovery` pauses a dead one.
@@ -49,64 +49,44 @@ class RunError(Exception):
     pass
 
 
-def load_tasks(path: Path) -> list[tuple[str, dict]]:
-    """Read the cards file: a JSON list of objects with the `title` and the card of a task.
+def start(cfg: Config, run_id: str | None) -> str | None:
+    """Run the tasks of the approved run `run_id`, or of the last approved run of the
+    repository, on the current branch from its HEAD; returns why the run has paused, None when
+    all the tasks are through.
 
-    The card is the `goal` and the lists of strings `criteria`, `files`, `tests`, `decisions`,
-    as `prompts` takes it. Returns (title, card) pairs.
-    """
-    try:
-        cards = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RunError(f"tasks: {exc}") from exc
-    if not isinstance(cards, list) or not cards:
-        raise RunError(f"{path}: expected a list of tasks")
-    lists = ("criteria", "files", "tests", "decisions")
-    tasks = []
-    for number, card in enumerate(cards, start=1):
-        where = f"{path}, task {number}"
-        if not isinstance(card, dict):
-            raise RunError(f"{where}: expected an object")
-        fields = {"title", "goal", *lists}
-        if card.keys() != fields:
-            missing, unknown = sorted(fields - card.keys()), sorted(card.keys() - fields)
-            raise RunError(f"{where}: missing {missing}, unknown {unknown}")
-        for key in ("title", "goal"):
-            if not isinstance(card[key], str) or not card[key].strip():
-                raise RunError(f"{where}: {key} must be a non-empty string")
-        for key in lists:
-            if not isinstance(card[key], list) or not all(isinstance(x, str) for x in card[key]):
-                raise RunError(f"{where}: {key} must be a list of strings")
-        title = card.pop("title")
-        tasks.append((title, card))
-    return tasks
-
-
-def start(cfg: Config, tasks_file: Path) -> str | None:
-    """Run the tasks of `tasks_file` on the current branch; returns why the run has paused, None
-    when all the tasks are through.
-
-    The tracked files must have no changes: they would become the work of the first task.
+    `plan.json` must be the one the operator has approved. The tracked files must have no
+    changes: they would become the work of the first task.
     """
     repo = _repo(cfg)
-    tasks = load_tasks(tasks_file)
     selfcheck.require(cfg.home)
     with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
+        run = _waiting(store, repo, run_id, ("approved",))
         branch = _branch(repo)
         changed = git.git(repo, "status", "--porcelain", "--untracked-files=no")
         if changed:
             raise RunError(f"the tracked files have changes, commit or stash them:\n{changed}")
-        run_id = store.create_run(repo, branch, git.head(repo))
-        for title, card in tasks:
-            store.add_task(run_id, title, card)
-        run_dir = step.run_dir(cfg.home, run_id)
-        with log.scope(run=run_id), recovery.hold(run_dir / recovery.LOCK_FILE):
-            profile = commands.freeze(cfg.repo, run_dir, run_id)
+        run_dir = step.run_dir(cfg.home, run.id)
+        missing = [
+            name
+            for name in (plan.PLAN_FILE, planner.CRITIQUE_FILE)
+            if not (run_dir / name).exists()
+        ]
+        if missing:
+            raise RunError(f"{', '.join(missing)} of the run is gone from {run_dir}")
+        if plan.digest(run_dir) != run.plan_hash:
+            raise RunError(
+                f"{run_dir / plan.PLAN_FILE} has changed since it was approved:"
+                " put it back or plan anew"
+            )
+        with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
+            profile = commands.freeze(cfg.repo, run_dir, run.id)
+            # Taken here, not at planning: what the operator changes before the run is theirs.
             protected.save(repo, run_dir)
-            store.move_run(run_id, "approved")
-            store.move_run(run_id, "running")
-            logger.info("%d tasks on %s, the run is %s", len(tasks), branch, run_id)
-            run = store.run(run_id)
+            store.start(run.id, branch, git.head(repo))
+            run = store.run(run.id)
+            # The branch of the run may differ from the one it was planned on.
+            _write_plan(cfg, run, plan.load(run_dir))
+            logger.info("%d tasks on %s, the run is %s", len(store.tasks(run.id)), branch, run.id)
             try:
                 if "install" in profile.commands:
                     logger.info("installing the dependencies")
@@ -143,10 +123,10 @@ def plan_request(cfg: Config, request_file: Path | None, new: bool = False) -> s
             run = None if new else _conversation(store, cfg.home, repo)
         if run is None:
             run = store.run(store.create_run(repo, _branch(repo), git.head(repo)))
-            run_dir = step.run_dir(cfg.home, run.id)
-            protected.save(repo, run_dir)
             if request is not None:
-                # Written last: a run with its request is set up.
+                run_dir = step.run_dir(cfg.home, run.id)
+                run_dir.mkdir(parents=True)
+                # A run with its request is set up.
                 (run_dir / planner.REQUEST_FILE).write_text(request, encoding="utf-8")
         run_dir = step.run_dir(cfg.home, run.id)
         with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
@@ -192,10 +172,8 @@ def approve(cfg: Config, run_id: str | None) -> None:
             raise RunError(f"`loop plan` of run {run.id} has not exited yet")
         with lock, log.scope(run=run.id):
             approved = plan.load(run_dir)
-            critique = (run_dir / planner.CRITIQUE_FILE).read_text(encoding="utf-8")
-            findings = json.loads(critique)["findings"]
             # Before the approval: an approved run without its `PLAN.md` cannot get it again.
-            paths = export.write_plan(run_dir, run, approved, findings, cfg.settings)
+            findings, paths = _write_plan(cfg, run, approved)
             store.approve(run.id, plan.digest(run_dir), plan.cards(approved))
             blocking = [f["problem"] for f in findings if f["blocking"]]
             if blocking:
@@ -266,6 +244,15 @@ def _go_on(cfg: Config, store: Store, run: Run, answered: bool) -> str | None:
                 return _work(cfg, store, run, profile)
         except KeyboardInterrupt:
             return _interrupted(store, run)
+
+
+def _write_plan(cfg: Config, run: Run, approved: dict) -> tuple[list[dict], list[Path]]:
+    """Write `PLAN.md` of the `approved` plan of `run` with the findings of its critic; returns
+    the findings and where `PLAN.md` is."""
+    run_dir = step.run_dir(cfg.home, run.id)
+    critique = (run_dir / planner.CRITIQUE_FILE).read_text(encoding="utf-8")
+    findings = json.loads(critique)["findings"]
+    return findings, export.write_plan(run_dir, run, approved, findings, cfg.settings)
 
 
 def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:

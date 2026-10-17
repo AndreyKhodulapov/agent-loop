@@ -170,7 +170,8 @@ class Run:
     updated_at: str
     # None for a run created before the column.
     base: str | None
-    # None until the plan is approved and for a run approved from a cards file.
+    # None until the plan is approved, and for a run of a cards file, which the loop took before
+    # plans.
     plan_hash: str | None
 
 
@@ -275,6 +276,15 @@ class Store:
             for title, card in tasks:
                 self.add_task(run_id, title, card)
             self._conn.execute("UPDATE runs SET plan_hash = ? WHERE id = ?", (plan_hash, run_id))
+
+    def start(self, run_id: str, branch: str, base: str) -> None:
+        """Move the approved run to running on `branch` from `base`, HEAD when its tasks start:
+        the operator may branch off or commit between the approval and the run."""
+        with self._transaction():
+            self._move_run(run_id, "running", None)
+            self._conn.execute(
+                "UPDATE runs SET branch = ?, base = ? WHERE id = ?", (branch, base, run_id)
+            )
 
     def move_run(self, run_id: str, dst: str, reason: str | None = None) -> None:
         """Change the run status; `reason` is kept until the next move and cleared by it."""
