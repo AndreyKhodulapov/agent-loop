@@ -13,6 +13,7 @@ empty. The planner gets the request of the operator and proposes the tasks of a 
 from __future__ import annotations
 
 import ast
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,11 @@ PLANNER_RESUMED = (
     "agent-loop has resumed this session after a pause. Go on with the plan from where you"
     " stopped and answer as before."
 )
+# The prompt of a paused critic session resumed with --resume.
+CRITIC_RESUMED = (
+    "agent-loop has resumed this session after a pause. Go on with the review of the plan from"
+    " where you stopped and answer as before."
+)
 # The prompt that asks the planner for the plan once the operator has left the conversation.
 PLANNER_TALKED = (
     "The operator has ended the conversation. Answer with the plan agreed on in it. If the plan"
@@ -79,15 +85,15 @@ def answer(structured_output: dict) -> Answer:
 
 
 def system_files(role: str, settings: Settings) -> tuple[Path, ...]:
-    """Rules of a session of `role` (planner, implementer or fixer) for
+    """Rules of a session of `role` (planner, plan_critic, implementer or fixer) for
     `agent.Session.system_files`.
 
-    How the loop runs the sessions of a task, which the planner has not, the role, the code
-    requirements of agent-loop and the context file of the project, which wins where they
-    disagree.
+    How the loop runs the sessions of a task, which the planner and its critic have not, the
+    role, the code requirements of agent-loop and the context file of the project, which wins
+    where they disagree.
     """
     files = (ROLES / f"{role}.md", ROLES / "AGENTS.md")
-    if role != "planner":
+    if role not in ("planner", "plan_critic"):
         files = (ROLES / "session.md", *files)
     if settings.context_file is not None:
         files += (settings.context_file,)
@@ -116,12 +122,59 @@ def planner_talk(settings: Settings) -> str:
 
 def _plan_rules(settings: Settings) -> list[str]:
     return [
-        "## Size",
-        f"The work of one task, tests included, fits in {settings.diff_soft_lines} changed"
-        f" lines. A task over {settings.diff_hard_lines} lines comes back to the planner.",
+        *_plan_size(settings),
         "## Language",
         f"Write the plan in {_language(settings)}: the operator reads and approves it.",
     ]
+
+
+def _plan_size(settings: Settings) -> list[str]:
+    return [
+        "## Size",
+        f"The work of one task, tests included, fits in {settings.diff_soft_lines} changed"
+        f" lines. A task over {settings.diff_hard_lines} lines comes back to the planner.",
+    ]
+
+
+def plan_critic(plan: dict, request: str | None, settings: Settings) -> str:
+    """The prompt of the critic of `plan`, made for `request`; None when the operator gave the
+    request in a conversation with the planner."""
+    if request is None:
+        sections = [
+            "# Request of the operator",
+            "The operator gave the request in a conversation with the planner that you have"
+            " not seen: its goal and acceptance criteria are those of the plan.",
+        ]
+    else:
+        sections = ["# Request of the operator", _fenced(request, "markdown")]
+    sections += [
+        "# Plan",
+        _fenced(json.dumps(plan, ensure_ascii=False, indent=2), "json"),
+        *_plan_size(settings),
+        "## Language",
+        f"Write the findings in {_language(settings)}: the operator reads them.",
+    ]
+    return "\n\n".join(sections)
+
+
+def plan_critique(findings: list[dict]) -> str:
+    """The prompt that gives the planner session the `findings` of the critic of its plan."""
+    sections = [
+        "# Findings of the critic",
+        "A critic who has not seen this conversation has reviewed your plan. A blocking finding"
+        " says the plan fails as written: fix it. Weigh the other findings and fix what is"
+        " worth it. Where you disagree with a finding, keep the plan and say why in the"
+        " `decisions` of the plan: the critic reviews the plan again.",
+    ]
+    for number, finding in enumerate(findings, start=1):
+        tasks = ", ".join(str(task) for task in finding["tasks"])
+        about = f"tasks {tasks}" if tasks else "the whole plan"
+        kind = "blocking" if finding["blocking"] else "not blocking"
+        sections += [f"## Finding {number}, {kind}, {about}", finding["problem"]]
+        if finding["scenario"].strip():
+            sections.append(f"What goes wrong: {finding['scenario']}")
+    sections.append("Answer as before, with the whole plan.")
+    return "\n\n".join(sections)
 
 
 def plan_errors(errors: list[str]) -> str:

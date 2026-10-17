@@ -235,6 +235,7 @@ def test_plan_waits_for_the_answers_of_the_operator(isolated, in_repo, tmp_path,
         monkeypatch,
         ("completed", None, {"status": "questions", "questions": ["Who removes a dish?"]}),
         ("completed", None, {"status": "plan", "plan": PLAN}),
+        ("completed", None, {"findings": []}),
     )
     request = tmp_path / "request.md"
     request.write_text("Add the admin of dishes")
@@ -254,7 +255,9 @@ def test_plan_goes_on_with_the_same_request_only(isolated, in_repo, tmp_path, mo
         monkeypatch,
         ("paused", "interrupt", None),
         ("completed", None, {"status": "plan", "plan": PLAN}),
+        ("completed", None, {"findings": []}),
         ("completed", None, {"status": "plan", "plan": PLAN}),
+        ("completed", None, {"findings": []}),
     )
     request = tmp_path / "request.md"
     request.write_text("Add the admin of dishes")
@@ -276,7 +279,9 @@ def test_plan_without_a_request_goes_on_with_the_conversation(isolated, in_repo,
         monkeypatch,
         ("paused", "interrupt", None),
         ("completed", None, {"status": "plan", "plan": PLAN}),
+        ("completed", None, {"findings": []}),
         ("completed", None, {"status": "plan", "plan": PLAN}),
+        ("completed", None, {"findings": []}),
     )
 
     assert cli.main(["plan"]) == 130

@@ -8,6 +8,11 @@ operator with the draft in the run directory. Questions on a request from a file
 `QUESTIONS.md` in the run directory, and `answer` gives the replies of the operator to the same
 session; questions and errors of a conversation are talked over when `talk` reopens it.
 
+A valid plan goes to a critic, a new session each round that has not seen the planner at work.
+Blocking findings go back to the planner session, and the plan it fixes goes to the next critic,
+at most `plan_critic_rounds` critics after the request or the last conversation. The plan is
+saved with the findings of the last critic; the operator decides on those that still block.
+
 The run stays in planning while the planner works: a stopped planner does not pause it, and
 `go_on` picks the work up from the last step of the planner. A paused session is resumed or
 replaced as `step.how_to_resume` decides, an answer the loop has not taken yet is taken.
@@ -28,11 +33,13 @@ logger = logging.getLogger(__name__)
 
 PLAN = "plan"
 TALK = "talk"
+CRITIQUE = "critique"
 QUESTIONS = "questions"
 # The plan still has errors after the retries: the run waits for the operator.
 REJECTED = "rejected"
 REQUEST_FILE = "request.md"
 DRAFT_FILE = "plan-draft.json"
+CRITIQUE_FILE = "critique.json"
 RETRIES = 2
 ANSWER_SCHEMA = {
     "type": "object",
@@ -42,6 +49,27 @@ ANSWER_SCHEMA = {
         "questions": plan.STRINGS,
     },
     "required": ["status"],
+    "additionalProperties": False,
+}
+CRITIQUE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "blocking": {"type": "boolean"},
+                    "tasks": {"type": "array", "items": {"type": "integer"}},
+                    "problem": {"type": "string"},
+                    "scenario": {"type": "string"},
+                },
+                "required": ["blocking", "tasks", "problem", "scenario"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["findings"],
     "additionalProperties": False,
 }
 
@@ -55,6 +83,8 @@ class _Session:
     prompt: str
     # The session to go on with --resume; None starts a new one.
     session_id: str | None = None
+    # PLAN for a session of the planner, CRITIQUE for one of the critic.
+    kind: str = PLAN
 
 
 def go_on(cfg: Config, store: Store, run: Run) -> str | None:
@@ -97,12 +127,12 @@ class _Planner:
         if last.outcome == "paused":
             return self._loop(self._resumed(steps))
         if last.outcome == "failed" or last.detail.get("answer") is None:
-            # The error is in the log of the last `loop plan`: the operator plans again.
-            return self._loop(self._new())
+            # The error is in the log of the last `loop plan`: the step starts anew.
+            return self._loop(self._critic(steps) if last.kind == CRITIQUE else self._new())
         return self._loop(self._take(steps))
 
     def talk(self) -> str | None:
-        steps = self.store.planner_steps(self.run.id)
+        steps = [s for s in self.store.planner_steps(self.run.id) if s.kind != CRITIQUE]
         # A conversation that has failed to start has nothing to go on with.
         if steps and not (steps[-1].kind == TALK and steps[-1].outcome == "failed"):
             upcoming = _Session("", steps[-1].session_id)
@@ -128,7 +158,7 @@ class _Planner:
         if self.conversation:
             raise PlanError(f"run {self.run.id} plans in a conversation, `loop plan` reopens it")
         steps = self.store.planner_steps(self.run.id)
-        output = steps[-1].detail.get("answer") if steps else None
+        output = steps[-1].detail.get("answer") if steps and steps[-1].kind == PLAN else None
         if output is None or output["status"] != QUESTIONS or _errors(output):
             raise PlanError(f"the planner of run {self.run.id} has no questions to answer")
         questions = output["questions"]
@@ -162,10 +192,27 @@ class _Planner:
         request = (self.run_dir / REQUEST_FILE).read_text(encoding="utf-8")
         return _Session(prompts.planner(request, self.cfg.settings))
 
+    def _critic(self, steps: list[Step]) -> _Session:
+        """A new critic of the last plan of `steps`."""
+        request = None
+        if not self.conversation:
+            request = (self.run_dir / REQUEST_FILE).read_text(encoding="utf-8")
+        output = _plan_step(steps).detail["answer"]
+        prompt = prompts.plan_critic(output["plan"], request, self.cfg.settings)
+        return _Session(prompt, kind=CRITIQUE)
+
     def _resumed(self, steps: list[Step]) -> _Session:
-        how = step.how_to_resume(steps, self.cfg.settings.ctx_soft_tokens)
+        kind = steps[-1].kind
+        how = step.how_to_resume(
+            [s for s in steps if s.kind == kind], self.cfg.settings.ctx_soft_tokens
+        )
+        if how.mode == "session" and kind == CRITIQUE:
+            return _Session(prompts.CRITIC_RESUMED, how.session_id, CRITIQUE)
         if how.mode == "session":
             return _Session(prompts.PLANNER_RESUMED, how.session_id)
+        if how.mode == "handoff" and kind == CRITIQUE:
+            logger.warning("the context of the critic is full, a new critic reviews the plan")
+            return self._critic(steps)
         if how.mode == "handoff":
             if self.conversation:
                 raise PlanError(
@@ -175,12 +222,15 @@ class _Planner:
             # The planner writes no handoff: a new session reads the repository again.
             logger.warning("the context of the planner is full, planning anew in a new session")
             return self._new()
-        raise PlanError(f"the planner keeps stopping ({how.reason}), split the request")
+        who = "critic" if kind == CRITIQUE else "planner"
+        raise PlanError(f"the {who} keeps stopping ({how.reason}), split the request")
 
     def _take(self, steps: list[Step]) -> _Session | str | None:
-        """Take the answer of the last step: returns the session that fixes the plan, why the
-        run waits, or None when the plan is saved."""
+        """Take the answer of the last step: returns the session that fixes or reviews the plan,
+        why the run waits, or None when the plan is saved."""
         last = steps[-1]
+        if last.kind == CRITIQUE:
+            return self._take_critique(steps)
         output = last.detail["answer"]
         errors = _errors(output)
         if not errors and output["status"] == QUESTIONS and self.conversation:
@@ -199,21 +249,10 @@ class _Planner:
             )
             return QUESTIONS
         if not errors:
-            plan.save(self.run_dir, output["plan"])
-            logger.info(
-                "the plan of %d tasks is in %s",
-                len(output["plan"]["tasks"]),
-                self.run_dir / plan.PLAN_FILE,
-            )
-            return None
+            logger.info("a critic reviews the plan of %d tasks", len(output["plan"]["tasks"]))
+            return self._critic(steps)
         logger.warning("the plan has errors:\n%s", "\n".join(errors))
-        rejected = 0
-        # The retries start anew after a conversation: the operator may have fixed the plan in it.
-        for s in reversed(steps):
-            if s.kind == TALK:
-                break
-            if s.outcome == "completed" and s.detail["answer"] is not None:
-                rejected += bool(_errors(s.detail["answer"]))
+        rejected = sum(bool(_errors(s.detail["answer"])) for s in _answered(steps, PLAN))
         if rejected <= RETRIES:
             return _Session(prompts.plan_errors(errors), last.session_id)
         if "plan" in output:
@@ -228,26 +267,64 @@ class _Planner:
         )
         return REJECTED
 
-    def _session(self, upcoming: _Session) -> step.Outcome:
-        session = self._agent_session(upcoming, ANSWER_SCHEMA)
-        # The planner changes no files: nothing to roll back or to tell from its work.
-        step_id = self.store.start_step(
-            self.run.id, None, PLAN, git.head(self.repo), [], session.session_id
+    def _take_critique(self, steps: list[Step]) -> _Session | None:
+        """Take the findings of the critic: returns the planner session that fixes the plan, or
+        None when the plan is saved with them."""
+        findings = [
+            finding | {"blocking": finding["blocking"] and bool(finding["scenario"].strip())}
+            for finding in steps[-1].detail["answer"]["findings"]
+        ]
+        blocking = [finding for finding in findings if finding["blocking"]]
+        rounds = len(_answered(steps, CRITIQUE))
+        listed = "\n".join(f"- {finding['problem']}" for finding in blocking)
+        if blocking and rounds < self.cfg.settings.plan_critic_rounds:
+            logger.warning(
+                "the critic has %d blocking findings, the planner fixes the plan:\n%s",
+                len(blocking),
+                listed,
+            )
+            return _Session(prompts.plan_critique(findings), _plan_step(steps).session_id)
+        output = _plan_step(steps).detail["answer"]
+        plan.save(self.run_dir, {"findings": findings}, CRITIQUE_FILE)
+        # Written last: the run with its plan is through with planning.
+        plan.save(self.run_dir, output["plan"])
+        if blocking:
+            logger.warning(
+                "the critic has left %d blocking findings to the operator, they are in %s:\n%s",
+                len(blocking),
+                self.run_dir / CRITIQUE_FILE,
+                listed,
+            )
+        logger.info(
+            "the plan of %d tasks is in %s",
+            len(output["plan"]["tasks"]),
+            self.run_dir / plan.PLAN_FILE,
         )
-        with log.scope(stage=PLAN):
+        return None
+
+    def _session(self, upcoming: _Session) -> step.Outcome:
+        schema = CRITIQUE_SCHEMA if upcoming.kind == CRITIQUE else ANSWER_SCHEMA
+        session = self._agent_session(upcoming, schema)
+        # The planner and the critic change no files: nothing to roll back or to tell from
+        # their work.
+        step_id = self.store.start_step(
+            self.run.id, None, upcoming.kind, git.head(self.repo), [], session.session_id
+        )
+        with log.scope(stage=upcoming.kind):
             return step.run(session, self.cfg, self.store, self.run.id, step_id)
 
     def _agent_session(self, upcoming: _Session, schema: dict | None) -> agent.Session:
         settings = self.cfg.settings
+        critic = upcoming.kind == CRITIQUE
         session = agent.Session(
             prompt=upcoming.prompt,
-            model=settings.model_planner,
+            model=settings.model_critic if critic else settings.model_planner,
             cwd=self.repo,
             settings=guard.prepare(
                 self.run_dir, self.cfg.home, settings, self.repo, read_only=True
             ),
-            effort=settings.effort_planner,
-            system_files=prompts.system_files("planner", settings),
+            effort=settings.effort_critic if critic else settings.effort_planner,
+            system_files=prompts.system_files("plan_critic" if critic else "planner", settings),
             schema=schema,
             tools="Bash,Read",
         )
@@ -263,6 +340,24 @@ class _Planner:
     def _interrupted(self) -> str:
         logger.warning("the planner is stopped by the operator, the same `loop plan` goes on")
         return implement.INTERRUPT
+
+
+def _answered(steps: list[Step], kind: str) -> list[Step]:
+    """The steps of `kind` that have answered since the last conversation: the retries and the
+    rounds of the critic start anew after it, the operator may have changed the plan there."""
+    answered = []
+    for s in reversed(steps):
+        if s.kind == TALK:
+            break
+        if s.kind == kind and s.outcome == "completed" and s.detail["answer"] is not None:
+            answered.append(s)
+    return answered
+
+
+def _plan_step(steps: list[Step]) -> Step:
+    """The last step of the planner with an answer: the plan the critic reviews, from the
+    session that fixes it."""
+    return next(s for s in reversed(steps) if s.kind == PLAN and s.detail.get("answer"))
 
 
 def _errors(output: dict) -> list[str]:

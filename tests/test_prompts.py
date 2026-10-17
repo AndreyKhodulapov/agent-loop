@@ -41,8 +41,9 @@ def commit(repo, message):
     [
         ("implementer", ["session.md", "implementer.md", "AGENTS.md"]),
         ("fixer", ["session.md", "fixer.md", "AGENTS.md"]),
-        # The planner has no task to work on and commit.
+        # The planner and its critic have no task to work on and commit.
         ("planner", ["planner.md", "AGENTS.md"]),
+        ("plan_critic", ["plan_critic.md", "AGENTS.md"]),
     ],
 )
 def test_system_files_of_a_role(role, rules, tmp_path):
@@ -122,6 +123,50 @@ def test_planner_prompt_has_the_request_and_the_rules():
         "## Size\n\nThe work of one task, tests included, fits in 800 changed lines."
         " A task over 1200 lines comes back to the planner.\n\n"
         "## Language\n\nWrite the plan in Russian: the operator reads and approves it."
+    )
+
+
+@pytest.mark.parametrize(
+    ("request_", "given"),
+    [
+        ("Add the admin of dishes", "```markdown\nAdd the admin of dishes\n```"),
+        (
+            None,
+            "The operator gave the request in a conversation with the planner that you have"
+            " not seen: its goal and acceptance criteria are those of the plan.",
+        ),
+    ],
+    ids=["from a file", "in a conversation"],
+)
+def test_plan_critic_prompt_has_the_request_and_the_plan(request_, given):
+    plan = {"goal": "Блюда", "criteria": [], "decisions": [], "tasks": []}
+
+    prompt = prompts.plan_critic(plan, request_, SETTINGS)
+
+    assert prompt == (
+        f"# Request of the operator\n\n{given}\n\n"
+        "# Plan\n\n"
+        '```json\n{\n  "goal": "Блюда",\n  "criteria": [],\n  "decisions": [],\n'
+        '  "tasks": []\n}\n```\n\n'
+        "## Size\n\nThe work of one task, tests included, fits in 800 changed lines."
+        " A task over 1200 lines comes back to the planner.\n\n"
+        "## Language\n\nWrite the findings in Russian: the operator reads them."
+    )
+
+
+def test_plan_critique_lists_the_findings():
+    findings = [
+        {"blocking": True, "tasks": [2, 3], "problem": "No schema", "scenario": "Task 2 fails"},
+        {"blocking": False, "tasks": [], "problem": "Vague goal", "scenario": ""},
+    ]
+
+    prompt = prompts.plan_critique(findings)
+
+    assert "## Finding 1, blocking, tasks 2, 3\n\nNo schema\n\nWhat goes wrong: Task 2 fails" in (
+        prompt
+    )
+    assert "## Finding 2, not blocking, the whole plan\n\nVague goal\n\nAnswer as before" in (
+        prompt
     )
 
 

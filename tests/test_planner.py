@@ -38,6 +38,14 @@ def asked(questions=QUESTIONS):
     return answered({"status": "questions", "questions": questions})
 
 
+def criticized(*findings):
+    return answered({"findings": list(findings)})
+
+
+def finding(blocking=True, scenario="The router fails without the schema"):
+    return {"blocking": blocking, "tasks": [2], "problem": "No schema", "scenario": scenario}
+
+
 def paused(reason, context_tokens=1000):
     return step.Outcome("paused", reason, None, context_tokens)
 
@@ -101,12 +109,12 @@ def env(repo, tmp_path):
 
 
 def test_plan_of_a_read_only_session_is_saved(env, monkeypatch):
-    env.script(monkeypatch, planned())
+    env.script(monkeypatch, planned(), criticized())
 
     assert env.go_on() is None
 
     assert json.loads((env.run_dir / "plan.json").read_text()) == PLAN
-    [session] = env.sessions
+    session, _ = env.sessions
     assert session.model == SETTINGS.model_planner
     assert session.effort == SETTINGS.effort_planner
     assert session.tools == "Bash,Read"
@@ -117,7 +125,7 @@ def test_plan_of_a_read_only_session_is_saved(env, monkeypatch):
     permissions = json.loads(session.settings.read_text())["permissions"]
     assert guard.WRITE_RULE in permissions["deny"]
     assert guard.WRITE_RULE not in permissions["allow"]
-    [plan_step] = env.store.planner_steps(env.run_id)
+    plan_step, _ = env.store.planner_steps(env.run_id)
     assert (plan_step.kind, plan_step.task_id, plan_step.session_id) == (
         "plan",
         None,
@@ -127,11 +135,13 @@ def test_plan_of_a_read_only_session_is_saved(env, monkeypatch):
 
 
 def test_plan_with_errors_goes_back_to_its_session(env, monkeypatch):
-    env.script(monkeypatch, planned(tasks=[]), answered({"status": "plan"}), planned())
+    env.script(
+        monkeypatch, planned(tasks=[]), answered({"status": "plan"}), planned(), criticized()
+    )
 
     assert env.go_on() is None
 
-    first, *retries = env.sessions
+    first, *retries, _ = env.sessions
     assert [s.session_id for s in retries] == [first.session_id] * 2
     assert all(s.resume for s in retries)
     assert "- the plan has no tasks" in retries[0].prompt
@@ -168,11 +178,11 @@ def test_questions_go_to_the_operator_and_the_replies_to_the_session(env, monkey
     assert "The admin" in env.questions_file().read_text()
 
     env.questions_file().write_text(env.questions_file().read_text() + "Yes\n")
-    env.script(monkeypatch, planned())
+    env.script(monkeypatch, planned(), criticized())
 
     assert env.answer() is None
 
-    asking, answering = env.sessions
+    asking, answering, _ = env.sessions
     assert (answering.session_id, answering.resume) == (asking.session_id, True)
     assert answering.prompt == prompts.planner_answers(QUESTIONS, ["The admin", "Yes"])
     with pytest.raises(planner.PlanError, match="has no questions to answer"):
@@ -196,11 +206,11 @@ def test_questions_file_that_lost_its_questions_is_written_anew(env, monkeypatch
     ids=["timeout", "full context"],
 )
 def test_paused_planner_goes_on(env, monkeypatch, pause, resumed):
-    env.script(monkeypatch, pause, planned())
+    env.script(monkeypatch, pause, planned(), criticized())
 
     assert env.go_on() is None
 
-    first, second = env.sessions
+    first, second, _ = env.sessions
     assert (second.session_id == first.session_id) == second.resume == resumed
     assert second.prompt == (prompts.PLANNER_RESUMED if resumed else first.prompt)
 
@@ -215,9 +225,9 @@ def test_operator_stop_leaves_the_planner_to_the_next_loop_plan(env, monkeypatch
 
     assert env.go_on() == implement.INTERRUPT
 
-    env.script(monkeypatch, planned())
+    env.script(monkeypatch, planned(), criticized())
     assert env.go_on() is None
-    first, second = env.sessions
+    first, second, _ = env.sessions
     assert (second.session_id, second.resume) == (first.session_id, True)
 
 
@@ -227,9 +237,9 @@ def test_failed_planner_session_plans_anew_next_time(env, monkeypatch):
     with pytest.raises(planner.PlanError, match="has failed: API error"):
         env.go_on()
 
-    env.script(monkeypatch, planned())
+    env.script(monkeypatch, planned(), criticized())
     assert env.go_on() is None
-    first, second = env.sessions
+    first, second, _ = env.sessions
     assert second.session_id != first.session_id
     assert not second.resume
 
@@ -239,12 +249,99 @@ def test_planner_waits_for_room_in_the_limits(env, monkeypatch):
     monkeypatch.setattr(budget, "no_room", lambda home, settings: resume_at)
     waits = []
     monkeypatch.setattr(time, "sleep", waits.append)
-    env.script(monkeypatch, planned())
+    env.script(monkeypatch, planned(), criticized())
 
     assert env.go_on() is None
 
-    [wait] = waits
-    assert 3590 < wait <= 3600
+    # Before the planner and before the critic.
+    assert len(waits) == 2
+    assert all(3590 < wait <= 3600 for wait in waits)
+
+
+@pytest.mark.parametrize(
+    "findings",
+    [[], [finding(blocking=False)], [finding(scenario=" ")]],
+    ids=["none", "not blocking", "blocking without a scenario"],
+)
+def test_critic_reviews_the_plan_in_a_new_read_only_session(env, monkeypatch, findings):
+    env.script(monkeypatch, planned(), criticized(*findings))
+
+    assert env.go_on() is None
+
+    planning, critic = env.sessions
+    assert critic.model == SETTINGS.model_critic
+    assert critic.effort == SETTINGS.effort_critic
+    assert critic.tools == "Bash,Read"
+    assert critic.schema == planner.CRITIQUE_SCHEMA
+    assert critic.system_files == prompts.system_files("plan_critic", SETTINGS)
+    assert critic.prompt == prompts.plan_critic(PLAN, REQUEST, SETTINGS)
+    assert critic.session_id != planning.session_id
+    assert not critic.resume
+    assert guard.WRITE_RULE in json.loads(critic.settings.read_text())["permissions"]["deny"]
+    _, critique_step = env.store.planner_steps(env.run_id)
+    assert (critique_step.kind, critique_step.session_id) == (planner.CRITIQUE, critic.session_id)
+    critique = json.loads((env.run_dir / planner.CRITIQUE_FILE).read_text())
+    assert critique == {"findings": [f | {"blocking": False} for f in findings]}
+    assert (env.run_dir / "plan.json").is_file()
+
+
+def test_blocking_findings_go_back_to_the_planner_for_the_rounds_of_the_critic(
+    env, monkeypatch, caplog
+):
+    fixed = PLAN | {"decisions": ["The schema comes first"]}
+    blocking = finding()
+    env.script(
+        monkeypatch,
+        planned(),
+        criticized(blocking, finding(blocking=False)),
+        planned(**fixed),
+        criticized(blocking),
+    )
+
+    assert env.go_on() is None
+
+    planning, first, fixing, second = env.sessions
+    assert (fixing.session_id, fixing.resume) == (planning.session_id, True)
+    assert fixing.prompt == prompts.plan_critique([blocking, finding(blocking=False)])
+    assert fixing.schema == planner.ANSWER_SCHEMA
+    assert second.session_id not in (first.session_id, planning.session_id)
+    assert second.prompt == prompts.plan_critic(fixed, REQUEST, SETTINGS)
+    assert SETTINGS.plan_critic_rounds == 2
+    # The findings of the last round go to the operator with the plan.
+    assert json.loads((env.run_dir / "plan.json").read_text()) == fixed
+    critique = json.loads((env.run_dir / planner.CRITIQUE_FILE).read_text())
+    assert critique == {"findings": [blocking]}
+    assert "left 1 blocking findings to the operator" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("pause", "resumed"),
+    [(paused("timeout"), True), (paused("context", 125_000), False)],
+    ids=["timeout", "full context"],
+)
+def test_paused_critic_goes_on(env, monkeypatch, pause, resumed):
+    env.script(monkeypatch, planned(), pause, criticized())
+
+    assert env.go_on() is None
+
+    _, first, second = env.sessions
+    assert (second.session_id == first.session_id) == second.resume == resumed
+    assert second.prompt == (prompts.CRITIC_RESUMED if resumed else first.prompt)
+    assert second.schema == planner.CRITIQUE_SCHEMA
+
+
+def test_failed_critic_reviews_the_same_plan_anew_next_time(env, monkeypatch):
+    env.script(monkeypatch, planned(), step.Outcome("failed", "API error", None, 0))
+
+    with pytest.raises(planner.PlanError, match="has failed: API error"):
+        env.go_on()
+    assert not (env.run_dir / "plan.json").exists()
+
+    env.script(monkeypatch, criticized())
+    assert env.go_on() is None
+    _, failed, critic = env.sessions
+    assert (critic.prompt, critic.resume) == (failed.prompt, False)
+    assert critic.session_id != failed.session_id
 
 
 @pytest.fixture
@@ -255,18 +352,19 @@ def conversation(env):
 
 def test_conversation_ends_with_the_plan_asked_in_it(conversation, monkeypatch):
     conversation.script_talks(monkeypatch, 0)
-    conversation.script(monkeypatch, planned())
+    conversation.script(monkeypatch, planned(), criticized())
 
     assert conversation.talk() is None
 
-    talk, asking = conversation.sessions
+    talk, asking, critic = conversation.sessions
     assert talk.prompt == prompts.planner_talk(SETTINGS)
     assert (talk.schema, talk.resume, talk.tools) == (None, False, "Bash,Read")
     assert guard.WRITE_RULE in json.loads(talk.settings.read_text())["permissions"]["deny"]
     assert (asking.session_id, asking.resume) == (talk.session_id, True)
     assert (asking.prompt, asking.schema) == (prompts.PLANNER_TALKED, planner.ANSWER_SCHEMA)
+    assert critic.prompt == prompts.plan_critic(PLAN, None, SETTINGS)
     steps = conversation.store.planner_steps(conversation.run_id)
-    assert [s.kind for s in steps] == [planner.TALK, planner.PLAN]
+    assert [s.kind for s in steps] == [planner.TALK, planner.PLAN, planner.CRITIQUE]
     assert (conversation.run_dir / "plan.json").is_file()
 
 
@@ -289,22 +387,22 @@ def test_next_talk_reopens_the_conversation(conversation, monkeypatch, first, wa
     with pytest.raises(planner.PlanError, match="plans in a conversation"):
         conversation.answer()
     # The retries start anew after the conversation.
-    conversation.script(monkeypatch, planned(tasks=[]), planned())
+    conversation.script(monkeypatch, planned(tasks=[]), planned(), criticized())
     assert conversation.talk() is None
-    opened, reopened = conversation.sessions[0], conversation.sessions[-3]
+    opened, reopened = conversation.sessions[0], conversation.sessions[-4]
     assert (reopened.session_id, reopened.resume) == (opened.session_id, True)
     assert (reopened.prompt, reopened.schema) == ("", None)
 
 
 def test_conversation_that_failed_to_start_is_opened_anew(conversation, monkeypatch):
     conversation.script_talks(monkeypatch, 1, 0)
-    conversation.script(monkeypatch, planned())
+    conversation.script(monkeypatch, planned(), criticized())
 
     with pytest.raises(planner.PlanError, match="exited with code 1"):
         conversation.talk()
     assert conversation.talk() is None
 
-    failed, opened, _ = conversation.sessions
+    failed, opened, _, _ = conversation.sessions
     assert opened.session_id != failed.session_id
     assert (opened.resume, opened.prompt) == (False, prompts.planner_talk(SETTINGS))
 
