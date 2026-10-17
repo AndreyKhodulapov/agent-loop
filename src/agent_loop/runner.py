@@ -8,7 +8,8 @@ on. `approve` makes the plan of a planning run the tasks of the run, `start` run
 lock, works with the profile frozen at its start and keeps the services of the profile up while
 it works.
 
-The run pauses when a task needs the operator: a question, the planner, a moved branch, Ctrl+C.
+The run pauses when a task needs the operator: a question, a moved branch, Ctrl+C. A task that
+goes back to the planner is replanned at once, see `planner.replan`.
 Ctrl+C outside a session pauses the run with its open steps as `recovery` pauses a dead one.
 When the limits leave no room for a session, the run waits in the process and goes on by itself.
 A run that stops on an error is left running for `recovery.reap` to pause, as a dead one.
@@ -217,8 +218,8 @@ def _go_on(cfg: Config, store: Store, run: Run, answered: bool) -> str | None:
     if missing:
         raise RunError(f"{', '.join(missing)} of the run is gone from {run_dir}")
     with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
-        # They wait for `loop answer` and the planner.
-        waiting = [t for t in store.tasks(run.id) if t.status in ("needs_human", "replan")]
+        # A task in replan is replanned by the run itself.
+        waiting = [t for t in store.tasks(run.id) if t.status == "needs_human"]
         task = waiting[0] if waiting else None
         question = None if task is None else implement.question(store, task)
         if task is not None and (question is None or not answered):
@@ -272,8 +273,11 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
             if t.status in ("committed", "done")
         ]
         previous = prompts.previous_tasks(repo, run.base, notes)
-        go_on = implement.start if task.status == "pending" else implement.resume
-        stop = go_on(cfg, store, run, task, len(tasks), profile, previous)
+        if task.status == "replan":
+            stop = planner.replan(cfg, store, run, task, previous)
+        else:
+            go_on = implement.start if task.status == "pending" else implement.resume
+            stop = go_on(cfg, store, run, task, len(tasks), profile, previous)
         if stop is not None and stop.reason == implement.BUDGET:
             if not _wait(store, run, stop.resume_at):
                 return implement.INTERRUPT
@@ -281,7 +285,7 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
         if stop is not None:
             return _pause(store, run, stop.reason)
         [task] = [t for t in store.tasks(run.id) if t.id == task.id]
-        if task.status in ("needs_human", "replan"):
+        if task.status == "needs_human":
             logger.warning("task %d waits in %s (%s)", task.seq, task.status, task.reason)
             question = implement.question(store, task)
             if question is None:
@@ -295,7 +299,8 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
                 run.id,
             )
             return task.status
-        # Other pauses go on at once: the task resumes its session or goes to the planner.
+        # Other pauses and a task in replan go on at once: the task resumes its session or goes
+        # to the planner, the planner replans it.
         if task.status == "paused" and task.reason in (implement.INTERRUPT, gates.BRANCH_CHANGED):
             return _pause(store, run, task.reason)
 

@@ -55,6 +55,79 @@ def test_plan_errors(change, errors):
     assert plan.validate({**PLAN, **change}) == errors
 
 
+NEW = {**TASK, "title": "Prices of dishes"}
+LEFT = {3: "Router of dishes", 4: "Docs of dishes"}
+
+
+def replanned(tasks=(NEW,), *remaining):
+    """A replan answer with `tasks` and the actions on the tasks left, keep for those not given."""
+    given = {entry["task"]: entry for entry in remaining}
+    return {
+        "why": "Prices go first",
+        "tasks": list(tasks),
+        "remaining": [
+            given.get(number, {"task": number, "action": "keep", "why": "Still needed"})
+            for number in LEFT
+        ]
+        + [entry for entry in remaining if entry["task"] not in LEFT],
+    }
+
+
+def act(number, action, card=None):
+    entry = {"task": number, "action": action, "why": "Because"}
+    return entry if card is None else entry | {"card": card}
+
+
+@pytest.mark.parametrize(
+    ("answer", "errors"),
+    [
+        (replanned(), []),
+        (replanned((), act(3, "drop"), act(4, "modify", {**TASK, "title": "Docs"})), []),
+        (
+            {**replanned(), "remaining": [act(3, "keep"), act(3, "drop"), act(7, "keep")]},
+            [
+                "task 7 is not one of the tasks left",
+                "task 3 has 2 actions",
+                "tasks 4 have no action",
+            ],
+        ),
+        (replanned((NEW,), act(3, "modify")), ["task 3 is modified without its new card"]),
+        (replanned((NEW,), act(4, "drop", TASK)), ["task 4 has a new card but is not modified"]),
+        (
+            replanned(
+                ({**NEW, "goal": " "},), act(3, "modify", {**TASK, "title": "Docs", "criteria": []})
+            ),
+            ["new task 1 has no goal", "the new card of task 3 has no acceptance criteria"],
+        ),
+        (
+            replanned(({**NEW, "title": "Router of dishes"},)),
+            ["2 tasks have the title 'Router of dishes'"],
+        ),
+        (
+            replanned(({**NEW, "title": "Schema of dishes"},)),
+            ["2 tasks have the title 'Schema of dishes'"],
+        ),
+        (
+            replanned((NEW,), act(3, "drop"), act(4, "modify", NEW)),
+            ["2 tasks have the title 'Prices of dishes'"],
+        ),
+    ],
+    ids=[
+        "good",
+        "no new tasks, dropped and modified",
+        "wrong, repeated and missing actions",
+        "modified without a card",
+        "card without modify",
+        "bad cards",
+        "title of a task kept",
+        "title of a task through",
+        "title of a modified task",
+    ],
+)
+def test_replan_errors(answer, errors):
+    assert plan.validate_replan(answer, LEFT, ["Schema of dishes"]) == errors
+
+
 def test_files_closed_to_the_sessions_go_back_to_the_planner():
     closed = [
         ".env.example",

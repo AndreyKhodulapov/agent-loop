@@ -1,9 +1,10 @@
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import pytest
-from test_plan import PLAN
+from test_plan import PLAN, TASK
 
 from agent_loop import (
     agent,
@@ -11,6 +12,7 @@ from agent_loop import (
     git,
     guard,
     implement,
+    plan,
     planner,
     prompts,
     protected,
@@ -413,3 +415,128 @@ def test_full_context_of_a_conversation_goes_back_to_the_operator(conversation, 
 
     with pytest.raises(planner.PlanError, match="/compact"):
         conversation.talk()
+
+
+@pytest.fixture
+def replanning(env):
+    """The run of `env` works on its plan: task 1 has found itself too big with work in the
+    tree, task 2 is left."""
+    plan.save(env.run_dir, PLAN)
+    env.store.approve(env.run_id, "f00d", plan.cards(PLAN))
+    repo = Path(env.store.run(env.run_id).repo)
+    env.store.start(env.run_id, "main", git.head(repo))
+    first, _ = env.store.tasks(env.run_id)
+    env.store.move_task(first.id, "implementing")
+    step_id = env.store.start_step(
+        env.run_id, first.id, implement.IMPLEMENT, git.head(repo), [], "s1"
+    )
+    answer = {"status": "too_big", "summary": "Two modules", "commit_message": ""}
+    answer |= {"notes_for_next": "", "split": ["Prices", "Schema"]}
+    env.store.finish_step(step_id, "completed", {"reason": None, "answer": answer})
+    env.store.move_task(first.id, "replan", "too_big")
+    (repo / "app.py").write_text("x = 2\n")
+    return env
+
+
+def replan(env):
+    run = env.store.run(env.run_id)
+    task = next(t for t in env.store.tasks(env.run_id) if t.status == "replan")
+    return planner.replan(env.cfg, env.store, run, task, "Nothing yet")
+
+
+# The new task repeats the title of the task left.
+REPEATED = [TASK | {"title": "Router of dishes"}]
+
+
+def replanned(*remaining, tasks=(TASK | {"title": "Prices"},)):
+    entries = list(remaining) or [{"task": 2, "action": "keep", "why": "Still needed"}]
+    return answered({"why": "Prices first", "tasks": list(tasks), "remaining": entries})
+
+
+def test_task_gone_back_is_replanned_in_a_read_only_session(replanning, monkeypatch):
+    env = replanning
+    modified = {"task": 2, "action": "modify", "why": "Prices", "card": TASK | {"title": "Rt"}}
+    env.script(monkeypatch, replanned(modified, tasks=[TASK | {"title": t} for t in "AB"]))
+
+    assert replan(env) is None
+
+    tasks = env.store.tasks(env.run_id)
+    assert [(t.seq, t.title, t.status) for t in tasks] == [
+        (1, "Schema of dishes", "dropped"),
+        (2, "A", "pending"),
+        (3, "B", "pending"),
+        (4, "Rt", "pending"),
+    ]
+    [session] = env.sessions
+    assert session.schema == planner.REPLAN_SCHEMA
+    assert session.system_files == prompts.system_files("replanner", SETTINGS)
+    assert (session.model, session.tools) == (SETTINGS.model_planner, "Bash,Read")
+    permissions = json.loads(session.settings.read_text())["permissions"]
+    assert guard.WRITE_RULE in permissions["deny"]
+    ref = f"refs/loop/wip/{env.run_id}/1"
+    assert "Its split:\n- Prices\n- Schema" in session.prompt
+    assert f"`git show {ref}`" in session.prompt
+    assert " app.py | 2 +-" in session.prompt
+    assert '"task": 2,\n    "title": "Router of dishes"' in session.prompt
+    assert "## Done so far\n\nNothing yet" in session.prompt
+    repo = Path(env.store.run(env.run_id).repo)
+    assert git.git(repo, "status", "--porcelain") == ""
+    assert git.git(repo, "show", f"{ref}:app.py") == "x = 2\n"
+    [replan_step] = env.store.planner_steps(env.run_id)
+    assert (replan_step.kind, replan_step.task_id) == ("replan", None)
+
+
+def test_replan_with_errors_goes_back_to_its_session(replanning, monkeypatch):
+    env = replanning
+    env.script(monkeypatch, replanned(tasks=REPEATED), replanned())
+
+    assert replan(env) is None
+
+    first, second = env.sessions
+    assert (second.session_id, second.resume) == (first.session_id, True)
+    assert "- 2 tasks have the title 'Router of dishes'" in second.prompt
+    assert [t.title for t in env.store.tasks(env.run_id)][1:] == ["Prices", "Router of dishes"]
+
+
+def test_replan_that_keeps_its_errors_stops_the_run(replanning, monkeypatch):
+    env = replanning
+    env.script(monkeypatch, *[replanned(tasks=REPEATED)] * (planner.RETRIES + 1))
+    before = env.store.tasks(env.run_id)
+
+    assert replan(env) == implement.Stop(planner.REJECTED)
+
+    assert env.store.tasks(env.run_id) == before
+
+
+@pytest.mark.parametrize(
+    ("outcome", "stop", "applied"),
+    [
+        (paused("timeout"), implement.Stop("timeout"), False),
+        (paused(implement.INTERRUPT), implement.Stop(implement.INTERRUPT), False),
+        (
+            replace(replanned(), reason=implement.INTERRUPT),
+            implement.Stop(implement.INTERRUPT),
+            True,
+        ),
+    ],
+    ids=["paused", "interrupted", "interrupted after the answer"],
+)
+def test_stopped_replanning_stops_the_run(replanning, monkeypatch, outcome, stop, applied):
+    env = replanning
+    env.script(monkeypatch, outcome)
+
+    assert replan(env) == stop
+
+    statuses = [t.status for t in env.store.tasks(env.run_id)]
+    assert statuses[0] == ("dropped" if applied else "replan")
+
+
+def test_replanning_waits_for_room_in_the_limits(replanning, monkeypatch):
+    env = replanning
+    resume_at = int(time.time()) + 600
+    monkeypatch.setattr(budget, "no_room", lambda home, settings: resume_at)
+    env.script(monkeypatch)
+
+    assert replan(env) == implement.Stop(implement.BUDGET, resume_at)
+
+    assert env.sessions == []

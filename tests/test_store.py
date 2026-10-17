@@ -256,6 +256,59 @@ def test_failed_approval_changes_nothing(db, run_id):
     assert db.transitions(run_id) == []
 
 
+def replanning(db, run_id, titles):
+    """The tasks of `titles` in the run: the first is committed, the second goes to replan."""
+    db.approve(run_id, "f00d", [(title, {}) for title in titles])
+    tasks = db.tasks(run_id)
+    for status in ("implementing", "gating", "committed"):
+        db.move_task(tasks[0].id, status)
+    for status in ("implementing", "replan"):
+        db.move_task(tasks[1].id, status, "too_big" if status == "replan" else None)
+    return tasks
+
+
+def test_replan_puts_new_tasks_in_place_of_the_task(db, run_id):
+    first, big, docs, router, admin = replanning(
+        db, run_id, ["schema", "big", "docs", "router", "admin"]
+    )
+
+    db.replan(
+        big.id,
+        [("prices", CARD), ("big rest", {})],
+        {router.id: ("router v2", {"goal": "v2"})},
+        [docs.id],
+    )
+
+    tasks = db.tasks(run_id)
+    assert [(t.seq, t.title, t.status, t.reason) for t in tasks] == [
+        (1, "schema", "committed", None),
+        (2, "big", "dropped", "replanned"),
+        (3, "prices", "pending", None),
+        (4, "big rest", "pending", None),
+        (5, "docs", "dropped", "replanned"),
+        (6, "router v2", "pending", None),
+        (7, "admin", "pending", None),
+    ]
+    assert [t.id for t in tasks if t.title in ("docs", "router v2", "admin")] == [
+        docs.id,
+        router.id,
+        admin.id,
+    ]
+    assert (tasks[2].card, tasks[5].card) == (CARD, {"goal": "v2"})
+    moves = [(t.task_id, t.dst) for t in db.transitions(run_id)][-2:]
+    assert moves == [(big.id, "dropped"), (docs.id, "dropped")]
+
+
+def test_failed_replan_changes_nothing(db, run_id):
+    _, big, docs = replanning(db, run_id, ["schema", "big", "docs"])
+    before = db.tasks(run_id)
+
+    with pytest.raises(store.StoreError, match="committed -> dropped is not allowed"):
+        db.replan(big.id, [("prices", {})], {docs.id: ("docs v2", {})}, [before[0].id])
+
+    assert db.tasks(run_id) == before
+
+
 @pytest.mark.parametrize(
     "call",
     [

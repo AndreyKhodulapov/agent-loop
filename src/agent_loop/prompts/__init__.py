@@ -7,7 +7,8 @@ and the work in progress. The fixer gets the card, the work and the findings of 
 A card (`Task.card`) holds `goal` (a string) and `criteria`, `files` (where to start), `tests`
 (that must pass) and `decisions` (of the plan for this task), each a list of strings, possibly
 empty. The planner gets the request of the operator and proposes the tasks of a run, see
-`plan`. Prompts are in English whatever the language of the docs.
+`plan`; when a task goes back to the planner, the replanner gets the plan, what the task has left
+and the tasks after it. Prompts are in English whatever the language of the docs.
 """
 
 from __future__ import annotations
@@ -55,6 +56,14 @@ CRITIC_RESUMED = (
     "agent-loop has resumed this session after a pause. Go on with the review of the plan from"
     " where you stopped and answer as before."
 )
+# Why a task goes back to the planner, by the reason of its move to replan.
+REPLAN_REASONS = {
+    "too_big": "its session has found that the task does not fit in one commit",
+    "diff_too_big": "its diff has gone over the limit of changed lines",
+    "fix_attempts": "the fixes of its work have not passed the checks",
+    "context_pauses": "its sessions have filled the context twice",
+    "stall_pauses": "its sessions keep stalling on timeouts, hangs or errors of the guard",
+}
 # The prompt that asks the planner for the plan once the operator has left the conversation.
 PLANNER_TALKED = (
     "The operator has ended the conversation. Answer with the plan agreed on in it. If the plan"
@@ -85,7 +94,7 @@ def answer(structured_output: dict) -> Answer:
 
 
 def system_files(role: str, settings: Settings) -> tuple[Path, ...]:
-    """Rules of a session of `role` (planner, plan_critic, implementer or fixer) for
+    """Rules of a session of `role` (planner, plan_critic, replanner, implementer or fixer) for
     `agent.Session.system_files`.
 
     How the loop runs the sessions of a task, which the planner and its critic have not, the
@@ -93,7 +102,7 @@ def system_files(role: str, settings: Settings) -> tuple[Path, ...]:
     where they disagree.
     """
     files = (ROLES / f"{role}.md", ROLES / "AGENTS.md")
-    if role not in ("planner", "plan_critic"):
+    if role not in ("planner", "plan_critic", "replanner"):
         files = (ROLES / "session.md", *files)
     if settings.context_file is not None:
         files += (settings.context_file,)
@@ -178,13 +187,86 @@ def plan_critique(findings: list[dict]) -> str:
 
 
 def plan_errors(errors: list[str]) -> str:
-    """The prompt that sends a plan the loop cannot take back to its planner session."""
+    """The prompt that sends an answer the loop cannot take back to its planner or replanner
+    session."""
     return "\n\n".join(
         [
-            "agent-loop cannot take the plan of your answer:",
+            "agent-loop cannot take your answer:",
             "\n".join(f"- {error}" for error in errors),
-            "Fix the plan and answer again with the whole plan.",
+            "Fix the errors and answer again in full.",
         ]
+    )
+
+
+def replanner(
+    approved: dict,
+    task: Task,
+    left: list[Task],
+    previous: str,
+    settings: Settings,
+    said: Answer | None = None,
+    verdict: Verdict | None = None,
+    wip: tuple[str, str] | None = None,
+) -> str:
+    """The prompt of the session that replans the tasks `left` after `task`, which has gone back
+    to the planner, in a run of the `approved` plan.
+
+    `previous` is what `previous_tasks` returns. What the task has left to tell: `said`, the
+    answer of its session that has found the task too big; `verdict`, the gate it has not
+    passed; `wip`, its WIP ref and the `git diff --stat` of the work in it.
+    """
+    sections = [
+        "# Replanning",
+        f"Task {task.seq} of the run, {task.title!r}, has gone back to the planner:"
+        f" {REPLAN_REASONS[task.reason]}. Replan the tasks left so that the run still reaches"
+        " the goal of the plan.",
+        "## Plan",
+        _fenced(
+            json.dumps(
+                {key: approved[key] for key in ("goal", "criteria", "decisions")},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "json",
+        ),
+        "## Done so far",
+        previous or "Nothing is committed yet.",
+        "## The task that has gone back",
+        _fenced(_numbered([task]), "json"),
+    ]
+    if said is not None:
+        sections += ["### What its session says", said.summary]
+        if said.split:
+            sections.append("Its split:\n" + "\n".join(f"- {part}" for part in said.split))
+    if verdict is not None:
+        sections += [
+            f"### Findings of the checks: {verdict.reason}",
+            *(_fenced(finding) for finding in verdict.findings),
+        ]
+    if wip is not None:
+        ref, stat = wip
+        sections += [
+            "### Its work",
+            f"Its uncommitted work is kept in `{ref}`, a commit on top of the start of the task:"
+            f" `git show {ref}` shows it. The working tree is back at the start of the task.",
+            _fenced(stat),
+        ]
+    sections.append("## Tasks left after it")
+    sections.append(_fenced(_numbered(left), "json") if left else "No tasks are left after it.")
+    sections += [
+        *_plan_size(settings),
+        "## Language",
+        f"Write the cards in {_language(settings)}: the operator reads them.",
+    ]
+    return "\n\n".join(sections)
+
+
+def _numbered(tasks: list[Task]) -> str:
+    """The tasks as the replanner sees them: their numbers, titles and cards."""
+    return json.dumps(
+        [{"task": task.seq, "title": task.title, **task.card} for task in tasks],
+        ensure_ascii=False,
+        indent=2,
     )
 
 

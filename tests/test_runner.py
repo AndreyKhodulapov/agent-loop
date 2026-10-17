@@ -207,7 +207,7 @@ def test_run_does_not_start_off_its_plan_or_where_it_would_mix_with_other_work(
     del held
 
 
-@pytest.mark.parametrize("status, reason", [("needs_human", "secret_file"), ("replan", "too_big")])
+@pytest.mark.parametrize("status, reason", [("needs_human", "secret_file")])
 def test_task_that_waits_for_the_operator_pauses_the_run(
     home, cfg, approved, monkeypatch, status, reason
 ):
@@ -223,6 +223,68 @@ def test_task_that_waits_for_the_operator_pauses_the_run(
         runner.resume(cfg, None)
     with pytest.raises(runner.RunError, match=f"task 1 waits in {status} \\({reason}\\)$"):
         runner.answer(cfg, None)
+
+
+class Replans:
+    """Replaces the replanning: each turn returns the stop of the run, None replaces the task
+    with the task New."""
+
+    def __init__(self, monkeypatch, *stops):
+        self.calls = []
+        stops = iter(stops)
+
+        def replan(cfg, store, run, task, previous):
+            self.calls.append((task.seq, previous))
+            stop = next(stops)
+            if stop is None:
+                store.replan(task.id, [("New", CARD)], {}, [])
+            return stop
+
+        monkeypatch.setattr(planner, "replan", replan)
+
+
+def test_task_gone_back_to_the_planner_is_replanned_and_the_run_goes_on(
+    home, cfg, approved, monkeypatch
+):
+    tasks = Tasks(
+        monkeypatch, moves("implementing", "replan", reason="too_big"), commits(), commits()
+    )
+    replans = Replans(monkeypatch, None)
+
+    assert runner.start(cfg, None) is None
+
+    run, [first, new, second], run_moves = the_run(home)
+    assert run_moves == [("approved", None), ("running", None), ("done", None)]
+    assert [(t.title, t.status) for t in (first, new, second)] == [
+        ("First", "dropped"),
+        ("New", "committed"),
+        ("Second", "committed"),
+    ]
+    assert replans.calls == [(1, "")]
+    assert [(name, seq, total) for name, seq, total, _ in tasks.calls] == [
+        ("start", 1, 2),
+        ("start", 2, 3),
+        ("start", 3, 3),
+    ]
+
+
+def test_run_stopped_while_replanning_replans_on_resume(home, cfg, approved, monkeypatch):
+    Tasks(monkeypatch, moves("implementing", "replan", reason="fix_attempts"))
+    Replans(monkeypatch, implement.Stop("timeout"))
+
+    assert runner.start(cfg, None) == "timeout"
+
+    run, [first, _], run_moves = the_run(home)
+    assert run_moves[-1] == ("paused", "timeout")
+    assert first.status == "replan"
+    Tasks(monkeypatch, commits(), commits())
+    replans = Replans(monkeypatch, None)
+
+    assert runner.resume(cfg, None) is None
+
+    assert replans.calls == [(1, "")]
+    _, tasks, _ = the_run(home)
+    assert [t.status for t in tasks] == ["dropped", "committed", "committed"]
 
 
 def asks(question):

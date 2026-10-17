@@ -60,6 +60,23 @@ def test_save_wip_keeps_the_step_work_and_leaves_the_tree_alone(repo):
     assert sorted(git.untracked(repo)) == [".env", "pkg/[new].py"]
 
 
+def test_drop_work_puts_the_tree_back_to_head_and_keeps_the_files_of_the_operator(repo):
+    (repo / ".env").write_text("TOKEN=1\n")
+    before = git.untracked(repo)
+    (repo / "app.py").write_text("x = 2\n")
+    (repo / "old.py").unlink()
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "new.py").write_text("")
+    (repo / "staged.py").write_text("")
+    git.git(repo, "add", "staged.py", "app.py")
+
+    git.drop_work(repo, git.new_files(repo, git.head(repo), before))
+
+    assert (repo / "app.py").read_text() == "x = 1\n"
+    assert (repo / "old.py").read_text() == "y = 2\n"
+    assert git.git(repo, "status", "--porcelain") == "?? .env\n"
+
+
 def test_new_files_are_the_ones_the_step_has_added(repo):
     (repo / ".env").write_text("TOKEN=1\n")
     (repo / "notes.txt").write_text("")

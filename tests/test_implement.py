@@ -313,6 +313,37 @@ def test_task_goes_back_to_the_planner_when_the_fixes_fail(env, monkeypatch):
     assert [s.kind for s in env.steps()].count("fix") == SETTINGS.fix_attempts
 
 
+def test_task_that_goes_back_to_the_planner_sets_its_work_aside(env, monkeypatch):
+    (env.repo / ".env").write_text("TOKEN=1\n")
+    profile = Profile(commands={"test": "echo junit > report.xml; " + PROFILE.commands["test"]})
+    env.script(
+        monkeypatch,
+        (both(write("app.py", "x = 2\n"), write("pkg/new.py", "y = 1\n")), answered()),
+        (None, answered("too_big", split=["x", "y"])),
+    )
+    env.start(profile)
+    run = env.store.run(env.run_id)
+
+    ref = implement.set_aside(env.store, run, env.task())
+
+    assert ref == f"refs/loop/wip/{env.run_id}/1"
+    assert git.git(env.repo, "rev-parse", f"{ref}^").strip() == git.head(env.repo)
+    assert git.git(env.repo, "show", f"{ref}:app.py") == "x = 2\n"
+    assert git.git(env.repo, "show", f"{ref}:pkg/new.py") == "y = 1\n"
+    assert "report.xml" not in git.git(env.repo, "ls-tree", "-r", "--name-only", ref)
+    assert git.git(env.repo, "status", "--porcelain") == "?? .env\n?? report.xml\n"
+    # Again after a stop: the tree has nothing to keep, the ref stays.
+    assert implement.set_aside(env.store, run, env.task()) == ref
+    assert git.git(env.repo, "show", f"{ref}:app.py") == "x = 2\n"
+
+
+def test_task_without_work_that_goes_back_to_the_planner_has_no_ref(env, monkeypatch):
+    env.script(monkeypatch, (None, answered("too_big", split=["x", "y"])))
+    env.start()
+
+    assert implement.set_aside(env.store, env.store.run(env.run_id), env.task()) is None
+
+
 def test_tests_weakened_twice_go_to_a_human(env, monkeypatch):
     env.script(
         monkeypatch,

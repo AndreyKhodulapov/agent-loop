@@ -97,6 +97,15 @@ def save_wip(repo: Path, ref: str, untracked_before: list[str], base: str) -> st
     return commit
 
 
+def drop_work(repo: Path, added: list[str]) -> None:
+    """Undo the uncommitted work on top of HEAD: the changes of tracked files, the index and the
+    `added` files."""
+    git(repo, "reset", "--quiet", "--hard")
+    for path in added:
+        # A file added to the index only is gone with the reset.
+        (repo / path).unlink(missing_ok=True)
+
+
 def commit(repo: Path, base: str, added: list[str], message: str) -> str:
     """Commit the work on top of `base`, the HEAD of the current branch: the changes of tracked
     files and `added`; returns the commit.

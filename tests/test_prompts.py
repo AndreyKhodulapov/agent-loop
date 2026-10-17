@@ -41,9 +41,10 @@ def commit(repo, message):
     [
         ("implementer", ["session.md", "implementer.md", "AGENTS.md"]),
         ("fixer", ["session.md", "fixer.md", "AGENTS.md"]),
-        # The planner and its critic have no task to work on and commit.
+        # The planner, its critic and the replanner have no task to work on and commit.
         ("planner", ["planner.md", "AGENTS.md"]),
         ("plan_critic", ["plan_critic.md", "AGENTS.md"]),
+        ("replanner", ["replanner.md", "AGENTS.md"]),
     ],
 )
 def test_system_files_of_a_role(role, rules, tmp_path):
@@ -168,6 +169,68 @@ def test_plan_critique_lists_the_findings():
     assert "## Finding 2, not blocking, the whole plan\n\nVague goal\n\nAnswer as before" in (
         prompt
     )
+
+
+def test_replanner_prompt_has_the_plan_the_task_and_the_tasks_left():
+    task = dataclasses.replace(TASK, status="replan", reason="too_big", card={**CARD, "files": []})
+    left = dataclasses.replace(TASK, seq=3, title="Docs", status="pending", card={"goal": "Docs"})
+    approved = {"goal": "Prompts", "criteria": ["Tests pass"], "decisions": [], "tasks": []}
+    said = prompts.answer(
+        {
+            "status": "too_big",
+            "summary": "Two modules",
+            "commit_message": "",
+            "notes_for_next": "",
+            "split": ["The prompt", "The fixer"],
+        }
+    )
+    verdict = Verdict("replan", "diff_too_big", ("1500 lines",))
+    wip = ("refs/loop/wip/r1/2", " app.py | 2 +-")
+
+    prompt = prompts.replanner(approved, task, [left], "", SETTINGS, said, verdict, wip)
+
+    assert prompt == (
+        "# Replanning\n\n"
+        "Task 2 of the run, 'Prompt of a task', has gone back to the planner: its session has"
+        " found that the task does not fit in one commit. Replan the tasks left so that the run"
+        " still reaches the goal of the plan.\n\n"
+        "## Plan\n\n"
+        '```json\n{\n  "goal": "Prompts",\n  "criteria": [\n    "Tests pass"\n  ],\n'
+        '  "decisions": []\n}\n```\n\n'
+        "## Done so far\n\nNothing is committed yet.\n\n"
+        "## The task that has gone back\n\n"
+        '```json\n[\n  {\n    "task": 2,\n    "title": "Prompt of a task",\n'
+        '    "goal": "Add the prompt module.",\n'
+        '    "criteria": [\n      "The prompt has the card",\n      "Tests pass"\n    ],\n'
+        '    "files": [],\n    "tests": [],\n'
+        '    "decisions": [\n      "The fixer runs in a new session"\n    ]\n  }\n]\n```\n\n'
+        "### What its session says\n\nTwo modules\n\n"
+        "Its split:\n- The prompt\n- The fixer\n\n"
+        "### Findings of the checks: diff_too_big\n\n```\n1500 lines\n```\n\n"
+        "### Its work\n\n"
+        "Its uncommitted work is kept in `refs/loop/wip/r1/2`, a commit on top of the start of"
+        " the task: `git show refs/loop/wip/r1/2` shows it. The working tree is back at the start"
+        " of the task.\n\n"
+        "```\n app.py | 2 +-\n```\n\n"
+        "## Tasks left after it\n\n"
+        '```json\n[\n  {\n    "task": 3,\n    "title": "Docs",\n    "goal": "Docs"\n  }\n]\n```'
+        "\n\n"
+        "## Size\n\nThe work of one task, tests included, fits in 800 changed lines."
+        " A task over 1200 lines comes back to the planner.\n\n"
+        "## Language\n\nWrite the cards in Russian: the operator reads them."
+    )
+
+
+def test_replanner_prompt_of_the_last_task_after_others():
+    task = dataclasses.replace(TASK, status="replan", reason="context_pauses")
+    approved = {"goal": "Prompts", "criteria": [], "decisions": [], "tasks": []}
+
+    prompt = prompts.replanner(approved, task, [], "M app.py: run", SETTINGS)
+
+    assert "its sessions have filled the context twice." in prompt
+    assert "## Done so far\n\nM app.py: run\n\n" in prompt
+    assert "## Tasks left after it\n\nNo tasks are left after it.\n\n" in prompt
+    assert "###" not in prompt
 
 
 def test_first_task_has_no_previous_tasks_section():

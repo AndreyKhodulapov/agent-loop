@@ -5,8 +5,9 @@ Every session, gate and commit is a step in the store; a gate keeps its verdict 
 its step, so the fixer can get the findings without running the commands again. The task moves
 through implementing, gating and fixing until its work passes the gate and is committed, or until
 it goes to a human, back to the planner or pauses. A paused step leaves the work in progress in
-the WIP ref of the task. A commit message that breaks the rules goes back to its session once;
-the answer goes through the gate again, as the session may have changed the files.
+the WIP ref of the task, as does a task that goes back to the planner (`set_aside`). A commit
+message that breaks the rules goes back to its session once; the answer goes through the gate
+again, as the session may have changed the files.
 
 A stopped task goes on from its status and its last step: a paused session is resumed or
 replaced by a new one that starts from the handoff, a step whose end the loop has not taken yet
@@ -111,10 +112,7 @@ class _Task:
         git.exclude(self.repo, f"/{guard.HANDOFF.parent}/")
         steps = store.steps(task.id)
         self.checkpoint = steps[0].checkpoint if steps else git.head(self.repo)
-        self.untracked = steps[0].untracked if steps else git.untracked(self.repo)
-        for gate in steps:
-            if gate.kind == GATE and gate.outcome == "completed":
-                self.untracked = [*self.untracked, *gate.detail["artifacts"]]
+        self.untracked = _untracked(steps) if steps else git.untracked(self.repo)
         self.tests = task.tests
 
     def start(self, previous: str) -> Stop | None:
@@ -171,8 +169,7 @@ class _Task:
         handoff = self.handoff.read_text(encoding="utf-8") if self.handoff.is_file() else None
         if last.kind == IMPLEMENT:
             return self._loop(self._implementer(previous, handoff, self._work()))
-        gate = next(s for s in reversed(steps) if s.kind == GATE)
-        return self._loop(self._fixer(_verdict(gate.detail), handoff))
+        return self._loop(self._fixer(last_verdict(steps), handoff))
 
     def _loop(self, upcoming: _Session | None) -> Stop | None:
         """Run the `upcoming` session, or the gate if it is None, and go on until the task is
@@ -404,6 +401,32 @@ def last_answer(steps: list[Step]) -> dict:
     return _last_session(steps).detail["answer"]
 
 
+def last_verdict(steps: list[Step]) -> gates.Verdict:
+    """The verdict of the last gate of a task."""
+    return _verdict(next(s for s in reversed(steps) if s.kind == GATE).detail)
+
+
+def set_aside(store: Store, run: Run, task: Task) -> str | None:
+    """Keep the uncommitted work of `task`, which has gone back to the planner, in its WIP ref
+    and put the working tree back to the checkpoint of the task: the tasks that replace it start
+    from there. Returns the ref, None when the task has none.
+
+    Called again after the run has stopped, it finds no work in the tree and keeps the ref.
+    """
+    repo = Path(run.repo)
+    steps = store.steps(task.id)
+    checkpoint, untracked = steps[0].checkpoint, _untracked(steps)
+    added = git.new_files(repo, checkpoint, untracked)
+    ref = git.wip_ref(run.id, task.seq)
+    if git.diff(repo, checkpoint, added, "--name-only"):
+        git.save_wip(repo, ref, untracked, checkpoint)
+        git.drop_work(repo, added)
+        logger.info(
+            "the work of task %d is in %s, the working tree is back at its start", task.seq, ref
+        )
+    return ref if git.git(repo, "for-each-ref", ref) else None
+
+
 def question(store: Store, task: Task) -> str | None:
     """What the operator replies to for `task` to go on: the question of its last session, or why
     the session is blocked; None when the task does not wait for a reply."""
@@ -425,6 +448,16 @@ def reply(store: Store, task: Task, question: str, text: str) -> None:
         task.run_id, task.id, REPLY, steps[0].checkpoint, steps[0].untracked, asked.session_id
     )
     store.finish_step(step_id, "completed", {"question": question, "reply": text})
+
+
+def _untracked(steps: list[Step]) -> list[str]:
+    """The untracked files at the start of a task and those its gates have left: neither is the
+    work of the task."""
+    untracked = steps[0].untracked
+    for gate in steps:
+        if gate.kind == GATE and gate.outcome == "completed":
+            untracked = [*untracked, *gate.detail["artifacts"]]
+    return untracked
 
 
 def _last_session(steps: list[Step]) -> Step:

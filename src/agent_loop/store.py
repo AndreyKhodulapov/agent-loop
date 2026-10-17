@@ -43,7 +43,8 @@ TASK_TRANSITIONS = {
     "reviewing": {"fixing", "done", "paused"},
     "paused": {"implementing", "gating", "fixing", "reviewing", "replan"},
     "needs_human": {"implementing", "fixing"},
-    "replan": {"pending", "dropped"},
+    # The tasks of a replan take the place of the task, see `Store.replan`.
+    "replan": {"dropped"},
     "done": set(),
     "dropped": set(),
 }
@@ -294,18 +295,49 @@ class Store:
     def move_task(self, task_id: int, dst: str, reason: str | None = None) -> None:
         """Change the task status; `reason` is kept until the next move and cleared by it."""
         with self._transaction():
-            row = self._conn.execute(
-                "SELECT run_id, status FROM tasks WHERE id = ?", (task_id,)
+            self._move_task(task_id, dst, reason)
+
+    def replan(
+        self,
+        task_id: int,
+        tasks: list[tuple[str, dict]],
+        modified: dict[int, tuple[str, dict]],
+        dropped: list[int],
+    ) -> None:
+        """Drop the task in replan `task_id` for `tasks`, (title, card) pairs in their order,
+        which take its place before the tasks after it; the pending tasks of `modified` get
+        their new title and card by their ids, those of `dropped` are dropped. All at once.
+
+        The tasks after the replanned one are pending: they have no WIP refs, which go by the
+        number of the task, so their numbers move up to make room.
+        """
+        with self._transaction():
+            run_id, seq = self._conn.execute(
+                "SELECT run_id, seq FROM tasks WHERE id = ?", (task_id,)
             ).fetchone()
-            if row is None:
-                raise StoreError(f"task {task_id} not found")
-            _check(TASK_TRANSITIONS, f"task {task_id}", row["status"], dst)
+            for dropped_id in (task_id, *dropped):
+                self._move_task(dropped_id, "dropped", "replanned")
             now = _now()
+            for modified_id, (title, card) in modified.items():
+                self._conn.execute(
+                    "UPDATE tasks SET title = ?, card = ?, updated_at = ? WHERE id = ?",
+                    (title, json.dumps(card, ensure_ascii=False), now, modified_id),
+                )
+            # Through negative numbers: UNIQUE (run_id, seq) is checked row by row.
             self._conn.execute(
-                "UPDATE tasks SET status = ?, reason = ?, updated_at = ? WHERE id = ?",
-                (dst, reason, now, task_id),
+                "UPDATE tasks SET seq = -seq WHERE run_id = ? AND seq > ?", (run_id, seq)
             )
-            self._record(row["run_id"], task_id, row["status"], dst, reason, now)
+            self._conn.execute(
+                "UPDATE tasks SET seq = ? - seq WHERE run_id = ? AND seq < 0", (len(tasks), run_id)
+            )
+            self._conn.executemany(
+                "INSERT INTO tasks (run_id, seq, title, card, status, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+                [
+                    (run_id, number, title, json.dumps(card, ensure_ascii=False), now, now)
+                    for number, (title, card) in enumerate(tasks, start=seq + 1)
+                ],
+            )
 
     def set_tests(self, task_id: int, count: int) -> None:
         self._conn.execute("UPDATE tasks SET tests = ? WHERE id = ?", (count, task_id))
@@ -453,6 +485,20 @@ class Store:
             (dst, reason, now, run_id),
         )
         self._record(run_id, None, row["status"], dst, reason, now)
+
+    def _move_task(self, task_id: int, dst: str, reason: str | None) -> None:
+        row = self._conn.execute(
+            "SELECT run_id, status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"task {task_id} not found")
+        _check(TASK_TRANSITIONS, f"task {task_id}", row["status"], dst)
+        now = _now()
+        self._conn.execute(
+            "UPDATE tasks SET status = ?, reason = ?, updated_at = ? WHERE id = ?",
+            (dst, reason, now, task_id),
+        )
+        self._record(row["run_id"], task_id, row["status"], dst, reason, now)
 
     def _record(
         self, run_id: str, task_id: int | None, src: str, dst: str, reason: str | None, at: str

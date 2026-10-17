@@ -13,6 +13,12 @@ Blocking findings go back to the planner session, and the plan it fixes goes to 
 at most `plan_critic_rounds` critics after the request or the last conversation. The plan is
 saved with the findings of the last critic; the operator decides on those that still block.
 
+A task of a running run that goes back to the planner is replanned at once (`replan`): a new
+session gets the approved plan, what the task has left and the tasks after it, and its answer
+replaces the task with new ones and keeps, modifies or drops each task after it. An answer with
+errors goes back to the same session, at most `RETRIES` times; a stopped session pauses the run,
+and `loop resume` replans in a new one.
+
 The run stays in planning while the planner works: a stopped planner does not pause it, and
 `go_on` picks the work up from the last step of the planner. A paused session is resumed or
 replaced as `step.how_to_resume` decides, an answer the loop has not taken yet is taken.
@@ -27,13 +33,14 @@ from pathlib import Path
 
 from agent_loop import agent, budget, git, guard, implement, log, plan, prompts, replies, step
 from agent_loop.config import Config
-from agent_loop.store import Run, Step, Store
+from agent_loop.store import Run, Step, Store, Task
 
 logger = logging.getLogger(__name__)
 
 PLAN = "plan"
 TALK = "talk"
 CRITIQUE = "critique"
+REPLAN = "replan"
 QUESTIONS = "questions"
 # The plan still has errors after the retries: the run waits for the operator.
 REJECTED = "rejected"
@@ -72,6 +79,29 @@ CRITIQUE_SCHEMA = {
     "required": ["findings"],
     "additionalProperties": False,
 }
+REPLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "why": {"type": "string"},
+        "tasks": {"type": "array", "items": plan.TASK_SCHEMA},
+        "remaining": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "integer"},
+                    "action": {"enum": ["keep", "modify", "drop"]},
+                    "why": {"type": "string"},
+                    "card": plan.TASK_SCHEMA,
+                },
+                "required": ["task", "action", "why"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["why", "tasks", "remaining"],
+    "additionalProperties": False,
+}
 
 
 class PlanError(Exception):
@@ -83,7 +113,8 @@ class _Session:
     prompt: str
     # The session to go on with --resume; None starts a new one.
     session_id: str | None = None
-    # PLAN for a session of the planner, CRITIQUE for one of the critic.
+    # PLAN for a session of the planner, CRITIQUE for one of the critic, REPLAN for one that
+    # replans a running run.
     kind: str = PLAN
 
 
@@ -107,6 +138,17 @@ def answer(cfg: Config, store: Store, run: Run) -> str | None:
     """Give the planner of `run` the replies of the operator from `QUESTIONS.md`; returns as
     `go_on`."""
     return _Planner(cfg, store, run).answer()
+
+
+def replan(cfg: Config, store: Store, run: Run, task: Task, previous: str) -> implement.Stop | None:
+    """Replan the tasks left in the running `run` after `task` has gone back to the planner.
+
+    The work of the task goes to its WIP ref first (`implement.set_aside`). `previous` is what
+    `prompts.previous_tasks` tells about the tasks before it. Returns why the run stops: the
+    limits leave no room (`implement.BUDGET`), the session has paused (its reason) or its answer
+    keeps its errors (`REJECTED`); None when the store has the new tasks.
+    """
+    return _Planner(cfg, store, run).replan(task, previous)
 
 
 class _Planner:
@@ -166,6 +208,77 @@ class _Planner:
         logger.info("the planner goes on with the answers to %d questions", len(questions))
         return self._loop(
             _Session(prompts.planner_answers(questions, answers), steps[-1].session_id)
+        )
+
+    def replan(self, task: Task, previous: str) -> implement.Stop | None:
+        tasks = self.store.tasks(self.run.id)
+        left = [t for t in tasks if t.seq > task.seq and t.status == "pending"]
+        through = [t.title for t in tasks if t.status in ("committed", "done")]
+        logger.warning(
+            "task %d has gone back to the planner (%s), replanning it and %d tasks after it",
+            task.seq,
+            task.reason,
+            len(left),
+        )
+        ref = implement.set_aside(self.store, self.run, task)
+        steps = self.store.steps(task.id)
+        said = None
+        if task.reason == "too_big":
+            said = prompts.answer(implement.last_answer(steps))
+        verdict = None
+        if task.reason in ("diff_too_big", "fix_attempts"):
+            verdict = implement.last_verdict(steps)
+        wip = None if ref is None else (ref, git.git(self.repo, "show", "--stat", "--format=", ref))
+        prompt = prompts.replanner(
+            plan.load(self.run_dir), task, left, previous, self.cfg.settings, said, verdict, wip
+        )
+        upcoming = _Session(prompt, kind=REPLAN)
+        for _ in range(RETRIES + 1):
+            resume_at = budget.no_room(self.cfg.home, self.cfg.settings)
+            if resume_at is not None:
+                return implement.Stop(implement.BUDGET, resume_at)
+            outcome = self._session(upcoming)
+            if outcome.status == "failed":
+                raise PlanError(f"the replanning session has failed: {outcome.reason}")
+            if outcome.status == "paused":
+                return implement.Stop(outcome.reason)
+            last = self.store.planner_steps(self.run.id)[-1]
+            output = last.detail["answer"]
+            if output is None:
+                raise PlanError("the replanning session has ended without an answer")
+            errors = plan.validate_replan(output, {t.seq: t.title for t in left}, through)
+            if not errors:
+                self._replace(task, left, output)
+                if outcome.reason == implement.INTERRUPT:
+                    return implement.Stop(implement.INTERRUPT)
+                return None
+            logger.warning("the replan has errors:\n%s", "\n".join(errors))
+            upcoming = _Session(prompts.plan_errors(errors), last.session_id, REPLAN)
+        logger.error(
+            "the replan still has errors after %d retries, `loop resume` replans anew", RETRIES
+        )
+        return implement.Stop(REJECTED)
+
+    def _replace(self, task: Task, left: list[Task], output: dict) -> None:
+        """Put the replan of `output` into the store: new tasks for `task`, actions on `left`."""
+        by_seq = {t.seq: t for t in left}
+        entries = output["remaining"]
+        self.store.replan(
+            task.id,
+            [plan.card(new) for new in output["tasks"]],
+            {
+                by_seq[e["task"]].id: plan.card(e["card"])
+                for e in entries
+                if e["action"] == "modify"
+            },
+            [by_seq[e["task"]].id for e in entries if e["action"] == "drop"],
+        )
+        logger.info(
+            "task %d is replaced with %d new tasks: %s%s",
+            task.seq,
+            len(output["tasks"]),
+            output["why"],
+            "".join(f"\n- task {e['task']}: {e['action']}, {e['why']}" for e in entries),
         )
 
     def _loop(self, upcoming: _Session | str | None) -> str | None:
@@ -303,10 +416,10 @@ class _Planner:
         return None
 
     def _session(self, upcoming: _Session) -> step.Outcome:
-        schema = CRITIQUE_SCHEMA if upcoming.kind == CRITIQUE else ANSWER_SCHEMA
-        session = self._agent_session(upcoming, schema)
-        # The planner and the critic change no files: nothing to roll back or to tell from
-        # their work.
+        schema = {PLAN: ANSWER_SCHEMA, CRITIQUE: CRITIQUE_SCHEMA, REPLAN: REPLAN_SCHEMA}
+        session = self._agent_session(upcoming, schema[upcoming.kind])
+        # The planner, the critic and the replanner change no files: nothing to roll back or to
+        # tell from their work.
         step_id = self.store.start_step(
             self.run.id, None, upcoming.kind, git.head(self.repo), [], session.session_id
         )
@@ -316,6 +429,7 @@ class _Planner:
     def _agent_session(self, upcoming: _Session, schema: dict | None) -> agent.Session:
         settings = self.cfg.settings
         critic = upcoming.kind == CRITIQUE
+        role = {PLAN: "planner", CRITIQUE: "plan_critic", REPLAN: "replanner"}
         session = agent.Session(
             prompt=upcoming.prompt,
             model=settings.model_critic if critic else settings.model_planner,
@@ -324,7 +438,7 @@ class _Planner:
                 self.run_dir, self.cfg.home, settings, self.repo, read_only=True
             ),
             effort=settings.effort_critic if critic else settings.effort_planner,
-            system_files=prompts.system_files("plan_critic" if critic else "planner", settings),
+            system_files=prompts.system_files(role[upcoming.kind], settings),
             schema=schema,
             tools="Bash,Read",
         )
