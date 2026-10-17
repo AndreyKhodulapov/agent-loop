@@ -107,6 +107,7 @@ def test_older_database_is_migrated_with_its_data(db_path, monkeypatch):
         db.record_limits(run_id, None, Limits(None, Window(0.64, 1791813600)))
         assert db.run(run_id).branch == "main"
         assert db.run(run_id).base is None
+        assert db.run(run_id).plan_hash is None
         assert len(db.limit_snapshots(run_id)) == 1
         assert db.steps(task_id)[0].untracked == []
         assert db.steps(task_id)[0].run_id == run_id
@@ -117,7 +118,8 @@ def test_older_database_is_migrated_with_its_data(db_path, monkeypatch):
 
 
 def test_steps_move_to_their_run_with_their_limit_snapshots(db_path, monkeypatch):
-    monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS[:-1])
+    # The database before the table of steps is rebuilt.
+    monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS[:5])
     old = store.Store(db_path)
     run_id = old.create_run(Path("/work/service"), "main", "abc123")
     task_id = old.add_task(run_id, "store", CARD)
@@ -230,6 +232,28 @@ def test_disallowed_run_move(db, run_id):
         db.move_run(run_id, "running")
 
     assert db.run(run_id).status == "planning"
+
+
+def test_approved_run_gets_its_tasks_and_the_hash_of_its_plan(db, run_id):
+    db.approve(run_id, "f00d", [("schema", CARD), ("router", {})])
+
+    run = db.run(run_id)
+    assert (run.status, run.plan_hash) == ("approved", "f00d")
+    assert [(t.seq, t.title, t.card) for t in db.tasks(run_id)] == [
+        (1, "schema", CARD),
+        (2, "router", {}),
+    ]
+    assert [t.dst for t in db.transitions(run_id)] == ["approved"]
+
+
+def test_failed_approval_changes_nothing(db, run_id):
+    with pytest.raises(TypeError):
+        db.approve(run_id, "f00d", [("schema", CARD), ("router", {"owner": object()})])
+
+    run = db.run(run_id)
+    assert (run.status, run.plan_hash) == ("planning", None)
+    assert db.tasks(run_id) == []
+    assert db.transitions(run_id) == []
 
 
 @pytest.mark.parametrize(

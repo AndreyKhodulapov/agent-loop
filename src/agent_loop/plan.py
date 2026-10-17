@@ -6,18 +6,20 @@ operator, the `decisions` the tasks share, and the `tasks`. A task is its `title
 in the cards file of `loop run`, so the tasks of `plan.json` can go to `loop run` as they are.
 
 `validate` finds what the schema cannot tell: its errors go back to the planner session.
+`loop approve` keeps the `digest` of `plan.json` with the run: a run starts only from the file
+the operator has approved.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from agent_loop import protected
 from agent_loop.files import write_atomic
-from agent_loop.store import Store
 
 PLAN_FILE = "plan.json"
 STRINGS = {"type": "array", "items": {"type": "string"}}
@@ -86,11 +88,16 @@ def load(run_dir: Path) -> dict:
     return json.loads((run_dir / PLAN_FILE).read_text(encoding="utf-8"))
 
 
-def add_tasks(store: Store, run_id: str, plan: dict) -> None:
-    """Make the tasks of `plan` the tasks of the run, in their order."""
-    for task in plan["tasks"]:
-        card = {key: value for key, value in task.items() if key != "title"}
-        store.add_task(run_id, task["title"], card)
+def digest(run_dir: Path) -> str:
+    return hashlib.sha256((run_dir / PLAN_FILE).read_bytes()).hexdigest()
+
+
+def cards(plan: dict) -> list[tuple[str, dict]]:
+    """The (title, card) pairs of the tasks of `plan`, in their order."""
+    return [
+        (task["title"], {key: value for key, value in task.items() if key != "title"})
+        for task in plan["tasks"]
+    ]
 
 
 def _closed(path: str) -> bool:

@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import json
 import logging
 import shutil
@@ -8,8 +9,20 @@ import time
 from pathlib import Path
 
 import pytest
+from test_plan import PLAN
 
-from agent_loop import git, implement, protected, recovery, replies, runner, selfcheck, step
+from agent_loop import (
+    git,
+    implement,
+    plan,
+    planner,
+    protected,
+    recovery,
+    replies,
+    runner,
+    selfcheck,
+    step,
+)
 from agent_loop.config import Config, Profile, Settings
 from agent_loop.store import Store
 
@@ -390,3 +403,60 @@ def test_resume_refuses_a_run_it_cannot_check(home, cfg, tasks_file, monkeypatch
 
     with pytest.raises(runner.RunError, match=error):
         runner.resume(cfg, None)
+
+
+def planned(home, repo, findings=()):
+    """A planning run of `repo` whose planner has saved the plan with the findings of its
+    critic."""
+    with opened(home) as store:
+        run_id = store.create_run(repo, "main", git.head(repo))
+    run_dir = step.run_dir(home, run_id)
+    run_dir.mkdir(parents=True)
+    plan.save(run_dir, {"findings": list(findings)}, planner.CRITIQUE_FILE)
+    plan.save(run_dir, PLAN)
+    return run_id
+
+
+def test_approved_plan_becomes_the_tasks_of_the_run(home, repo, tmp_path, caplog):
+    settings = Settings(doc_lang="ru", knowledge_dir=tmp_path / "agent_runs")
+    cfg = Config(home, repo, None, settings, {})
+    blocking = {"blocking": True, "tasks": [2], "problem": "No schema", "scenario": "It fails"}
+    run_id = planned(home, repo, [blocking])
+    with opened(home) as store:
+        unplanned = store.create_run(repo, "main", git.head(repo))
+
+    with caplog.at_level(logging.INFO, logger="agent_loop"):
+        runner.approve(cfg, None)
+
+    with opened(home) as store:
+        run, tasks = store.run(run_id), store.tasks(run_id)
+        assert store.run(unplanned).status == "planning"
+    run_dir = step.run_dir(home, run_id)
+    expected_hash = hashlib.sha256((run_dir / "plan.json").read_bytes()).hexdigest()
+    assert (run.status, run.plan_hash) == ("approved", expected_hash)
+    assert [(t.title, t.card) for t in tasks] == plan.cards(PLAN)
+    history = tmp_path / "agent_runs" / "repo" / f"{run.created_at[:10]}_{run_id}" / "PLAN.md"
+    assert history.read_text() == (run_dir / "PLAN.md").read_text()
+    assert "### Блокирующие\n\n- No schema (задачи 2)" in history.read_text()
+    assert "approved with 1 blocking findings of the critic:\n- No schema" in caplog.text
+
+
+def test_approve_takes_only_a_planning_run_with_its_plan(home, cfg, repo):
+    with pytest.raises(runner.RunError, match="no planning run in .* has a plan"):
+        runner.approve(cfg, None)
+    with opened(home) as store:
+        unplanned = store.create_run(repo, "main", git.head(repo))
+    with pytest.raises(runner.RunError, match=f"run {unplanned} has no plan yet"):
+        runner.approve(cfg, unplanned)
+    run_id = planned(home, repo)
+    busy = f"`loop plan` of run {run_id} has not exited"
+    with (
+        recovery.hold(step.run_dir(home, run_id) / recovery.LOCK_FILE),
+        pytest.raises(runner.RunError, match=busy),
+    ):
+        runner.approve(cfg, run_id)
+
+    runner.approve(cfg, run_id)
+
+    with pytest.raises(runner.RunError, match=f"run {run_id} is approved, not planning"):
+        runner.approve(cfg, run_id)

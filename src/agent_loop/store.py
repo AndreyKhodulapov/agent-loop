@@ -148,6 +148,10 @@ MIGRATIONS = [
     ALTER TABLE new_steps RENAME TO steps;
     CREATE INDEX steps_task ON steps (task_id);
     """,
+    # The sha256 of the plan the operator has approved: a run starts only from that plan.
+    """
+    ALTER TABLE runs ADD COLUMN plan_hash TEXT;
+    """,
 ]
 
 
@@ -166,6 +170,8 @@ class Run:
     updated_at: str
     # None for a run created before the column.
     base: str | None
+    # None until the plan is approved and for a run approved from a cards file.
+    plan_hash: str | None
 
 
 @dataclass(frozen=True)
@@ -261,19 +267,19 @@ class Store:
         )
         return cursor.lastrowid
 
+    def approve(self, run_id: str, plan_hash: str, tasks: list[tuple[str, dict]]) -> None:
+        """Approve the planning run with the (title, card) pairs of its tasks, in their order,
+        and the hash of the plan they come from."""
+        with self._transaction():
+            self._move_run(run_id, "approved", None)
+            for title, card in tasks:
+                self.add_task(run_id, title, card)
+            self._conn.execute("UPDATE runs SET plan_hash = ? WHERE id = ?", (plan_hash, run_id))
+
     def move_run(self, run_id: str, dst: str, reason: str | None = None) -> None:
         """Change the run status; `reason` is kept until the next move and cleared by it."""
         with self._transaction():
-            row = self._conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
-            if row is None:
-                raise StoreError(f"run {run_id} not found")
-            _check(RUN_TRANSITIONS, f"run {run_id}", row["status"], dst)
-            now = _now()
-            self._conn.execute(
-                "UPDATE runs SET status = ?, reason = ?, updated_at = ? WHERE id = ?",
-                (dst, reason, now, run_id),
-            )
-            self._record(run_id, None, row["status"], dst, reason, now)
+            self._move_run(run_id, dst, reason)
 
     def move_task(self, task_id: int, dst: str, reason: str | None = None) -> None:
         """Change the task status; `reason` is kept until the next move and cleared by it."""
@@ -425,6 +431,18 @@ class Store:
             self._conn.execute("ROLLBACK")
             raise
         self._conn.execute("COMMIT")
+
+    def _move_run(self, run_id: str, dst: str, reason: str | None) -> None:
+        row = self._conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise StoreError(f"run {run_id} not found")
+        _check(RUN_TRANSITIONS, f"run {run_id}", row["status"], dst)
+        now = _now()
+        self._conn.execute(
+            "UPDATE runs SET status = ?, reason = ?, updated_at = ? WHERE id = ?",
+            (dst, reason, now, run_id),
+        )
+        self._record(run_id, None, row["status"], dst, reason, now)
 
     def _record(
         self, run_id: str, task_id: int | None, src: str, dst: str, reason: str | None, at: str

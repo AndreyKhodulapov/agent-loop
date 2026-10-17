@@ -1177,7 +1177,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 После 4.1 планы есть, но `loop run` по-прежнему берёт файл карточек: `loop approve`, критик и запуск утверждённого плана — 4.2. Для ручной проверки 4.1 можно скормить `tasks` из `plan.json` в `loop run` (формат карточек совпадает).
 
-### 4.2 Критик, утверждение, перепланирование — разбиение утверждено 2026-10-17, 4.2а готов 2026-10-17
+### 4.2 Критик, утверждение, перепланирование — разбиение утверждено 2026-10-17, 4.2а–б готовы 2026-10-17
 
 Решения человека (2026-10-17, по рекомендациям агента; записаны в план, раздел 3): пять коммитов в `planner`, порядок обязателен; `loop approve` утверждает план и с оставшимися блокирующими находками критика — с предупреждением, находки в `PLAN.md`. Пункт 3 этапа 4 (в карточке нет правок закрытых файлов) уже закрыт в 4.1б — отдельного коммита нет.
 
@@ -1203,13 +1203,24 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Предлагаемое сообщение коммита: `feat(planner): review the plan with a critic before it is saved`.
 
-#### 4.2б `loop approve` и `PLAN.md` — дальше
+#### 4.2б `loop approve` и `PLAN.md` — готово 2026-10-17
 
-Как задумано:
-- Миграция `runs.plan_hash`. `loop approve [run]`: прогон `run` или последний в `planning` этого репозитория, у которого есть `plan.json` (иначе `RunError`: план не готов).
-- `PLAN.md` на `doc_lang` (подписи ru/en): цель, критерии, решения, задачи с карточками, находки критика из `critique.json` (блокирующие отдельно). Кладётся в `runs/<run>/PLAN.md` и, если задан `knowledge_dir`, в `<knowledge_dir>/agent_runs/<repo>/<date>_<run>/PLAN.md` (раздел 13; модуль `export` из раздела 4 — создать здесь, если рендер не помещается в `plan`).
-- Хеш `plan.json` (sha256) в `runs.plan_hash`, `plan.add_tasks`, `planning → approved` — одной транзакцией в store. Оставшиеся блокирующие находки — `WARNING`, утверждение всё равно проходит.
-- `cli`: `approve` убрать из `STUBS`.
+Сделано:
+1. `store`: миграция 7 — `runs.plan_hash TEXT`, поле `Run.plan_hash` (`None` до утверждения и у прогона из файла карточек). `Store.approve(run_id, plan_hash, tasks)` — переход `planning → approved`, задачи (`title`, `card`) по порядку и хеш одной транзакцией; тело `move_run` вынесено в `_move_run`, чтобы переход шёл внутри общей транзакции.
+2. `plan`: `digest(run_dir)` — sha256 байтов `plan.json`; `cards(plan)` — пары (`title`, карточка), как их отдаёт `runner.load_tasks`. `add_tasks` убран (вызывался только из теста).
+3. Новый модуль `export` (раздел 4): `render_plan(run, plan, findings, lang)` — `PLAN.md` с подписями `LABELS` ru/en: прогон и ветка, цель, критерии, решения плана (пустой раздел не выводится), задачи с карточками (пустые списки не выводятся), находки критика — «Блокирующие» и «Не блокирующие», номера задач и сценарий; без находок — «Критик ничего не нашёл.». Многострочный пункт списка продолжается с отступом. `write_plan(run_dir, run, plan, findings, settings)` пишет в `runs/<run>/PLAN.md` и, если задан `knowledge_dir`, в `<knowledge_dir>/<имя репозитория>/<дата создания прогона>_<run>/PLAN.md`. В плане раньше было `<knowledge_dir>/agent_runs/<repo>/`, но `knowledge_dir` уже указывает на `agent_runs` (по нему `config.find_profile` ищет `<knowledge_dir>/<repo>/loop.toml`, пример `.env` в разделе 11) — история лежит рядом с профилем.
+4. `runner.approve(cfg, run_id)`: прогон `run_id` (только `planning` этого репозитория и с `plan.json`, иначе `RunError` «has no plan yet» / «is approved, not planning») или последний `planning` прогон репозитория с `plan.json` («no planning run in … has a plan»). Lock репозитория не берёт (репозиторий не трогает), берёт lock прогона: занят — «`loop plan` of run … has not exited yet». `PLAN.md` пишется до `store.approve`: утверждённый прогон без `PLAN.md` второй раз его не получит. Оставшиеся блокирующие находки — `WARNING` со списком, утверждение проходит. `CRITIQUE_FILE` остался в `planner`: его пишет `planner`, `runner` и так импортирует `planner`.
+5. `cli`: `approve [run_id]` вместо заглушки, через `_work`; перед ним `_reap`, как у остальных команд с прогонами.
+
+Тесты (450 зелёных, ruff чистый): `test_store` — утверждение с задачами, хешем и одним переходом; упавшее утверждение (несериализуемая карточка второй задачи) не меняет ничего; старая база получает `plan_hash = None`; тест перестройки `steps` берёт `MIGRATIONS[:5]` вместо `[:-1]`. `test_plan` — `cards` совпадает с `runner.load_tasks`. `test_export` — `PLAN.md` целиком на английском с находками обоих видов, русские подписи и пустой список находок. `test_runner` — утверждение последнего прогона с планом (`ru`, `knowledge_dir`: хеш, задачи, `PLAN.md` в двух местах, предупреждение), отказы: нет плана, прогон без плана, lock прогона занят, прогон уже утверждён. `test_cli` — `loop plan --from` → `loop approve` (0) → повторный `loop approve` (1).
+
+Как проверить на реальном CLI (вместе с непроверенным из 4.2а): `loop plan --from request.md` на тестовом репозитории, затем `loop approve` — в `runs/<run>/` `critique.json`, `plan.json`, `PLAN.md`; при `LOOP_KNOWLEDGE_DIR` — копия в истории; `sqlite3 ~/.agent-loop/loop.db "select status, plan_hash from runs"`.
+
+Чего нет:
+- `loop approve` не проверяет `plan.json`, поправленный оператором руками после `loop plan`: хеш берётся с того, что лежит в файле. Файл, не прошедший схему, упадёт `KeyError` с трейсбеком. Решить в 4.2в: проверять ли `plan.validate` и схему при утверждении (`jsonschema` в зависимостях нет).
+- `loop run` по-прежнему берёт файл карточек — 4.2в.
+
+Предлагаемое сообщение коммита: `feat(planner): add loop approve that fixes the plan hash and renders PLAN.md`.
 
 #### 4.2в `loop run` из утверждённого плана — дальше
 

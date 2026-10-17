@@ -250,6 +250,24 @@ def test_plan_waits_for_the_answers_of_the_operator(isolated, in_repo, tmp_path,
     assert (isolated / "runs" / run.id / "plan.json").is_file()
 
 
+def test_approve_makes_the_plan_the_tasks_of_the_run(isolated, in_repo, tmp_path, monkeypatch):
+    planner_sessions(
+        monkeypatch,
+        ("completed", None, {"status": "plan", "plan": PLAN}),
+        ("completed", None, {"findings": []}),
+    )
+    request = tmp_path / "request.md"
+    request.write_text("Add the admin of dishes")
+    assert cli.main(["plan", "--from", str(request)]) == 0
+
+    assert cli.main(["approve"]) == 0
+    assert cli.main(["approve"]) == 1
+
+    with contextlib.closing(Store(isolated / "loop.db")) as store:
+        [run] = store.runs("approved")
+        assert len(store.tasks(run.id)) == len(PLAN["tasks"])
+
+
 def test_plan_goes_on_with_the_same_request_only(isolated, in_repo, tmp_path, monkeypatch):
     planner_sessions(
         monkeypatch,

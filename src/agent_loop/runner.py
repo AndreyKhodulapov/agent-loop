@@ -4,8 +4,9 @@
 `plan_request` begins a run with the request of the operator, from a file or in a conversation
 with the planner, which stays in planning while `planner` works on it. `answer` gives the replies
 of the operator to the planner of a planning run, or to the task a paused run waits for, and goes
-on. A run holds the lock of the working directory and its own lock, works with the profile frozen
-at its start and keeps the services of the profile up while it works.
+on. `approve` makes the plan of a planning run the tasks of the run. A run holds the lock of the
+working directory and its own lock, works with the profile frozen at its start and keeps the
+services of the profile up while it works.
 
 The run pauses when a task needs the operator: a question, the planner, a moved branch, Ctrl+C.
 Ctrl+C outside a session pauses the run with its open steps as `recovery` pauses a dead one.
@@ -24,6 +25,7 @@ from typing import TextIO
 
 from agent_loop import (
     commands,
+    export,
     gates,
     git,
     implement,
@@ -172,6 +174,41 @@ def answer(cfg: Config, run_id: str | None) -> str | None:
         run_dir = step.run_dir(cfg.home, run.id)
         with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
             return planner.answer(cfg, store, run)
+
+
+def approve(cfg: Config, run_id: str | None) -> None:
+    """Approve the plan of the planning run `run_id`, or of the last planning run of the
+    repository with a plan: its tasks become the tasks of the run, with the hash of `plan.json`,
+    and `PLAN.md` shows it with the findings of the critic.
+
+    Blocking findings the critic has left do not stop the approval: the operator decides on them.
+    """
+    repo = _repo(cfg)
+    with contextlib.closing(Store(cfg.home / DB_FILE)) as store:
+        run = _planned(store, cfg.home, repo, run_id)
+        run_dir = step.run_dir(cfg.home, run.id)
+        lock = recovery.hold(run_dir / recovery.LOCK_FILE)
+        if lock is None:
+            raise RunError(f"`loop plan` of run {run.id} has not exited yet")
+        with lock, log.scope(run=run.id):
+            approved = plan.load(run_dir)
+            critique = (run_dir / planner.CRITIQUE_FILE).read_text(encoding="utf-8")
+            findings = json.loads(critique)["findings"]
+            # Before the approval: an approved run without its `PLAN.md` cannot get it again.
+            paths = export.write_plan(run_dir, run, approved, findings, cfg.settings)
+            store.approve(run.id, plan.digest(run_dir), plan.cards(approved))
+            blocking = [f["problem"] for f in findings if f["blocking"]]
+            if blocking:
+                logger.warning(
+                    "the plan is approved with %d blocking findings of the critic:\n%s",
+                    len(blocking),
+                    "\n".join(f"- {problem}" for problem in blocking),
+                )
+            logger.info(
+                "the plan of %d tasks is approved, it is in %s",
+                len(approved["tasks"]),
+                ", ".join(map(str, paths)),
+            )
 
 
 def resume(cfg: Config, run_id: str | None) -> str | None:
@@ -357,6 +394,19 @@ def _conversation(store: Store, home: Path, repo: Path) -> Run | None:
         ):
             return run
     return None
+
+
+def _planned(store: Store, home: Path, repo: Path, run_id: str | None) -> Run:
+    """The planning run `run_id` of `repo` with its plan, or the last such run of `repo`."""
+    if run_id is not None:
+        run = _waiting(store, repo, run_id, ("planning",))
+        if not (step.run_dir(home, run.id) / plan.PLAN_FILE).exists():
+            raise RunError(f"run {run_id} has no plan yet")
+        return run
+    for run in reversed(store.runs("planning")):
+        if run.repo == str(repo) and (step.run_dir(home, run.id) / plan.PLAN_FILE).exists():
+            return run
+    raise RunError(f"no planning run in {repo} has a plan, `loop plan` makes one")
 
 
 def _waiting(store: Store, repo: Path, run_id: str | None, statuses: tuple[str, ...]) -> Run:

@@ -25,7 +25,6 @@ from agent_loop.store import DB_FILE, Store, StoreError
 logger = logging.getLogger(__name__)
 
 STUBS = {
-    "approve": "approve the plan and freeze it",
     "status": "show runs and their state",
     "stats": "show metrics of finished runs",
 }
@@ -48,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     _exit_on_termination()
     # Every command that works with runs first pauses the ones that died, so a run is never
     # left as running without an orchestrator.
-    if args.command in (*STUBS, "plan", "answer", "run", "resume"):
+    if args.command in (*STUBS, "plan", "answer", "approve", "run", "resume"):
         _reap(cfg)
     return args.handler(args, cfg)
 
@@ -103,6 +102,13 @@ def _parser() -> argparse.ArgumentParser:
         "run_id", nargs="?", help="the run to answer, the last planning or paused one by default"
     )
     answer.set_defaults(handler=_answer)
+    approve = commands.add_parser(
+        "approve", help="approve the plan of a run: its tasks become the tasks of the run"
+    )
+    approve.add_argument(
+        "run_id", nargs="?", help="the run to approve, the last planning one with a plan by default"
+    )
+    approve.set_defaults(handler=_approve)
     run = commands.add_parser("run", help="run the tasks of a cards file on the current branch")
     run.add_argument(
         "tasks", type=Path, help="JSON list of title, goal, criteria, files, tests, decisions"
@@ -139,6 +145,10 @@ def _plan(args: argparse.Namespace, cfg: config.Config) -> int:
 
 def _answer(args: argparse.Namespace, cfg: config.Config) -> int:
     return _work(cfg, lambda: runner.answer(cfg, args.run_id))
+
+
+def _approve(args: argparse.Namespace, cfg: config.Config) -> int:
+    return _work(cfg, lambda: runner.approve(cfg, args.run_id))
 
 
 def _run(args: argparse.Namespace, cfg: config.Config) -> int:

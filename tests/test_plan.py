@@ -1,10 +1,8 @@
 import json
-from pathlib import Path
 
 import pytest
 
 from agent_loop import plan, runner
-from agent_loop.store import Store
 
 TASK = {
     "title": "Schema of dishes",
@@ -85,15 +83,9 @@ def test_tasks_of_a_plan_are_the_tasks_of_the_run(tmp_path):
     plan.save(run_dir, PLAN)
     cards = tmp_path / "cards.json"
     cards.write_text(json.dumps(plan.load(run_dir)["tasks"]))
-    store = Store(tmp_path / "loop.db")
-    try:
-        run_id = store.create_run(Path("/work/service"), "admin-dishes", "abc123")
 
-        plan.add_tasks(store, run_id, plan.load(run_dir))
+    tasks = plan.cards(plan.load(run_dir))
 
-        tasks = [(task.title, task.card) for task in store.tasks(run_id)]
-    finally:
-        store.close()
     assert [title for title, _ in tasks] == ["Schema of dishes", "Router of dishes"]
     # The tasks of `plan.json` go to `loop run` as they are.
     assert runner.load_tasks(cards) == tasks
