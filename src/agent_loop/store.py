@@ -171,8 +171,8 @@ class Run:
     updated_at: str
     # None for a run created before the column.
     base: str | None
-    # None until the plan is approved, and for a run of a cards file, which the loop took before
-    # plans.
+    # Of `plan.json`: the plan the operator has approved, then the one each replan leaves. None
+    # until the plan is approved, and for a run of a cards file, which the loop took before plans.
     plan_hash: str | None
 
 
@@ -303,10 +303,12 @@ class Store:
         tasks: list[tuple[str, dict]],
         modified: dict[int, tuple[str, dict]],
         dropped: list[int],
+        plan_hash: str,
     ) -> None:
         """Drop the task in replan `task_id` for `tasks`, (title, card) pairs in their order,
         which take its place before the tasks after it; the pending tasks of `modified` get
-        their new title and card by their ids, those of `dropped` are dropped. All at once.
+        their new title and card by their ids, those of `dropped` are dropped, and the run gets
+        the hash of the plan they make. All at once.
 
         The tasks after the replanned one are pending: they have no WIP refs, which go by the
         number of the task, so their numbers move up to make room.
@@ -338,6 +340,7 @@ class Store:
                     for number, (title, card) in enumerate(tasks, start=seq + 1)
                 ],
             )
+            self._conn.execute("UPDATE runs SET plan_hash = ? WHERE id = ?", (plan_hash, run_id))
 
     def set_tests(self, task_id: int, count: int) -> None:
         self._conn.execute("UPDATE tasks SET tests = ? WHERE id = ?", (count, task_id))

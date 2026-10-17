@@ -171,6 +171,63 @@ def test_plan_critique_lists_the_findings():
     )
 
 
+@pytest.mark.parametrize(
+    ("committed", "new", "replaced", "done"),
+    [
+        (
+            0,
+            ["Prices", "Schema"],
+            "has replaced it with tasks 1 to 2",
+            "No task of the plan is committed yet.",
+        ),
+        (
+            1,
+            ["Prices"],
+            "has replaced it with task 2",
+            "The tasks before task 2 are committed: they stay as they are, review the plan from"
+            " task 2 on.",
+        ),
+        (1, [], "has dropped it with no tasks in its place", "The tasks before task 2"),
+    ],
+    ids=["nothing committed", "one new task", "no new tasks"],
+)
+def test_replan_critic_prompt_tells_what_the_replan_has_done(committed, new, replaced, done):
+    task = dataclasses.replace(TASK, status="replan", reason="too_big")
+    left = dataclasses.replace(TASK, seq=3, title="Docs", status="pending")
+    plan = {"goal": "Блюда", "criteria": [], "decisions": [], "tasks": []}
+    replan = {
+        "why": "Two modules",
+        "tasks": [{"title": title} for title in new],
+        "remaining": [{"task": 3, "action": "drop", "why": "The prices cover it"}],
+    }
+
+    prompt = prompts.replan_critic(plan, "Dishes", SETTINGS, committed, task, [left], replan)
+
+    assert prompt.startswith(prompts.plan_critic(plan, "Dishes", SETTINGS).split("## Size")[0])
+    assert (
+        "## Replanning\n\n"
+        "The operator has approved the plan and the run carries it out. Its task"
+        " 'Prompt of a task' has gone back to the planner: its session has found that the task"
+        f" does not fit in one commit. The planner {replaced}: Two modules\n\n{done}"
+    ) in prompt
+    assert (
+        "What the planner has done with the tasks left after it:\n"
+        "- 'Docs': drop, The prices cover it\n\n## Size"
+    ) in prompt
+
+
+def test_replan_critique_lists_the_findings():
+    findings = [{"blocking": True, "tasks": [2], "problem": "No schema", "scenario": "It fails"}]
+
+    prompt = prompts.replan_critique(findings)
+
+    assert "say why in its `why`: no critic reviews it again" in prompt
+    assert prompt.endswith(
+        "## Finding 1, blocking, tasks 2\n\nNo schema\n\nWhat goes wrong: It fails\n\n"
+        "Answer as before, in full."
+    )
+
+
 def test_replanner_prompt_has_the_plan_the_task_and_the_tasks_left():
     task = dataclasses.replace(TASK, status="replan", reason="too_big", card={**CARD, "files": []})
     left = dataclasses.replace(TASK, seq=3, title="Docs", status="pending", card={"goal": "Docs"})

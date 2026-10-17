@@ -8,7 +8,8 @@ A card (`Task.card`) holds `goal` (a string) and `criteria`, `files` (where to s
 (that must pass) and `decisions` (of the plan for this task), each a list of strings, possibly
 empty. The planner gets the request of the operator and proposes the tasks of a run, see
 `plan`; when a task goes back to the planner, the replanner gets the plan, what the task has left
-and the tasks after it. Prompts are in English whatever the language of the docs.
+and the tasks after it, and a critic reviews the plan its answer leaves. Prompts are in English
+whatever the language of the docs.
 """
 
 from __future__ import annotations
@@ -148,6 +149,55 @@ def _plan_size(settings: Settings) -> list[str]:
 def plan_critic(plan: dict, request: str | None, settings: Settings) -> str:
     """The prompt of the critic of `plan`, made for `request`; None when the operator gave the
     request in a conversation with the planner."""
+    return _critic(plan, request, settings, [])
+
+
+def replan_critic(
+    plan: dict,
+    request: str | None,
+    settings: Settings,
+    committed: int,
+    task: Task,
+    left: list[Task],
+    replan: dict,
+) -> str:
+    """The prompt of the critic of `plan`, the approved plan of a run for `request` as the
+    answer `replan` of a replanning session leaves it after `task` has gone back to the planner.
+
+    The plan begins with the `committed` tasks of the run; `left` are the tasks that were left
+    after `task`, the actions of `replan` go by their numbers.
+    """
+    first, new = committed + 1, len(replan["tasks"])
+    if new == 0:
+        replaced = "has dropped it with no tasks in its place"
+    elif new == 1:
+        replaced = f"has replaced it with task {first}"
+    else:
+        replaced = f"has replaced it with tasks {first} to {first + new - 1}"
+    titles = {t.seq: t.title for t in left}
+    actions = [f"- {titles[e['task']]!r}: {e['action']}, {e['why']}" for e in replan["remaining"]]
+    if committed:
+        done = (
+            f"The tasks before task {first} are committed: they stay as they are, review the"
+            f" plan from task {first} on."
+        )
+    else:
+        done = "No task of the plan is committed yet."
+    sections = [
+        "## Replanning",
+        "The operator has approved the plan and the run carries it out. Its task"
+        f" {task.title!r} has gone back to the planner: {REPLAN_REASONS[task.reason]}. The"
+        f" planner {replaced}: {replan['why']}",
+        done,
+    ]
+    if actions:
+        sections.append(
+            "What the planner has done with the tasks left after it:\n" + "\n".join(actions)
+        )
+    return _critic(plan, request, settings, sections)
+
+
+def _critic(plan: dict, request: str | None, settings: Settings, replanning: list[str]) -> str:
     if request is None:
         sections = [
             "# Request of the operator",
@@ -159,6 +209,7 @@ def plan_critic(plan: dict, request: str | None, settings: Settings) -> str:
     sections += [
         "# Plan",
         _fenced(json.dumps(plan, ensure_ascii=False, indent=2), "json"),
+        *replanning,
         *_plan_size(settings),
         "## Language",
         f"Write the findings in {_language(settings)}: the operator reads them.",
@@ -168,13 +219,39 @@ def plan_critic(plan: dict, request: str | None, settings: Settings) -> str:
 
 def plan_critique(findings: list[dict]) -> str:
     """The prompt that gives the planner session the `findings` of the critic of its plan."""
-    sections = [
-        "# Findings of the critic",
-        "A critic who has not seen this conversation has reviewed your plan. A blocking finding"
-        " says the plan fails as written: fix it. Weigh the other findings and fix what is"
-        " worth it. Where you disagree with a finding, keep the plan and say why in the"
-        " `decisions` of the plan: the critic reviews the plan again.",
-    ]
+    return "\n\n".join(
+        [
+            "# Findings of the critic",
+            "A critic who has not seen this conversation has reviewed your plan. A blocking"
+            " finding says the plan fails as written: fix it. Weigh the other findings and fix"
+            " what is worth it. Where you disagree with a finding, keep the plan and say why in"
+            " the `decisions` of the plan: the critic reviews the plan again.",
+            *_findings(findings),
+            "Answer as before, with the whole plan.",
+        ]
+    )
+
+
+def replan_critique(findings: list[dict]) -> str:
+    """The prompt that gives the replanning session the `findings` of the critic of the plan as
+    its answer leaves it."""
+    return "\n\n".join(
+        [
+            "# Findings of the critic",
+            "A critic who has not seen this conversation has reviewed the plan as your answer"
+            " leaves it. Its numbers of the tasks are their places in that plan: the committed"
+            " tasks, your new tasks, then the tasks left after them. A blocking finding says the"
+            " plan fails as written: fix it. Weigh the other findings and fix what is worth it."
+            " Where you disagree with a finding, keep your answer and say why in its `why`: no"
+            " critic reviews it again, the operator reads it.",
+            *_findings(findings),
+            "Answer as before, in full.",
+        ]
+    )
+
+
+def _findings(findings: list[dict]) -> list[str]:
+    sections = []
     for number, finding in enumerate(findings, start=1):
         tasks = ", ".join(str(task) for task in finding["tasks"])
         about = f"tasks {tasks}" if tasks else "the whole plan"
@@ -182,8 +259,7 @@ def plan_critique(findings: list[dict]) -> str:
         sections += [f"## Finding {number}, {kind}, {about}", finding["problem"]]
         if finding["scenario"].strip():
             sections.append(f"What goes wrong: {finding['scenario']}")
-    sections.append("Answer as before, with the whole plan.")
-    return "\n\n".join(sections)
+    return sections
 
 
 def plan_errors(errors: list[str]) -> str:

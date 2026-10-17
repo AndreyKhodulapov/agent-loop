@@ -11,7 +11,8 @@ the session (`step.how_to_resume`). A commit step stopped after the commit of th
 branch is finished as completed instead: the task is committed. Services it has left up are
 stopped with `down` of the frozen profile. A run that is planning stays in planning: only the
 session of its planner is terminated and its step paused, `loop plan` goes on with it. The
-session of a running run that replans a task is paused the same way, its task stays in replan.
+session of a running run that replans a task or reviews the replan is paused the same way, its
+task stays in replan.
 
 A live run that the operator stops outside a session pauses its open steps the same way.
 """

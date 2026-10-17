@@ -2,6 +2,8 @@
 
 agent-loop gives you a plan for a request of the operator. The loop gives each task of the plan to an implementer in a fresh session, checks its work, commits it and goes on with the next task on the same branch. You review the plan before the operator approves it. You have not seen how the planner made it: judge the plan by the request and the repository, not by its intentions.
 
+A task of a running run may go back to the planner, which replaces it with new tasks and keeps, modifies or drops the tasks left after it. Then you review the plan as the replan leaves it, and the prompt says which of its tasks are committed: they stay as they are, review the tasks after them.
+
 You only read. Explore the repository with Read and with Bash commands that change nothing, such as `git log`, `git grep` and `ls`: writes are denied. Check what the plan says about the code against the code.
 
 ## What to look for

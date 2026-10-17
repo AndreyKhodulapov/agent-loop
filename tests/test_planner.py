@@ -9,6 +9,7 @@ from test_plan import PLAN, TASK
 from agent_loop import (
     agent,
     budget,
+    export,
     git,
     guard,
     implement,
@@ -456,7 +457,8 @@ def replanned(*remaining, tasks=(TASK | {"title": "Prices"},)):
 def test_task_gone_back_is_replanned_in_a_read_only_session(replanning, monkeypatch):
     env = replanning
     modified = {"task": 2, "action": "modify", "why": "Prices", "card": TASK | {"title": "Rt"}}
-    env.script(monkeypatch, replanned(modified, tasks=[TASK | {"title": t} for t in "AB"]))
+    new = [TASK | {"title": t} for t in "AB"]
+    env.script(monkeypatch, replanned(modified, tasks=new), criticized(finding(blocking=False)))
 
     assert replan(env) is None
 
@@ -467,7 +469,7 @@ def test_task_gone_back_is_replanned_in_a_read_only_session(replanning, monkeypa
         (3, "B", "pending"),
         (4, "Rt", "pending"),
     ]
-    [session] = env.sessions
+    session, critic = env.sessions
     assert session.schema == planner.REPLAN_SCHEMA
     assert session.system_files == prompts.system_files("replanner", SETTINGS)
     assert (session.model, session.tools) == (SETTINGS.model_planner, "Bash,Read")
@@ -482,43 +484,105 @@ def test_task_gone_back_is_replanned_in_a_read_only_session(replanning, monkeypa
     repo = Path(env.store.run(env.run_id).repo)
     assert git.git(repo, "status", "--porcelain") == ""
     assert git.git(repo, "show", f"{ref}:app.py") == "x = 2\n"
-    [replan_step] = env.store.planner_steps(env.run_id)
+    replan_step, critique_step = env.store.planner_steps(env.run_id)
     assert (replan_step.kind, replan_step.task_id) == ("replan", None)
+    assert (critique_step.kind, critique_step.session_id) == ("critique", critic.session_id)
+    # The critic reviews the plan the replan leaves before the store takes it.
+    replanned_plan = PLAN | {"tasks": [*new, TASK | {"title": "Rt"}]}
+    assert json.dumps(replanned_plan, ensure_ascii=False, indent=2) in critic.prompt
+    assert "The planner has replaced it with tasks 1 to 2: Prices first" in critic.prompt
+    assert "- 'Router of dishes': modify, Prices" in critic.prompt
+    assert f"```markdown\n{REQUEST}\n```" in critic.prompt
+    assert (critic.model, critic.schema) == (SETTINGS.model_critic, planner.CRITIQUE_SCHEMA)
+    assert critic.system_files == prompts.system_files("plan_critic", SETTINGS)
+    assert guard.WRITE_RULE in json.loads(critic.settings.read_text())["permissions"]["deny"]
+    assert plan.load(env.run_dir) == replanned_plan
+    assert env.store.run(env.run_id).plan_hash == plan.digest(env.run_dir)
+    critique = json.loads((env.run_dir / planner.CRITIQUE_FILE).read_text())
+    assert critique == {"findings": [finding(blocking=False)]}
+    plan_md = (env.run_dir / export.PLAN_MD).read_text()
+    assert "### 3. Rt" in plan_md
+    assert "### Not blocking\n\n- No schema (tasks 2)" in plan_md
 
 
 def test_replan_with_errors_goes_back_to_its_session(replanning, monkeypatch):
     env = replanning
-    env.script(monkeypatch, replanned(tasks=REPEATED), replanned())
+    env.script(monkeypatch, replanned(tasks=REPEATED), replanned(), criticized())
 
     assert replan(env) is None
 
-    first, second = env.sessions
+    first, second, critic = env.sessions
     assert (second.session_id, second.resume) == (first.session_id, True)
     assert "- 2 tasks have the title 'Router of dishes'" in second.prompt
+    assert critic.schema == planner.CRITIQUE_SCHEMA
     assert [t.title for t in env.store.tasks(env.run_id)][1:] == ["Prices", "Router of dishes"]
 
 
 def test_replan_that_keeps_its_errors_stops_the_run(replanning, monkeypatch):
     env = replanning
-    env.script(monkeypatch, *[replanned(tasks=REPEATED)] * (planner.RETRIES + 1))
+    # The answer the critic has found blocking keeps its errors once fixed.
+    rejected = [replanned(tasks=REPEATED)] * (planner.RETRIES + 1)
+    env.script(monkeypatch, replanned(), criticized(finding()), *rejected)
     before = env.store.tasks(env.run_id)
 
     assert replan(env) == implement.Stop(planner.REJECTED)
 
     assert env.store.tasks(env.run_id) == before
+    assert not (env.run_dir / planner.CRITIQUE_FILE).exists()
+
+    env.script(monkeypatch, replanned(), criticized())
+    assert replan(env) is None
+    first, anew, critic = env.sessions[0], *env.sessions[-2:]
+    assert (anew.prompt, anew.resume) == (first.prompt, False)
+    # The answer of the new session gets a critic of its own.
+    assert critic.schema == planner.CRITIQUE_SCHEMA
+
+
+def test_blocking_findings_of_the_critic_go_back_to_the_replanner_once(
+    replanning, monkeypatch, caplog
+):
+    env = replanning
+    blocking = finding()
+    fixed = [TASK | {"title": "Schema first"}]
+    env.script(
+        monkeypatch,
+        replanned(),
+        criticized(blocking, finding(blocking=False)),
+        replanned(tasks=REPEATED),
+        replanned(tasks=fixed),
+    )
+
+    assert replan(env) is None
+
+    first, _, fixing, retried = env.sessions
+    assert (fixing.session_id, fixing.resume) == (first.session_id, True)
+    assert fixing.prompt == prompts.replan_critique([blocking, finding(blocking=False)])
+    assert fixing.schema == planner.REPLAN_SCHEMA
+    # The errors of the fixed answer go back as any others, no critic reviews it again.
+    assert (retried.session_id, retried.schema) == (first.session_id, planner.REPLAN_SCHEMA)
+    assert [t.title for t in env.store.tasks(env.run_id)][1:] == [
+        "Schema first",
+        "Router of dishes",
+    ]
+    critique = json.loads((env.run_dir / planner.CRITIQUE_FILE).read_text())
+    assert critique == {"findings": [blocking, finding(blocking=False)]}
+    plan_md = (env.run_dir / export.PLAN_MD).read_text()
+    assert "## Findings of the critic\n\nThe replanner has fixed the plan" in plan_md
+    assert "no critic has seen the fix" in caplog.text
 
 
 @pytest.mark.parametrize(
-    ("outcome", "applied"),
+    ("outcomes", "applied"),
     [
-        (paused(implement.INTERRUPT), False),
-        (replace(replanned(), reason=implement.INTERRUPT), True),
+        ([paused(implement.INTERRUPT)], False),
+        ([replace(replanned(), reason=implement.INTERRUPT)], False),
+        ([replanned(), replace(criticized(), reason=implement.INTERRUPT)], True),
     ],
-    ids=["in the session", "after the answer"],
+    ids=["in the session", "after the answer", "after the critic"],
 )
-def test_operator_stop_stops_the_run(replanning, monkeypatch, outcome, applied):
+def test_operator_stop_stops_the_run(replanning, monkeypatch, outcomes, applied):
     env = replanning
-    env.script(monkeypatch, outcome)
+    env.script(monkeypatch, *outcomes)
 
     assert replan(env) == implement.Stop(implement.INTERRUPT)
 
@@ -531,12 +595,39 @@ def test_replanning_stopped_by_the_operator_goes_on_in_its_session(replanning, m
     env.script(monkeypatch, paused(implement.INTERRUPT))
     assert replan(env) == implement.Stop(implement.INTERRUPT)
 
-    env.script(monkeypatch, replanned())
+    env.script(monkeypatch, replanned(), criticized())
     assert replan(env) is None
 
-    first, second = env.sessions
+    first, second, _ = env.sessions
     assert (second.session_id, second.resume) == (first.session_id, True)
     assert (second.prompt, second.schema) == (prompts.PLANNER_RESUMED, planner.REPLAN_SCHEMA)
+
+
+def test_answer_the_run_has_left_goes_to_the_critic(replanning, monkeypatch):
+    env = replanning
+    env.script(monkeypatch, replace(replanned(), reason=implement.INTERRUPT))
+    assert replan(env) == implement.Stop(implement.INTERRUPT)
+
+    env.script(monkeypatch, criticized())
+    assert replan(env) is None
+
+    _, critic = env.sessions
+    assert critic.schema == planner.CRITIQUE_SCHEMA
+    assert env.store.tasks(env.run_id)[0].status == "dropped"
+
+
+def test_failed_critic_of_the_replan_reviews_it_anew_next_time(replanning, monkeypatch):
+    env = replanning
+    env.script(monkeypatch, replanned(), step.Outcome("failed", "API error", None, 0))
+    with pytest.raises(planner.PlanError, match="critic of the replan has failed: API error"):
+        replan(env)
+
+    env.script(monkeypatch, criticized())
+    assert replan(env) is None
+
+    _, failed, critic = env.sessions
+    assert (critic.prompt, critic.resume) == (failed.prompt, False)
+    assert critic.session_id != failed.session_id
 
 
 @pytest.mark.parametrize(
@@ -546,14 +637,31 @@ def test_replanning_stopped_by_the_operator_goes_on_in_its_session(replanning, m
 )
 def test_paused_replanning_goes_on(replanning, monkeypatch, pause, resumed):
     env = replanning
-    env.script(monkeypatch, pause, replanned())
+    env.script(monkeypatch, pause, replanned(), criticized())
 
     assert replan(env) is None
 
-    first, second = env.sessions
+    first, second, _ = env.sessions
     assert (second.session_id == first.session_id) == second.resume == resumed
     assert second.prompt == (prompts.PLANNER_RESUMED if resumed else first.prompt)
     assert second.schema == planner.REPLAN_SCHEMA
+
+
+@pytest.mark.parametrize(
+    ("pause", "resumed"),
+    [(paused("timeout"), True), (paused("context", 125_000), False)],
+    ids=["timeout", "full context"],
+)
+def test_paused_critic_of_the_replan_goes_on(replanning, monkeypatch, pause, resumed):
+    env = replanning
+    env.script(monkeypatch, replanned(), pause, criticized())
+
+    assert replan(env) is None
+
+    _, first, second = env.sessions
+    assert (second.session_id == first.session_id) == second.resume == resumed
+    assert second.prompt == (prompts.CRITIC_RESUMED if resumed else first.prompt)
+    assert second.schema == planner.CRITIQUE_SCHEMA
 
 
 def test_replanner_that_keeps_stopping_fails_the_run(replanning, monkeypatch):

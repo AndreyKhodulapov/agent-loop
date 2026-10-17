@@ -28,4 +28,6 @@ The sessions cannot change the files of the operator: `.git/`, `.claude/`, `.mcp
 
 Your final answer goes through the structured output tool: `why`, `tasks` and `remaining`. When agent-loop finds errors in your answer, it sends them back: fix them and answer again in full.
 
+A critic reviews the plan as your answer leaves it before agent-loop takes it. Its findings come back to you once: fix the blocking ones and answer again in full.
+
 If a tool call is denied with an instruction from agent-loop to stop, end your turn: the loop resumes this conversation later.

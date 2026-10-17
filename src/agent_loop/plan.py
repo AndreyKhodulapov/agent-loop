@@ -8,7 +8,7 @@ as `prompts` takes it: the `goal` and the lists `criteria`, `files`, `tests`, `d
 `validate` finds what the schema cannot tell: its errors go back to the planner session.
 `validate_replan` does the same for the answer of a planner that replans the tasks left in a run.
 `loop approve` keeps the `digest` of `plan.json` with the run: a run starts only from the file
-the operator has approved.
+the operator has approved. A replan rewrites the file with the tasks it leaves, and the digest.
 """
 
 from __future__ import annotations

@@ -30,6 +30,7 @@ LABELS = {
         "of_tasks": "tasks",
         "scenario": "Scenario",
         "no_findings": "The critic has found nothing.",
+        "fixed": "The replanner has fixed the plan after these findings, no critic has seen it.",
     },
     "ru": {
         "plan": "План",
@@ -46,15 +47,22 @@ LABELS = {
         "of_tasks": "задачи",
         "scenario": "Сценарий",
         "no_findings": "Критик ничего не нашёл.",
+        "fixed": "Перепланировщик исправил план после этих находок, исправление критик не видел.",
     },
 }
 
 
 def write_plan(
-    run_dir: Path, run: Run, plan: dict, findings: list[dict], settings: Settings
+    run_dir: Path,
+    run: Run,
+    plan: dict,
+    findings: list[dict],
+    settings: Settings,
+    fixed: bool = False,
 ) -> list[Path]:
-    """Render `PLAN.md` of `plan` with the `findings` of its critic; returns where it is."""
-    text = render_plan(run, plan, findings, settings.doc_lang)
+    """Render `PLAN.md` of `plan` with the `findings` of its critic, which a replanner has
+    `fixed` the plan after; returns where it is."""
+    text = render_plan(run, plan, findings, settings.doc_lang, fixed)
     paths = [run_dir / PLAN_MD]
     if settings.knowledge_dir is not None:
         history = settings.knowledge_dir / Path(run.repo).name / f"{run.created_at[:10]}_{run.id}"
@@ -65,7 +73,7 @@ def write_plan(
     return paths
 
 
-def render_plan(run: Run, plan: dict, findings: list[dict], lang: str) -> str:
+def render_plan(run: Run, plan: dict, findings: list[dict], lang: str, fixed: bool = False) -> str:
     labels = LABELS[lang]
     lines = [f"# {labels['plan']}", "", labels["run"].format(run=run.id, branch=run.branch), ""]
     lines += [f"## {labels['goal']}", "", plan["goal"], ""]
@@ -77,6 +85,8 @@ def render_plan(run: Run, plan: dict, findings: list[dict], lang: str) -> str:
         for key in ("criteria", "files", "tests", "decisions"):
             lines += _section(f"{labels[key]}:", task[key])
     lines += [f"## {labels['findings']}", ""]
+    if fixed:
+        lines += [labels["fixed"], ""]
     if not findings:
         lines += [labels["no_findings"], ""]
     for title, blocking in ((labels["blocking"], True), (labels["other"], False)):

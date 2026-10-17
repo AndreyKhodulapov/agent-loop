@@ -237,7 +237,7 @@ class Replans:
             self.calls.append((task.seq, previous))
             stop = next(stops)
             if stop is None:
-                store.replan(task.id, [("New", CARD)], {}, [])
+                store.replan(task.id, [("New", CARD)], {}, [], "beef")
             return stop
 
         monkeypatch.setattr(planner, "replan", replan)

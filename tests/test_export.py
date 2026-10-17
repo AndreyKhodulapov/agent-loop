@@ -72,3 +72,15 @@ def test_plan_md_is_in_the_language_of_the_docs():
     assert "Прогон `0a1b2c3d` на ветке `admin-dishes`." in text
     assert "## Критерии приёмки" in text
     assert text.endswith("## Находки критика\n\nКритик ничего не нашёл.\n")
+
+
+def test_plan_md_tells_the_findings_were_fixed_after_the_critic():
+    findings = [{"blocking": True, "tasks": [1], "problem": "No schema", "scenario": "It fails"}]
+
+    text = export.render_plan(RUN, PLAN, findings, "ru", fixed=True)
+
+    assert (
+        "## Находки критика\n\n"
+        "Перепланировщик исправил план после этих находок, исправление критик не видел.\n\n"
+        "### Блокирующие\n\n- No schema"
+    ) in text

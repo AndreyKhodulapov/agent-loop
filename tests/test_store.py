@@ -277,6 +277,7 @@ def test_replan_puts_new_tasks_in_place_of_the_task(db, run_id):
         [("prices", CARD), ("big rest", {})],
         {router.id: ("router v2", {"goal": "v2"})},
         [docs.id],
+        "beef",
     )
 
     tasks = db.tasks(run_id)
@@ -297,6 +298,7 @@ def test_replan_puts_new_tasks_in_place_of_the_task(db, run_id):
     assert (tasks[2].card, tasks[5].card) == (CARD, {"goal": "v2"})
     moves = [(t.task_id, t.dst) for t in db.transitions(run_id)][-2:]
     assert moves == [(big.id, "dropped"), (docs.id, "dropped")]
+    assert db.run(run_id).plan_hash == "beef"
 
 
 def test_failed_replan_changes_nothing(db, run_id):
@@ -304,9 +306,10 @@ def test_failed_replan_changes_nothing(db, run_id):
     before = db.tasks(run_id)
 
     with pytest.raises(store.StoreError, match="committed -> dropped is not allowed"):
-        db.replan(big.id, [("prices", {})], {docs.id: ("docs v2", {})}, [before[0].id])
+        db.replan(big.id, [("prices", {})], {docs.id: ("docs v2", {})}, [before[0].id], "beef")
 
     assert db.tasks(run_id) == before
+    assert db.run(run_id).plan_hash == "f00d"
 
 
 @pytest.mark.parametrize(
