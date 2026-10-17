@@ -36,18 +36,26 @@ def commit(repo, message):
     subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
 
 
-@pytest.mark.parametrize("role", ["implementer", "fixer"])
-def test_system_files_of_a_role(role, tmp_path):
+@pytest.mark.parametrize(
+    ("role", "rules"),
+    [
+        ("implementer", ["session.md", "implementer.md", "AGENTS.md"]),
+        ("fixer", ["session.md", "fixer.md", "AGENTS.md"]),
+        # The planner has no task to work on and commit.
+        ("planner", ["planner.md", "AGENTS.md"]),
+    ],
+)
+def test_system_files_of_a_role(role, rules, tmp_path):
     context = tmp_path / "CLAUDE.md"
     context.write_text("Project context.")
 
     files = prompts.system_files(role, Settings(context_file=context))
 
-    assert [path.name for path in files] == ["session.md", f"{role}.md", "AGENTS.md", "CLAUDE.md"]
+    assert [path.name for path in files] == [*rules, "CLAUDE.md"]
     assert all(path.is_file() for path in files)
     root = Path(__file__).parents[1]
-    assert files[2].read_text() == (root / "AGENTS.md").read_text()
-    assert prompts.system_files(role, Settings()) == files[:3]
+    assert files[-2].read_text() == (root / "AGENTS.md").read_text()
+    assert prompts.system_files(role, Settings()) == files[:-1]
 
 
 def test_answer_matches_the_schema():
@@ -100,6 +108,20 @@ def test_implementer_prompt_has_the_card_and_the_rules():
         "## Language\n\nWrite code comments, docstrings and documentation in Russian."
         " The commit message is in English.\n\n"
         "## Previous tasks of the run\n\nM app.py: run"
+    )
+
+
+def test_planner_prompt_has_the_request_and_the_rules():
+    request = "# Dishes\n\nAdd the admin of dishes:\n```\nGET /dishes\n```\n"
+
+    prompt = prompts.planner(request, SETTINGS)
+
+    assert prompt == (
+        "# Request of the operator\n\n"
+        f"````markdown\n{request.rstrip()}\n````\n\n"
+        "## Size\n\nThe work of one task, tests included, fits in 800 changed lines."
+        " A task over 1200 lines comes back to the planner.\n\n"
+        "## Language\n\nWrite the plan in Russian: the operator reads and approves it."
     )
 
 

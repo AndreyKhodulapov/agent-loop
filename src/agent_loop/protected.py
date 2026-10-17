@@ -44,6 +44,15 @@ HOOK_CONFIGS = (
     "lefthook-local.yml",
     "lefthook-local.yaml",
 )
+# Files of the operator in the repository that run code outside the sandbox: git hooks and
+# config, the CLI settings, git hook managers, IDE and devcontainer settings. Neither the
+# sessions nor the gate commands write them.
+OPERATOR_FILES = (".git", *PATHS, *HOOK_CONFIGS, ".vscode", ".idea", ".devcontainer")
+# Names of secrets anywhere in the repository, closed to reading too.
+SECRETS = ("*.pem", "*.key")
+# The settings of the repository with its secrets: closed to the sessions, while the tests of the
+# gate commands read them.
+ENV_FILES = ".env*"
 COPY_DIR = "protected"
 
 

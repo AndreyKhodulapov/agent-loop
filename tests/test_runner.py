@@ -74,13 +74,13 @@ def commits(notes="", actions=()):
             store.move_task(task.id, "implementing")
         answer = {"status": "done", "summary": "", "commit_message": "", "notes_for_next": notes}
         answer["operator_actions"] = list(actions)
-        step_id = store.start_step(task.id, implement.IMPLEMENT, checkpoint, [], "s")
+        step_id = store.start_step(task.run_id, task.id, implement.IMPLEMENT, checkpoint, [], "s")
         store.finish_step(step_id, "completed", {"reason": None, "answer": answer})
         store.move_task(task.id, "gating")
         (repo / f"task{task.seq}.py").write_text("def helper():\n    pass\n")
         subprocess.run(["git", "add", "."], cwd=repo, check=True)
         subprocess.run(["git", "commit", "-q", "-m", task.title], cwd=repo, check=True)
-        step_id = store.start_step(task.id, implement.COMMIT, checkpoint, [])
+        step_id = store.start_step(task.run_id, task.id, implement.COMMIT, checkpoint, [])
         store.finish_step(step_id, "completed", {"commit": git.head(repo)})
         store.move_task(task.id, "committed")
 

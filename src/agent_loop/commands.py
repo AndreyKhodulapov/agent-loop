@@ -183,20 +183,9 @@ def _sandbox(repo: Path, tmp: Path) -> str:
 
     home = Path.home().resolve()
     home_secrets = " ".join(f"(subpath {_string(home / path)})" for path in HOME_SECRETS)
-    # Files of the operator in the repository that run code outside the sandbox: git hooks and
-    # config, the CLI settings, git hook managers, IDE and devcontainer settings.
-    operator_files = (
-        ".git",
-        *protected.PATHS,
-        *protected.HOOK_CONFIGS,
-        ".vscode",
-        ".idea",
-        ".devcontainer",
+    operator = " ".join(
+        f'(regex #"^{root}/{_pattern(path)}(/|$)")' for path in protected.OPERATOR_FILES
     )
-    # Closed to reading as in the sessions. `.env*` is not: tests read their settings from it, the
-    # gate masks its values instead.
-    repo_secrets = ("*.pem", "*.key")
-    operator = " ".join(f'(regex #"^{root}/{_pattern(path)}(/|$)")' for path in operator_files)
     # The base of the profile of `@anthropic-ai/sandbox-runtime` 0.0.79, the sandbox of the CLI
     # (Apache-2.0): what a process needs to run, and nothing that reaches other processes -
     # LaunchServices, Apple Events, preferences of other apps, the arguments of other processes.
@@ -305,12 +294,14 @@ def _sandbox(repo: Path, tmp: Path) -> str:
 (allow network-inbound (local ip "*:*"))
 (allow network-outbound (remote ip "localhost:*"))
 (allow file-read*)
-(deny file-read* {home_secrets} {anywhere(repo_secrets)})
+; Closed to reading as in the sessions. `.env*` is not: tests read their settings from it, the
+; gate masks its values instead.
+(deny file-read* {home_secrets} {anywhere(protected.SECRETS)})
 (allow file-write* (subpath {_string(repo)}) (subpath {_string(tmp)})
   (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (regex #"^/dev/fd/"))
 ; `.env*` belongs to the operator too. A secret renamed or linked under another name would be
 ; readable.
-(deny file-write* {operator} {anywhere((*repo_secrets, ".env*"))})
+(deny file-write* {operator} {anywhere((*protected.SECRETS, protected.ENV_FILES))})
 """
 
 

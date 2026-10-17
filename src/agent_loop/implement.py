@@ -248,7 +248,12 @@ class _Task:
         if upcoming.session_id is not None:
             session = replace(session, session_id=upcoming.session_id, resume=True)
         step_id = self.store.start_step(
-            self.task.id, upcoming.kind, self.checkpoint, self.untracked, session.session_id
+            self.run.id,
+            self.task.id,
+            upcoming.kind,
+            self.checkpoint,
+            self.untracked,
+            session.session_id,
         )
         with log.scope(stage=upcoming.kind):
             return step.run(session, self.cfg, self.store, self.run.id, step_id)
@@ -287,7 +292,9 @@ class _Task:
 
     def _gate(self) -> gates.Verdict:
         """Check the work of the task; the verdict is kept in the detail of a gate step."""
-        step_id = self.store.start_step(self.task.id, GATE, self.checkpoint, self.untracked)
+        step_id = self.store.start_step(
+            self.run.id, self.task.id, GATE, self.checkpoint, self.untracked
+        )
         with log.scope(stage=GATE):
             verdict = gates.check(
                 self.repo,
@@ -343,7 +350,9 @@ class _Task:
         message = answer.commit_message
         if not gates.commit_message_ok(message):
             return self._ask_message(steps, message)
-        step_id = self.store.start_step(self.task.id, COMMIT, self.checkpoint, self.untracked)
+        step_id = self.store.start_step(
+            self.run.id, self.task.id, COMMIT, self.checkpoint, self.untracked
+        )
         with log.scope(stage=COMMIT):
             # The verdict may be from before the run stopped, and the operator may have moved
             # the branch since.

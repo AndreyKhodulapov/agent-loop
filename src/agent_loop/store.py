@@ -122,6 +122,32 @@ MIGRATIONS = [
     """
     ALTER TABLE runs ADD COLUMN base TEXT;
     """,
+    # A step belongs to its run: a planner step has no task. SQLite cannot drop NOT NULL, so the
+    # table is rebuilt.
+    """
+    CREATE TABLE new_steps (
+        id INTEGER PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs (id),
+        task_id INTEGER REFERENCES tasks (id),
+        kind TEXT NOT NULL,
+        checkpoint TEXT NOT NULL,
+        session_id TEXT,
+        outcome TEXT,
+        detail TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        untracked TEXT NOT NULL DEFAULT '[]'
+    );
+    INSERT INTO new_steps (id, run_id, task_id, kind, checkpoint, session_id, outcome, detail,
+        started_at, finished_at, untracked)
+    SELECT steps.id, tasks.run_id, steps.task_id, steps.kind, steps.checkpoint,
+        steps.session_id, steps.outcome, steps.detail, steps.started_at, steps.finished_at,
+        steps.untracked
+    FROM steps JOIN tasks ON tasks.id = steps.task_id;
+    DROP TABLE steps;
+    ALTER TABLE new_steps RENAME TO steps;
+    CREATE INDEX steps_task ON steps (task_id);
+    """,
 ]
 
 
@@ -159,7 +185,9 @@ class Task:
 @dataclass(frozen=True)
 class Step:
     id: int
-    task_id: int
+    run_id: str
+    # None for a step of the planner.
+    task_id: int | None
     kind: str
     checkpoint: str
     session_id: str | None
@@ -202,8 +230,10 @@ class Store:
         try:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode = WAL")
-            self._conn.execute("PRAGMA foreign_keys = ON")
+            # Off while migrating: a rebuilt table is dropped under the references of other
+            # tables. `_migrate` checks the references before it commits.
             self._migrate()
+            self._conn.execute("PRAGMA foreign_keys = ON")
         except BaseException:
             self._conn.close()
             raise
@@ -266,22 +296,25 @@ class Store:
 
     def start_step(
         self,
-        task_id: int,
+        run_id: str,
+        task_id: int | None,
         kind: str,
         checkpoint: str,
         untracked: list[str],
         session_id: str | None = None,
     ) -> int:
-        """Record a step before it runs.
+        """Record a step of `run_id` before it runs; `task_id` is None for the planner.
 
         `checkpoint` is HEAD to roll back to if it never ends, `untracked` are the untracked
         files before it. The session id is stored up front, so a session that outlives a killed
         orchestrator can still be found and resumed.
         """
         cursor = self._conn.execute(
-            "INSERT INTO steps (task_id, kind, checkpoint, untracked, session_id, started_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO steps"
+            " (run_id, task_id, kind, checkpoint, untracked, session_id, started_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
+                run_id,
                 task_id,
                 kind,
                 checkpoint,
@@ -354,7 +387,7 @@ class Store:
         return [_step(row) for row in rows]
 
     def open_steps(self, run_id: str) -> list[Step]:
-        """Steps of the run that started and never finished."""
+        """Steps of the tasks of the run that started and never finished."""
         rows = self._conn.execute(
             "SELECT steps.* FROM steps JOIN tasks ON tasks.id = steps.task_id"
             " WHERE tasks.run_id = ? AND steps.finished_at IS NULL ORDER BY steps.id",
@@ -406,6 +439,10 @@ class Store:
             for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
                 self._conn.executescript(script)
                 self._conn.execute(f"PRAGMA user_version = {number}")
+            if version < len(MIGRATIONS):
+                broken = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+                if broken:
+                    raise StoreError(f"the migration breaks {len(broken)} references")
 
 
 def _check(allowed: dict[str, set[str]], what: str, src: str, dst: str) -> None:

@@ -624,7 +624,7 @@ def test_end_of_a_step_not_taken_is_taken_on_resume(
 ):
     for status in path:
         env.store.move_task(env.task_id, status)
-    step_id = env.store.start_step(env.task_id, kind, git.head(env.repo), [], "s-1")
+    step_id = env.store.start_step(env.run_id, env.task_id, kind, git.head(env.repo), [], "s-1")
     write("app.py", "x = 'fixed'\n")(env.repo)
     env.store.finish_step(step_id, outcome, detail)
     env.script(monkeypatch, (None, answered()))

@@ -1006,7 +1006,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Закоммичено человеком: `6883ca4`.
 
-### 4.1 Планировщик — разбиение утверждено 2026-10-16, 4.1а готово, дальше 4.1б
+### 4.1 Планировщик — разбиение утверждено 2026-10-16, 4.1а–б готовы, дальше 4.1в
 
 Решения человека (2026-10-16), по рекомендациям агента; записаны в план, раздел 3. Пять коммитов в `planner`, порядок обязателен: каждый опирается на предыдущий.
 
@@ -1038,7 +1038,31 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Предлагаемое сообщение коммита: `docs(plan): record the interactive planner spike`.
 
-#### 4.1б Модель плана и роль планировщика (~400–500 строк)
+#### 4.1б Модель плана и роль планировщика — готово 2026-10-17
+
+Сделано (+425/−57 строк с тестами, 15 файлов):
+1. `plan.py` (рядом с `prompts`, ниже `runner`):
+   - `PLAN_SCHEMA`: `goal`, `criteria`, `decisions`, `tasks` (`title` + пять полей карточки), всё обязательно, `additionalProperties: false`. `minItems` и пустые строки схема не ловит — это `validate` (поддержку ключевых слов схемы в `--json-schema` не проверяли).
+   - `validate(plan) -> list[str]`: нет цели, нет критериев плана, нет задач, повтор заголовка (без учёта пробелов по краям), задача без заголовка, цели, критериев; файлы в `files`, закрытые для сессии.
+   - Закрытые файлы — `_closed`: без учёта регистра, как в sandbox; путь нормализуется (`./.vscode/x` → `.vscode/x`). Префикс из `protected.OPERATOR_FILES`, имя по `protected.SECRETS` и `protected.ENV_FILES`.
+   - `save`/`load` — `runs/<run>/plan.json` через `files.write_atomic`; `add_tasks(store, run_id, plan)` — задачи плана в `store.add_task` по порядку.
+2. `protected`: `OPERATOR_FILES`, `SECRETS`, `ENV_FILES` перенесены из локальных переменных `commands._sandbox` — одно место для sandbox gate-команд и проверки плана. Профиль sandbox не изменился (кроме комментария, переехавшего внутрь профиля к правилу чтения).
+3. `store`, миграция 6: таблица `steps` пересобрана (`new_steps` → копия с `run_id` из `tasks` → `DROP` → `RENAME`), `steps.run_id NOT NULL`, `task_id` может быть `NULL`. `PRAGMA foreign_keys` теперь включается после `_migrate`: при включённых ключах `DROP TABLE steps` ломает ссылки `limit_snapshots.step_id` даже с `defer_foreign_keys`, а `RENAME` при включённых ключах переписывает ссылки дочерних таблиц (проверено на 3.50.4). После применённых миграций — `PRAGMA foreign_key_check`, нарушение — `StoreError` и откат. Проверено на копии живой `~/.agent-loop/loop.db` (v5, 39 шагов, 24 снимка лимитов со ссылкой на шаг): шаги и id на месте, `foreign_key_check` и `integrity_check` чистые.
+   - `Step.run_id`, `Step.task_id: int | None`; `start_step(run_id, task_id, kind, ...)` — вызовы в `implement` и тестах обновлены.
+   - `open_steps` по-прежнему через `JOIN tasks`: шаги планировщика в него не попадают, докстринг уточнён. `recovery.pause` трогает только `running`-прогоны, у планировщика прогон в `planning`; `step.how_to_resume` и `runner._head` на `task_id` не смотрят — правок не нужно.
+4. `prompts/planner.md` — роль: только чтение (Read и Bash без записи), задача = один коммит в пределах размера из промпта, тесты в задаче изменения, карточка самодостаточна (без ссылок на номера задач), поля карточки и плана, закрытые файлы (список как в `session.md`, без `.npmrc`: в коде он закрыт только в `~`), правка закрытого файла — в `decisions` карточки как ручное действие оператора, вопросы — только без которых план не построить, все сразу.
+5. `prompts.planner(request, settings)` — запрос оператора в fenced-блоке, размер, язык плана (`doc_lang`: план читает оператор). `prompts.system_files("planner")` — `planner.md`, `AGENTS.md`, контекст проекта, без `session.md` (он про сессии задачи: коммит, `operator_actions`, handoff). `_language` вынесен из `_rules`.
+
+Тесты (407 зелёных, ruff чистый): `test_plan` (хороший план, параметризация ошибок, закрытые и похожие открытые пути, `save`/`load`/`add_tasks` и совместимость `tasks` с `runner.load_tasks`); `test_store` — шаг старой базы с `run_id`, новый `test_steps_move_to_their_run_with_their_limit_snapshots` (миграция с v5 со снимком лимитов, шаг планировщика без задачи, внешние ключи снова включены), `test_failed_migration_leaves_previous_version` параметризован сломанной ссылкой; `test_prompts` — `system_files` параметризован планировщиком, промпт планировщика.
+
+Для 4.1в:
+- Формат ответа планировщика (`questions`/`plan`) и своя инструкция мягкой остановки в `planner.md` ещё не описаны — это схема ответа 4.1в.
+- Открытый шаг планировщика мёртвого `loop plan` не видят ни `open_steps`, ни `recovery.reap` (прогон в `planning`): повторный `loop plan` должен сам найти его (`session_steps`/новый запрос по `steps.run_id`), остановить сироту (`recovery._terminate`) и закрыть шаг как `paused`.
+- В `store` нет запроса шагов прогона без задачи: добавить вместе с первым использованием.
+
+Предлагаемое сообщение коммита: `feat(plan): add the plan schema and checks, planner role, steps without a task`.
+
+Как было задумано:
 
 - Новый модуль `plan.py` (слой рядом с `prompts`, ниже `runner`): `PLAN_SCHEMA` (`goal`, `criteria` — общие критерии приёмки плана, они же решают, нужен ли человек при перепланировании; `decisions` — общие решения; `tasks` — список `title` + карточка в формате `loop run`), проверка поверх схемы (`validate` → список ошибок строками: пустой план, повтор заголовков, задача без критериев, в `files` файлы, закрытые для сессии, — список из `prompts/session.md`, закрытые пути взять из одного места кода, не дублировать), запись и чтение `runs/<run>/plan.json` через `files.write_atomic`, задачи плана → `store.add_task`.
 - `store`: миграция — шаг принадлежит прогону, задача необязательна (`steps.run_id`, `task_id` NULL для шагов планировщика); `Step` и методы `store` по месту. Проверить, что `recovery`, `step.how_to_resume`, `runner._head` не ломаются на шагах без задачи.

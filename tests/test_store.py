@@ -59,13 +59,24 @@ def test_newer_schema_is_rejected(db_path):
         store.Store(db_path)
 
 
-def test_failed_migration_leaves_previous_version(db_path, monkeypatch):
-    store.Store(db_path).close()
+@pytest.mark.parametrize(
+    ("broken", "error", "match"),
+    [
+        ("INSERT INTO missing VALUES (1);", sqlite3.OperationalError, "missing"),
+        ("DELETE FROM runs;", store.StoreError, "breaks 1 references"),
+    ],
+    ids=["error", "broken reference"],
+)
+def test_failed_migration_leaves_previous_version(db_path, monkeypatch, broken, error, match):
+    released_db = store.Store(db_path)
+    released_db.add_task(released_db.create_run(Path("/work/service"), "main", "abc123"), "x", CARD)
+    released_db.close()
     released = len(store.MIGRATIONS)
-    broken = "CREATE TABLE limits (at TEXT); INSERT INTO missing VALUES (1);"
-    monkeypatch.setattr(store, "MIGRATIONS", [*store.MIGRATIONS, broken])
+    monkeypatch.setattr(
+        store, "MIGRATIONS", [*store.MIGRATIONS, f"CREATE TABLE limits (at TEXT); {broken}"]
+    )
 
-    with pytest.raises(sqlite3.OperationalError, match="missing"):
+    with pytest.raises(error, match=match):
         store.Store(db_path)
 
     assert user_version(db_path) == released
@@ -98,10 +109,39 @@ def test_older_database_is_migrated_with_its_data(db_path, monkeypatch):
         assert db.run(run_id).base is None
         assert len(db.limit_snapshots(run_id)) == 1
         assert db.steps(task_id)[0].untracked == []
+        assert db.steps(task_id)[0].run_id == run_id
         assert db.tasks(run_id)[0].tests is None
     finally:
         db.close()
     assert user_version(db_path) == len(store.MIGRATIONS)
+
+
+def test_steps_move_to_their_run_with_their_limit_snapshots(db_path, monkeypatch):
+    monkeypatch.setattr(store, "MIGRATIONS", store.MIGRATIONS[:-1])
+    old = store.Store(db_path)
+    run_id = old.create_run(Path("/work/service"), "main", "abc123")
+    task_id = old.add_task(run_id, "store", CARD)
+    step_id = old._conn.execute(
+        "INSERT INTO steps (task_id, kind, checkpoint, started_at) VALUES (?, 'implement', ?, ?)",
+        (task_id, "abc123", "2026-10-11T10:00:00+00:00"),
+    ).lastrowid
+    old.record_limits(run_id, step_id, Limits(None, Window(0.64, 1791813600)))
+    old.close()
+    monkeypatch.undo()
+
+    db = store.Store(db_path)
+    try:
+        [task_step] = db.steps(task_id)
+        assert (task_step.id, task_step.run_id, task_step.task_id) == (step_id, run_id, task_id)
+        assert [s.step_id for s in db.limit_snapshots(run_id)] == [step_id]
+        planner_step = db.start_step(run_id, None, "plan", "abc123", [], "s-1")
+        assert [(s.id, s.task_id) for s in db.session_steps("s-1")] == [(planner_step, None)]
+        # The planner's open step has no work in progress to save.
+        assert db.open_steps(run_id) == [task_step]
+        with pytest.raises(sqlite3.IntegrityError):
+            db.start_step("missing", None, "plan", "abc123", [])
+    finally:
+        db.close()
 
 
 def test_run_lifecycle_records_transitions(db, run_id):
@@ -232,7 +272,7 @@ def test_tasks_are_numbered_per_run(db, run_id):
 def test_step_is_started_and_finished_once(db, run_id):
     task_id = db.add_task(run_id, "store", CARD)
 
-    step_id = db.start_step(task_id, "implement", "abc123", ["notes.txt"], session_id="s-1")
+    step_id = db.start_step(run_id, task_id, "implement", "abc123", ["notes.txt"], session_id="s-1")
     started = db.steps(task_id)[0]
     assert (started.kind, started.checkpoint, started.session_id, started.finished_at) == (
         "implement",
@@ -256,7 +296,7 @@ def test_step_is_started_and_finished_once(db, run_id):
 
 def test_limit_snapshots_keep_missing_windows_empty(db, run_id):
     task_id = db.add_task(run_id, "budget", CARD)
-    step_id = db.start_step(task_id, "implement", "abc123", [])
+    step_id = db.start_step(run_id, task_id, "implement", "abc123", [])
 
     db.record_limits(run_id, None, Limits(Window(0.0, 1791670200), Window(0.64, 1791813600)))
     db.record_limits(run_id, step_id, Limits(Window(0.05, 1791670200), None))

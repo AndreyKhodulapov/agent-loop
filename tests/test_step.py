@@ -60,7 +60,7 @@ def env(tmp_path):
     protected.save(workdir, step.run_dir(home, run_id))
     settings_file = guard.prepare(step.run_dir(home, run_id), home, SETTINGS, workdir)
     session = agent.Session(prompt="do x", model="haiku", cwd=workdir, settings=settings_file)
-    step_id = db.start_step(task_id, "implement", "abc123", [], session.session_id)
+    step_id = db.start_step(run_id, task_id, "implement", "abc123", [], session.session_id)
     yield Env(cfg, db, run_id, step_id, session)
     db.close()
 
@@ -105,14 +105,16 @@ def test_resumed_session_step_costs_the_difference(env, fake_claude, stderr_line
     env.run()
     task_id = env.step().task_id
     # A step terminated before its result, then a step of another session.
-    killed = env.store.start_step(task_id, "implement", "abc123", [], env.session.session_id)
+    killed = env.store.start_step(
+        env.run_id, task_id, "implement", "abc123", [], env.session.session_id
+    )
     env.store.finish_step(killed, "paused", {"reason": "interrupt", "context_tokens": 0})
     other = replace(env, session=replace(env.session, session_id="other"))
-    other.step_id = env.store.start_step(task_id, "fix", "abc123", [], "other")
+    other.step_id = env.store.start_step(env.run_id, task_id, "fix", "abc123", [], "other")
     other.run()
     resumed = replace(env, session=replace(env.session, resume=True))
     resumed.step_id = env.store.start_step(
-        task_id, "implement", "abc123", [], env.session.session_id
+        env.run_id, task_id, "implement", "abc123", [], env.session.session_id
     )
 
     resumed.run()
@@ -287,6 +289,7 @@ def test_deadlines(last_output, stop_requested, now, due, next_check):
 def ended(outcome, reason, session_id, context_tokens=50_000):
     return Step(
         id=1,
+        run_id="0a1b2c3d",
         task_id=1,
         kind="implement",
         checkpoint="abc123",

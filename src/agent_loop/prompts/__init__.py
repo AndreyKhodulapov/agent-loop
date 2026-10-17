@@ -1,4 +1,4 @@
-"""Prompts of the sessions of a task: the rules of each role and the prompt the loop builds.
+"""Prompts of the sessions: the rules of each role and the prompt the loop builds.
 
 The agent does not read the plan or the progress itself. The loop gives it the card of its task,
 what the previous tasks of the run have added, and on a task resumed in a new session the handoff
@@ -6,7 +6,8 @@ and the work in progress. The fixer gets the card, the work and the findings of 
 
 A card (`Task.card`) holds `goal` (a string) and `criteria`, `files` (where to start), `tests`
 (that must pass) and `decisions` (of the plan for this task), each a list of strings, possibly
-empty. Prompts are in English whatever the language of the docs.
+empty. The planner gets the request of the operator and proposes the tasks of a run, see
+`plan`. Prompts are in English whatever the language of the docs.
 """
 
 from __future__ import annotations
@@ -67,15 +68,34 @@ def answer(structured_output: dict) -> Answer:
 
 
 def system_files(role: str, settings: Settings) -> tuple[Path, ...]:
-    """Rules of a session of `role` (implementer or fixer) for `agent.Session.system_files`.
+    """Rules of a session of `role` (planner, implementer or fixer) for
+    `agent.Session.system_files`.
 
-    How the loop runs sessions, the role, the code requirements of agent-loop and the context
-    file of the project, which wins where they disagree.
+    How the loop runs the sessions of a task, which the planner has not, the role, the code
+    requirements of agent-loop and the context file of the project, which wins where they
+    disagree.
     """
-    files = (ROLES / "session.md", ROLES / f"{role}.md", ROLES / "AGENTS.md")
+    files = (ROLES / f"{role}.md", ROLES / "AGENTS.md")
+    if role != "planner":
+        files = (ROLES / "session.md", *files)
     if settings.context_file is not None:
         files += (settings.context_file,)
     return files
+
+
+def planner(request: str, settings: Settings) -> str:
+    """The prompt of the planner of `request`, the task of the operator in their own words."""
+    return "\n\n".join(
+        [
+            "# Request of the operator",
+            _fenced(request, "markdown"),
+            "## Size",
+            f"The work of one task, tests included, fits in {settings.diff_soft_lines} changed"
+            f" lines. A task over {settings.diff_hard_lines} lines comes back to the planner.",
+            "## Language",
+            f"Write the plan in {_language(settings)}: the operator reads and approves it.",
+        ]
+    )
 
 
 def implementer(
@@ -203,15 +223,18 @@ def _card(task: Task, total: int) -> list[str]:
 
 
 def _rules(settings: Settings) -> list[str]:
-    language = {"ru": "Russian", "en": "English"}[settings.doc_lang]
     return [
         "## Size",
         f"The work of the task, tests included, fits in {settings.diff_soft_lines} changed"
         f" lines. A diff over {settings.diff_hard_lines} lines goes back to the planner.",
         "## Language",
-        f"Write code comments, docstrings and documentation in {language}."
+        f"Write code comments, docstrings and documentation in {_language(settings)}."
         " The commit message is in English.",
     ]
+
+
+def _language(settings: Settings) -> str:
+    return {"ru": "Russian", "en": "English"}[settings.doc_lang]
 
 
 def _fenced(text: str, info: str = "") -> str:

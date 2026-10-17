@@ -34,6 +34,7 @@ def work(repo, tmp_path):
     protected.save(repo, tmp_path / "run")
     return Step(
         id=1,
+        run_id="0a1b2c3d",
         task_id=1,
         kind="implement",
         checkpoint=git.head(repo),

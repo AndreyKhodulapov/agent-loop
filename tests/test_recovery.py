@@ -98,7 +98,7 @@ def test_dead_run_is_paused_with_its_session_stopped_and_work_saved(home, db, re
     session_id, proc, bystander = orphan
     run_id, task_id = running_run(db, repo)
     (repo / "notes.txt").write_text("operator's\n")
-    db.start_step(task_id, "implement", git.head(repo), git.untracked(repo), session_id)
+    db.start_step(run_id, task_id, "implement", git.head(repo), git.untracked(repo), session_id)
     (repo / "feature.py").write_text("f = 1\n")
     (repo / "app.py").write_text("x = 2\n")
 
@@ -128,12 +128,12 @@ def test_commit_step_stopped_after_the_commit(home, db, repo, message, committed
     run_id, task_id = running_run(db, repo)
     checkpoint = git.head(repo)
     ref = git.wip_ref(run_id, 1)
-    session = db.start_step(task_id, "implement", checkpoint, [], "s-1")
+    session = db.start_step(run_id, task_id, "implement", checkpoint, [], "s-1")
     db.finish_step(session, "completed", {"answer": {"commit_message": "feat(app): x"}})
     db.move_task(task_id, "gating")
     # Left by an earlier pause of the task.
     git.save_wip(repo, ref, [], checkpoint)
-    db.start_step(task_id, "commit", checkpoint, [])
+    db.start_step(run_id, task_id, "commit", checkpoint, [])
     (repo / "app.py").write_text("x = 'fixed'\n")
     commit = git.commit(repo, checkpoint, [], message)
     git.git(repo, "read-tree", checkpoint)
@@ -186,10 +186,10 @@ def test_broken_run_does_not_block_the_others(home, db, repo, tmp_path):
     gone = tmp_path / "moved-away"
     gone.mkdir()
     broken_id, broken_task = running_run(db, gone)
-    db.start_step(broken_task, "implement", "abc123", [])
+    db.start_step(broken_id, broken_task, "implement", "abc123", [])
     gone.rmdir()
     run_id, task_id = running_run(db, repo)
-    db.start_step(task_id, "implement", git.head(repo), [])
+    db.start_step(run_id, task_id, "implement", git.head(repo), [])
 
     assert recovery.reap(db, home) == [run_id]
 
