@@ -64,6 +64,7 @@ def replanned(tasks=(NEW,), *remaining):
     given = {entry["task"]: entry for entry in remaining}
     return {
         "why": "Prices go first",
+        "criteria": PLAN["criteria"],
         "tasks": list(tasks),
         "remaining": [
             given.get(number, {"task": number, "action": "keep", "why": "Still needed"})
@@ -91,6 +92,7 @@ def act(number, action, card=None):
                 "tasks 4 have no action",
             ],
         ),
+        ({**replanned(), "criteria": []}, ["the answer has no acceptance criteria of the plan"]),
         (replanned((NEW,), act(3, "modify")), ["task 3 is modified without its new card"]),
         (replanned((NEW,), act(4, "drop", TASK)), ["task 4 has a new card but is not modified"]),
         (
@@ -116,6 +118,7 @@ def act(number, action, card=None):
         "good",
         "no new tasks, dropped and modified",
         "wrong, repeated and missing actions",
+        "no criteria",
         "modified without a card",
         "card without modify",
         "bad cards",

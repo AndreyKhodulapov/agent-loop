@@ -103,10 +103,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     answer.set_defaults(handler=_answer)
     approve = commands.add_parser(
-        "approve", help="approve the plan of a run: its tasks become the tasks of the run"
+        "approve",
+        help="approve the plan of a run, its tasks become the tasks of the run, or the change of"
+        " the criteria of the plan a replan makes",
     )
     approve.add_argument(
-        "run_id", nargs="?", help="the run to approve, the last planning one with a plan by default"
+        "run_id",
+        nargs="?",
+        help="the run to approve, the last planning one with a plan or paused on a replan by"
+        " default",
     )
     approve.set_defaults(handler=_approve)
     run = commands.add_parser("run", help="run the tasks of an approved plan on the current branch")

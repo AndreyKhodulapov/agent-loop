@@ -160,12 +160,14 @@ def replan_critic(
     task: Task,
     left: list[Task],
     replan: dict,
+    approved: list[str] | None,
 ) -> str:
     """The prompt of the critic of `plan`, the approved plan of a run for `request` as the
     answer `replan` of a replanning session leaves it after `task` has gone back to the planner.
 
     The plan begins with the `committed` tasks of the run; `left` are the tasks that were left
-    after `task`, the actions of `replan` go by their numbers.
+    after `task`, the actions of `replan` go by their numbers. `approved` are the acceptance
+    criteria the operator has approved when the replan changes them.
     """
     first, new = committed + 1, len(replan["tasks"])
     if new == 0:
@@ -193,6 +195,15 @@ def replan_critic(
     if actions:
         sections.append(
             "What the planner has done with the tasks left after it:\n" + "\n".join(actions)
+        )
+    if approved is not None:
+        sections.append(
+            "The planner has changed the acceptance criteria of the plan, the operator approved"
+            " these:\n"
+            + "\n".join(f"- {criterion}" for criterion in approved)
+            + "\nThe operator approves the change before the run goes on: check that the"
+            " approved criteria cannot be met and that the new ones still show the plan does"
+            " what the request asks."
         )
     return _critic(plan, request, settings, sections)
 
@@ -246,6 +257,20 @@ def replan_critique(findings: list[dict]) -> str:
             " critic reviews it again, the operator reads it.",
             *_findings(findings),
             "Answer as before, in full.",
+        ]
+    )
+
+
+def criteria_objection(reply: str) -> str:
+    """The prompt that gives the replanning session the objection of the operator to its change
+    of the acceptance criteria of the plan."""
+    return "\n\n".join(
+        [
+            "# Objection of the operator",
+            "The operator has not approved your change of the acceptance criteria of the plan:",
+            _fenced(reply, "markdown"),
+            "Answer again in full. A critic reviews the plan your answer leaves, and criteria"
+            " that still differ from the approved ones wait for the operator again.",
         ]
     )
 

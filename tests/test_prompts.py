@@ -201,7 +201,7 @@ def test_replan_critic_prompt_tells_what_the_replan_has_done(committed, new, rep
         "remaining": [{"task": 3, "action": "drop", "why": "The prices cover it"}],
     }
 
-    prompt = prompts.replan_critic(plan, "Dishes", SETTINGS, committed, task, [left], replan)
+    prompt = prompts.replan_critic(plan, "Dishes", SETTINGS, committed, task, [left], replan, None)
 
     assert prompt.startswith(prompts.plan_critic(plan, "Dishes", SETTINGS).split("## Size")[0])
     assert (
@@ -214,6 +214,29 @@ def test_replan_critic_prompt_tells_what_the_replan_has_done(committed, new, rep
         "What the planner has done with the tasks left after it:\n"
         "- 'Docs': drop, The prices cover it\n\n## Size"
     ) in prompt
+
+
+def test_replan_critic_prompt_shows_the_change_of_the_criteria():
+    task = dataclasses.replace(TASK, status="replan", reason="too_big")
+    plan = {"goal": "Блюда", "criteria": ["The admin lists dishes"], "decisions": [], "tasks": []}
+    replan = {"why": "Removal is out", "tasks": [], "remaining": []}
+    approved = ["The admin lists and removes dishes"]
+
+    prompt = prompts.replan_critic(plan, "Dishes", SETTINGS, 0, task, [], replan, approved)
+
+    assert (
+        "The planner has changed the acceptance criteria of the plan, the operator approved"
+        " these:\n- The admin lists and removes dishes\nThe operator approves the change before"
+        " the run goes on: check that the approved criteria cannot be met"
+    ) in prompt.split("## Size")[0]
+    assert '"The admin lists dishes"' in prompt
+
+
+def test_criteria_objection_gives_the_reply_to_the_replanner():
+    prompt = prompts.criteria_objection("Keep the removal")
+
+    assert prompt.startswith("# Objection of the operator\n\nThe operator has not approved")
+    assert "```markdown\nKeep the removal\n```\n\nAnswer again in full." in prompt
 
 
 def test_replan_critique_lists_the_findings():

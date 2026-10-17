@@ -21,7 +21,10 @@ answer leaves; blocking findings go back to the same session once, and its fixed
 without another critic. The plan the replan leaves goes to `plan.json` with the findings in
 `critique.json` and `PLAN.md`. A paused session goes on as `step.how_to_resume` decides, at once
 or, after Ctrl+C or a dead orchestrator, on `loop resume`, which also takes an answer the loop
-has not taken yet.
+has not taken yet. A replan that changes the acceptance criteria of the plan waits for the
+operator after its critic: `loop approve` takes it (`approve_criteria`), an objection in
+`QUESTIONS.md` goes back to the same session (`object_to_criteria`), and a critic reviews its
+new answer.
 
 The run stays in planning while the planner works: a stopped planner does not pause it, and
 `go_on` picks the work up from the last step of the planner. A paused session is resumed or
@@ -58,8 +61,14 @@ TALK = "talk"
 CRITIQUE = "critique"
 REPLAN = "replan"
 QUESTIONS = "questions"
+# Steps without a session: the operator objects to the change of the criteria of the plan a
+# replan makes, or approves it.
+OBJECTION = "objection"
+APPROVAL = "approval"
 # The plan still has errors after the retries: the run waits for the operator.
 REJECTED = "rejected"
+# The replan changes the acceptance criteria of the plan: the run waits for the operator.
+CRITERIA = "criteria"
 REQUEST_FILE = "request.md"
 DRAFT_FILE = "plan-draft.json"
 CRITIQUE_FILE = "critique.json"
@@ -99,6 +108,7 @@ REPLAN_SCHEMA = {
     "type": "object",
     "properties": {
         "why": {"type": "string"},
+        "criteria": plan.STRINGS,
         "tasks": {"type": "array", "items": plan.TASK_SCHEMA},
         "remaining": {
             "type": "array",
@@ -115,7 +125,7 @@ REPLAN_SCHEMA = {
             },
         },
     },
-    "required": ["why", "tasks", "remaining"],
+    "required": ["why", "criteria", "tasks", "remaining"],
     "additionalProperties": False,
 }
 
@@ -179,10 +189,46 @@ def replan(cfg: Config, store: Store, run: Run, task: Task, previous: str) -> im
     `prompts.previous_tasks` tells about the tasks before it. A session of the replanning or of
     its critic the run has left paused goes on as `step.how_to_resume` decides, an answer it has
     left is taken. Returns why the run stops: the limits leave no room (`implement.BUDGET`), the
-    operator has stopped it (`implement.INTERRUPT`) or the answer keeps its errors (`REJECTED`);
-    None when the store has the new tasks and `plan.json` the plan they make.
+    operator has stopped it (`implement.INTERRUPT`), the answer keeps its errors (`REJECTED`) or
+    changes the acceptance criteria of the plan (`CRITERIA`); None when the store has the new
+    tasks and `plan.json` the plan they make.
     """
     return _Planner(cfg, store, run).replan(task, previous)
+
+
+def criteria_question(cfg: Config, store: Store, run: Run) -> str:
+    """What the operator replies to when the replan of `run` changes the acceptance criteria of
+    the plan: the approved criteria, the new ones and why the replanner changes them."""
+    task, answered = _Planner(cfg, store, run).waiting()
+    output = answered.detail["answer"]
+    approved = plan.load(step.run_dir(cfg.home, run.id))["criteria"]
+    return "\n\n".join(
+        [
+            f"The replan of task {task.seq}, {task.title!r}, changes the acceptance criteria of"
+            " the plan.",
+            "Approved criteria:\n" + "\n".join(f"- {criterion}" for criterion in approved),
+            "New criteria:\n" + "\n".join(f"- {criterion}" for criterion in output["criteria"]),
+            f"Why: {output['why']}",
+            f"`loop approve {run.id}` takes the new criteria. To object, write the objection"
+            " below: it goes to the replanner.",
+        ]
+    )
+
+
+def object_to_criteria(cfg: Config, store: Store, run: Run, question: str, reply: str) -> None:
+    """Record the objection `reply` of the operator to the change of the criteria of the plan
+    the replan of `run` makes: the session that has made it goes on with it."""
+    planner = _Planner(cfg, store, run)
+    _, answered = planner.waiting()
+    planner.record(OBJECTION, {"question": question, "reply": reply}, answered.session_id)
+
+
+def approve_criteria(cfg: Config, store: Store, run: Run) -> None:
+    """Record the approval by the operator of the change of the criteria of the plan the replan
+    of `run` makes: the run takes the replan."""
+    planner = _Planner(cfg, store, run)
+    _, answered = planner.waiting()
+    planner.record(APPROVAL, {"criteria": answered.detail["answer"]["criteria"]})
 
 
 class _Planner:
@@ -269,7 +315,7 @@ class _Planner:
         )
         r = _Replan(task, done, left, approved, _Session(prompt, kind=REPLAN), steps[-1].id)
         upcoming = self._replan_upcoming(r)
-        while upcoming is not None:
+        while isinstance(upcoming, _Session):
             resume_at = budget.no_room(self.cfg.home, self.cfg.settings)
             if resume_at is not None:
                 return implement.Stop(implement.BUDGET, resume_at)
@@ -291,34 +337,54 @@ class _Planner:
             if outcome.reason == implement.INTERRUPT:
                 # An answer the loop has not taken yet is taken by the next `loop resume`.
                 return implement.Stop(implement.INTERRUPT)
-        return None
+        return upcoming
+
+    def waiting(self) -> tuple[Task, Step]:
+        """The task whose replan waits for the operator and the step with the answer of the
+        replanner."""
+        [task] = [t for t in self.store.tasks(self.run.id) if t.status == "replan"]
+        steps = self._replans(self.store.steps(task.id)[-1].id)
+        return task, _answered(_chain(steps), REPLAN)[0]
+
+    def record(self, kind: str, detail: dict, session_id: str | None = None) -> None:
+        """Record a step of the operator in the replanning: an objection or an approval."""
+        step_id = self.store.start_step(
+            self.run.id, None, kind, git.head(self.repo), [], session_id
+        )
+        self.store.finish_step(step_id, "completed", detail)
 
     def _replans(self, since: int) -> list[Step]:
-        """The steps of the replanning sessions and of their critics after the step `since`."""
+        """The steps of the replanning sessions, of their critics and of the operator after the
+        step `since`."""
+        kinds = (REPLAN, CRITIQUE, OBJECTION, APPROVAL)
         return [
-            s
-            for s in self.store.planner_steps(self.run.id)
-            if s.kind in (REPLAN, CRITIQUE) and s.id > since
+            s for s in self.store.planner_steps(self.run.id) if s.kind in kinds and s.id > since
         ]
 
-    def _replan_upcoming(self, r: _Replan) -> _Session | None:
-        """The session that goes on with the replanning the run has left; None when the answer
-        it has left is taken and the store has the new tasks."""
+    def _replan_upcoming(self, r: _Replan) -> _Session | implement.Stop | None:
+        """The session that goes on with the replanning the run has left, or why the run stops;
+        None when the answer it has left is taken and the store has the new tasks."""
         steps = self._replans(r.since)
         if not steps:
             return r.fresh
         last = steps[-1]
+        if last.kind == OBJECTION:
+            objection = prompts.criteria_objection(last.detail["reply"])
+            return _Session(objection, last.session_id, REPLAN)
         if last.outcome == "paused":
             return self._replan_resumed(r, steps)
         chain = _chain(steps)
-        if last.outcome == "failed" or last.detail.get("answer") is None:
+        failed = last.outcome == "failed" or last.detail.get("answer") is None
+        if failed and last.kind != APPROVAL:
             # The error is in the log of the run that has stopped on it: the step starts anew.
             if last.kind == CRITIQUE:
                 return self._replan_critic(r, _answered(chain, REPLAN)[0].detail["answer"])
             return r.fresh
         upcoming = self._take_replan(r, chain)
-        # An answer that keeps its errors has stopped the run, `loop resume` replans anew.
-        return r.fresh if isinstance(upcoming, implement.Stop) else upcoming
+        if isinstance(upcoming, implement.Stop) and upcoming.reason == REJECTED:
+            # An answer that keeps its errors has stopped the run, `loop resume` replans anew.
+            return r.fresh
+        return upcoming
 
     def _replan_resumed(self, r: _Replan, steps: list[Step]) -> _Session:
         """The session that goes on after the last of `steps` has paused."""
@@ -341,9 +407,11 @@ class _Planner:
         raise PlanError(f"the {who} keeps stopping ({how.reason})")
 
     def _take_replan(self, r: _Replan, chain: list[Step]) -> _Session | implement.Stop | None:
-        """Take the answer of the last step of `chain`: returns the session that fixes or
-        reviews the replan, why the run stops, or None when the store has the new tasks."""
-        last = chain[-1]
+        """Take the answer of the last step of `chain`, or the one the operator has approved
+        after it: returns the session that fixes or reviews the replan, why the run stops, or
+        None when the store has the new tasks."""
+        approved = chain[-1].kind == APPROVAL
+        last = chain[-2] if approved else chain[-1]
         if last.kind == CRITIQUE:
             findings = _findings(last.detail["answer"])
             blocking = [f["problem"] for f in findings if f["blocking"]]
@@ -355,8 +423,7 @@ class _Planner:
                     "\n".join(f"- {problem}" for problem in blocking),
                 )
                 return _Session(prompts.replan_critique(findings), reviewed.session_id, REPLAN)
-            self._apply(r, reviewed.detail["answer"], findings, fixed=False)
-            return None
+            return self._settle(r, reviewed.detail["answer"], findings, False, approved)
         output = last.detail["answer"]
         errors = _replan_errors(r, output)
         if errors:
@@ -373,7 +440,22 @@ class _Planner:
         if not critiques:
             logger.info("a critic reviews the replan of task %d", r.task.seq)
             return self._replan_critic(r, output)
-        self._apply(r, output, _findings(critiques[0].detail["answer"]), fixed=True)
+        return self._settle(r, output, _findings(critiques[0].detail["answer"]), True, approved)
+
+    def _settle(
+        self, r: _Replan, output: dict, findings: list[dict], fixed: bool, approved: bool
+    ) -> implement.Stop | None:
+        """Apply the replan of `output`, unless it changes the acceptance criteria of the plan
+        and the operator has not `approved` the change yet: then returns why the run stops."""
+        if _changes_criteria(r, output) and not approved:
+            logger.warning(
+                "the replan of task %d changes the acceptance criteria of the plan, the operator"
+                " approves the change:\n%s",
+                r.task.seq,
+                "\n".join(f"- {criterion}" for criterion in output["criteria"]),
+            )
+            return implement.Stop(CRITERIA)
+        self._apply(r, output, findings, fixed)
         return None
 
     def _replan_critic(self, r: _Replan, output: dict) -> _Session:
@@ -386,6 +468,7 @@ class _Planner:
             r.task,
             r.left,
             output,
+            r.approved["criteria"] if _changes_criteria(r, output) else None,
         )
         return _Session(prompt, kind=CRITIQUE)
 
@@ -616,20 +699,29 @@ def _answered(steps: list[Step], kind: str) -> list[Step]:
 
 
 def _chain(steps: list[Step]) -> list[Step]:
-    """The steps of `steps` from the last session that has replanned the task anew: the retries
-    of its answer and the critic of it start there. A resumed session keeps its id."""
+    """The steps of `steps` from the last session that has replanned the task anew or from the
+    last objection of the operator: the retries of the answer and the critic of it start there.
+    A resumed session keeps its id."""
     seen = set()
     start = 0
     for i, s in enumerate(steps):
-        if s.kind == REPLAN and s.session_id not in seen:
-            seen.add(s.session_id)
+        if s.kind == OBJECTION or s.kind == REPLAN and s.session_id not in seen:
             start = i
+        if s.kind == REPLAN:
+            seen.add(s.session_id)
     return steps[start:]
 
 
+def _changes_criteria(r: _Replan, output: dict) -> bool:
+    # Spaces around a criterion the replanner has copied are not worth the operator's time.
+    new = [criterion.strip() for criterion in output["criteria"]]
+    return new != [criterion.strip() for criterion in r.approved["criteria"]]
+
+
 def _replanned(r: _Replan, output: dict) -> dict:
-    """The approved plan with the tasks the replan of `output` leaves: the tasks the run is
-    through with, the new tasks, then the tasks left as it keeps or modifies them."""
+    """The approved plan with the criteria and the tasks the replan of `output` leaves: the
+    tasks the run is through with, the new tasks, then the tasks left as it keeps or modifies
+    them."""
     actions = {entry["task"]: entry for entry in output["remaining"]}
     kept = [
         {"title": t.title, **t.card}
@@ -640,7 +732,9 @@ def _replanned(r: _Replan, output: dict) -> dict:
     ]
     done = [{"title": t.title, **t.card} for t in r.done]
     return {
-        **{key: r.approved[key] for key in ("goal", "criteria", "decisions")},
+        "goal": r.approved["goal"],
+        "criteria": output["criteria"],
+        "decisions": r.approved["decisions"],
         "tasks": [*done, *output["tasks"], *kept],
     }
 

@@ -8,7 +8,8 @@ as `prompts` takes it: the `goal` and the lists `criteria`, `files`, `tests`, `d
 `validate` finds what the schema cannot tell: its errors go back to the planner session.
 `validate_replan` does the same for the answer of a planner that replans the tasks left in a run.
 `loop approve` keeps the `digest` of `plan.json` with the run: a run starts only from the file
-the operator has approved. A replan rewrites the file with the tasks it leaves, and the digest.
+the operator has approved. A replan rewrites the file with the tasks and the criteria it leaves,
+and the digest.
 """
 
 from __future__ import annotations
@@ -72,6 +73,8 @@ def validate_replan(answer: dict, left: dict[int, str], through: list[str]) -> l
     them needs one action; `through` are the titles of the tasks the run is through with.
     """
     errors = []
+    if not answer["criteria"]:
+        errors.append("the answer has no acceptance criteria of the plan")
     actions = Counter(entry["task"] for entry in answer["remaining"])
     errors += [
         f"task {number} is not one of the tasks left" for number in actions if number not in left

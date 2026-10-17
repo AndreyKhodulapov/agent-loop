@@ -449,9 +449,10 @@ def replan(env):
 REPEATED = [TASK | {"title": "Router of dishes"}]
 
 
-def replanned(*remaining, tasks=(TASK | {"title": "Prices"},)):
+def replanned(*remaining, tasks=(TASK | {"title": "Prices"},), criteria=PLAN["criteria"]):
     entries = list(remaining) or [{"task": 2, "action": "keep", "why": "Still needed"}]
-    return answered({"why": "Prices first", "tasks": list(tasks), "remaining": entries})
+    output = {"why": "Prices first", "criteria": criteria, "tasks": list(tasks)}
+    return answered(output | {"remaining": entries})
 
 
 def test_task_gone_back_is_replanned_in_a_read_only_session(replanning, monkeypatch):
@@ -690,3 +691,85 @@ def test_replanning_waits_for_room_in_the_limits(replanning, monkeypatch):
     assert replan(env) == implement.Stop(implement.BUDGET, resume_at)
 
     assert env.sessions == []
+
+
+# The admin cannot remove a dish any more.
+NARROWED = ["The admin lists and adds dishes"]
+
+
+def run_of(env):
+    return env.store.run(env.run_id)
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "fixed"),
+    [
+        ([replanned(criteria=NARROWED), criticized()], False),
+        ([replanned(), criticized(finding()), replanned(criteria=NARROWED)], True),
+    ],
+    ids=["reviewed", "fixed after the critic"],
+)
+def test_replan_that_changes_the_criteria_waits_for_the_operator(
+    replanning, monkeypatch, outcomes, fixed
+):
+    env = replanning
+    env.script(monkeypatch, *outcomes)
+    before = env.store.tasks(env.run_id)
+
+    assert replan(env) == implement.Stop(planner.CRITERIA)
+
+    assert env.store.tasks(env.run_id) == before
+    assert plan.load(env.run_dir) == PLAN
+    critic = env.sessions[1]
+    if not fixed:
+        assert "- The admin lists, adds and removes dishes\nThe operator approves" in critic.prompt
+    question = planner.criteria_question(env.cfg, env.store, run_of(env))
+    assert question.startswith("The replan of task 1, 'Schema of dishes', changes the")
+    assert "Approved criteria:\n- The admin lists, adds and removes dishes" in question
+    assert "New criteria:\n- The admin lists and adds dishes\n\nWhy: Prices first" in question
+    # The run that has stopped asks the operator again without a session.
+    assert replan(env) == implement.Stop(planner.CRITERIA)
+
+    planner.approve_criteria(env.cfg, env.store, run_of(env))
+    assert replan(env) is None
+
+    assert len(env.sessions) == len(outcomes)
+    assert plan.load(env.run_dir)["criteria"] == NARROWED
+    assert env.store.run(env.run_id).plan_hash == plan.digest(env.run_dir)
+    assert [t.status for t in env.store.tasks(env.run_id)] == ["dropped", "pending", "pending"]
+    plan_md = (env.run_dir / export.PLAN_MD).read_text()
+    assert "## Acceptance criteria\n\n- The admin lists and adds dishes" in plan_md
+    assert ("The replanner has fixed the plan" in plan_md) == fixed
+    approval = env.store.planner_steps(env.run_id)[-1]
+    assert (approval.kind, approval.detail) == (planner.APPROVAL, {"criteria": NARROWED})
+
+
+def test_objection_to_the_criteria_goes_to_the_replanner_and_a_critic(replanning, monkeypatch):
+    env = replanning
+    env.script(monkeypatch, replanned(criteria=NARROWED), criticized())
+    assert replan(env) == implement.Stop(planner.CRITERIA)
+    question = planner.criteria_question(env.cfg, env.store, run_of(env))
+
+    planner.object_to_criteria(env.cfg, env.store, run_of(env), question, "Keep the removal")
+    env.script(monkeypatch, replanned(), criticized())
+    assert replan(env) is None
+
+    first, _, objected, critic = env.sessions
+    assert (objected.session_id, objected.resume) == (first.session_id, True)
+    assert objected.prompt == prompts.criteria_objection("Keep the removal")
+    assert objected.schema == planner.REPLAN_SCHEMA
+    assert critic.schema == planner.CRITIQUE_SCHEMA
+    assert "the operator approved these" not in critic.prompt
+    assert plan.load(env.run_dir)["criteria"] == PLAN["criteria"]
+    objection = next(s for s in env.store.planner_steps(env.run_id) if s.kind == "objection")
+    assert objection.detail == {"question": question, "reply": "Keep the removal"}
+
+
+def test_criteria_copied_with_spaces_are_not_a_change(replanning, monkeypatch):
+    env = replanning
+    spaced = [f" {criterion}\n" for criterion in PLAN["criteria"]]
+    env.script(monkeypatch, replanned(criteria=spaced), criticized())
+
+    assert replan(env) is None
+
+    assert "the operator approved these" not in env.sessions[1].prompt

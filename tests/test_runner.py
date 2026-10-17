@@ -287,6 +287,67 @@ def test_run_stopped_while_replanning_replans_on_resume(home, cfg, approved, mon
     assert [t.status for t in tasks] == ["dropped", "committed", "committed"]
 
 
+class Criteria:
+    """Replaces what the planner tells and records of a replan that changes the criteria."""
+
+    def __init__(self, monkeypatch):
+        self.calls = []
+        monkeypatch.setattr(planner, "criteria_question", lambda cfg, store, run: "New criteria?")
+
+        def record(name):
+            return lambda cfg, store, run, *args: self.calls.append((name, *args))
+
+        monkeypatch.setattr(planner, "object_to_criteria", record("object"))
+        monkeypatch.setattr(planner, "approve_criteria", record("approve"))
+
+
+@pytest.mark.parametrize(
+    ("operator", "recorded"),
+    [
+        ("approve", [("approve",)]),
+        ("answer", [("object", "New criteria?", "Keep the removal")]),
+    ],
+)
+def test_replan_that_changes_the_criteria_waits_for_the_operator(
+    home, cfg, approved, monkeypatch, operator, recorded
+):
+    Tasks(monkeypatch, moves("implementing", "replan", reason="too_big"))
+    Replans(monkeypatch, implement.Stop(planner.CRITERIA))
+    criteria = Criteria(monkeypatch)
+
+    assert runner.start(cfg, None) == planner.CRITERIA
+
+    run, [first, _], run_moves = the_run(home)
+    assert run_moves[-1] == ("paused", planner.CRITERIA)
+    assert first.status == "replan"
+    questions = step.run_dir(home, run.id) / replies.FILE
+    assert "## Question 1\n\nNew criteria?\n\n### Answer\n" in questions.read_text()
+    with pytest.raises(runner.RunError, match=f"`loop approve {run.id}` takes it, `loop answer"):
+        runner.resume(cfg, None)
+    questions.write_text(questions.read_text() + "Keep the removal\n")
+    Tasks(monkeypatch, commits(), commits())
+    replans = Replans(monkeypatch, None)
+
+    assert getattr(runner, operator)(cfg, None) is None
+
+    assert criteria.calls == recorded
+    assert replans.calls == [(1, "")]
+    _, tasks, run_moves = the_run(home)
+    assert [t.status for t in tasks] == ["dropped", "committed", "committed"]
+    assert run_moves[-2:] == [("running", None), ("done", None)]
+
+
+def test_approve_takes_a_paused_run_only_on_a_replan(home, cfg, approved, monkeypatch):
+    Tasks(monkeypatch, moves("implementing", "paused", reason="interrupt"))
+    runner.start(cfg, None)
+
+    with pytest.raises(runner.RunError, match="no planning run in .* has a plan"):
+        runner.approve(cfg, None)
+    error = f"run {approved} is paused for interrupt, not for a replan to approve"
+    with pytest.raises(runner.RunError, match=error):
+        runner.approve(cfg, approved)
+
+
 def asks(question):
     """The session of the task asks the operator `question`."""
 

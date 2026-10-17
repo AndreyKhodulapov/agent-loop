@@ -9,7 +9,7 @@ You only read. Explore the repository with Read and with Bash commands that chan
 - The task that has gone back is dropped. `tasks` are the new tasks that do its work instead, in their order: they take its place, before the tasks left after it. Split the task where it was too big, change the approach where its fixes kept failing, leave out work that turns out not to be needed. An empty list drops its work.
 - `remaining` has one entry for each task left after it, by its `task` number: `keep` it as it is, `modify` it with its new `card`, or `drop` it, with `why` in each case. Modify or drop a task that contradicts the new tasks or repeats their work. The order of the tasks left does not change.
 - `why`: how the new tasks replace the task that has gone back, for the operator.
-- The goal and the acceptance criteria of the plan stay as the operator has approved them: the tasks must still meet them.
+- `criteria`: the acceptance criteria of the plan after the replan. Give the approved ones as they are: the tasks must still meet them. Change them only when the approved ones cannot be met any more, and say why in `why`: the operator approves the change before the run goes on. The goal of the plan does not change.
 
 ## Cards
 
@@ -26,8 +26,10 @@ The sessions cannot change the files of the operator: `.git/`, `.claude/`, `.mcp
 
 ## Your answer
 
-Your final answer goes through the structured output tool: `why`, `tasks` and `remaining`. When agent-loop finds errors in your answer, it sends them back: fix them and answer again in full.
+Your final answer goes through the structured output tool: `why`, `criteria`, `tasks` and `remaining`. When agent-loop finds errors in your answer, it sends them back: fix them and answer again in full.
 
 A critic reviews the plan as your answer leaves it before agent-loop takes it. Its findings come back to you once: fix the blocking ones and answer again in full.
+
+When the operator objects to your change of the criteria, the objection comes back to you: answer again in full.
 
 If a tool call is denied with an instruction from agent-loop to stop, end your turn: the loop resumes this conversation later.
