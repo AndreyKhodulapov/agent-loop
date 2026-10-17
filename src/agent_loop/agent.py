@@ -5,6 +5,10 @@ orchestrator, which then decides how to stop the session. The raw stream is appe
 file as it arrives; parsed events carry what the loop needs: session id, context fill, limits and
 the final result.
 
+A conversation of the operator with an agent (`talk`) runs the CLI interactively instead: in the
+terminal of the operator and in the process group of the loop, where the CLI reads the keys
+itself, Ctrl+C included. It has no stream, the CLI keeps its own transcript.
+
 Sessions run with `--restricted`: settings files of the user and of the project are ignored and
 only `--settings` of the loop applies. The agent may write the settings of the project, and their
 hooks would run outside the sandbox. The CLAUDE.md of the working directory is ignored too, so
@@ -107,12 +111,18 @@ type Event = Init | Usage | Limits | Result
 
 
 def command(session: Session, system_file: Path | None = None) -> list[str]:
-    args = [
+    return [
         CLAUDE,
         "-p",
         "--output-format",
         "stream-json",
         "--verbose",
+        *_options(session, system_file),
+    ]
+
+
+def _options(session: Session, system_file: Path | None) -> list[str]:
+    args = [
         "--restricted",
         # `StructuredOutput` is added by the CLI itself when there is a schema.
         "--tools",
@@ -233,24 +243,16 @@ class Process:
         # of life too.
         self.last_output = time.monotonic()
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        rules = [path.read_text(encoding="utf-8") for path in session.system_files]
-        instructions = project_instructions(session.cwd)
-        if instructions:
-            rules.append(instructions)
-        system_file = None
-        if rules:
-            system_file = log_path.with_suffix(".system.md")
-            system_file.write_text("\n\n".join(rules), encoding="utf-8")
+        system_file = _write_rules(session, log_path.with_suffix(".system.md"))
         # The prompt goes through stdin: in argv it would be visible in `ps` and a leading dash
         # would be read as an option. The file stays next to the log for debugging.
         prompt_file = log_path.with_suffix(".prompt.md")
         prompt_file.write_text(session.prompt, encoding="utf-8")
-        env = {key: os.environ[key] for key in ENV_KEYS if key in os.environ} | session.env
         with open(prompt_file, "rb") as stdin, open(self.stderr_path, "ab") as stderr:
             self._proc = subprocess.Popen(
                 command(session, system_file),
                 cwd=session.cwd,
-                env=env,
+                env=_env(session, ENV_KEYS),
                 stdin=stdin,
                 stdout=subprocess.PIPE,
                 stderr=stderr,
@@ -309,6 +311,34 @@ class Process:
     def _tail(self) -> str:
         lines = self.stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()
         return "\n".join(lines[-STDERR_TAIL_LINES:]) or "(stderr is empty)"
+
+
+def talk(session: Session, system_file: Path) -> int:
+    """Run `session` as a conversation in the terminal of the operator; returns the exit code of
+    the CLI, 0 both when the operator ends the conversation and on a double Ctrl+C.
+
+    The rules of the session go to `system_file`. The prompt, if any, opens the conversation: it
+    is the loop's own text, so it may go in argv.
+    """
+    args = [CLAUDE, *_options(session, _write_rules(session, system_file))]
+    if session.prompt:
+        args.append(session.prompt)
+    return subprocess.run(args, cwd=session.cwd, env=_env(session, (*ENV_KEYS, "TERM"))).returncode
+
+
+def _write_rules(session: Session, path: Path) -> Path | None:
+    rules = [rule.read_text(encoding="utf-8") for rule in session.system_files]
+    instructions = project_instructions(session.cwd)
+    if instructions:
+        rules.append(instructions)
+    if not rules:
+        return None
+    path.write_text("\n\n".join(rules), encoding="utf-8")
+    return path
+
+
+def _env(session: Session, keys: tuple[str, ...]) -> dict[str, str]:
+    return {key: os.environ[key] for key in keys if key in os.environ} | session.env
 
 
 def version() -> str:

@@ -269,6 +269,27 @@ def test_plan_goes_on_with_the_same_request_only(isolated, in_repo, tmp_path, mo
     assert len(planning_runs(isolated)) == 2
 
 
+def test_plan_without_a_request_goes_on_with_the_conversation(isolated, in_repo, monkeypatch):
+    talks = []
+    monkeypatch.setattr(agent, "talk", lambda session, system_file: talks.append(session) or 0)
+    planner_sessions(
+        monkeypatch,
+        ("paused", "interrupt", None),
+        ("completed", None, {"status": "plan", "plan": PLAN}),
+        ("completed", None, {"status": "plan", "plan": PLAN}),
+    )
+
+    assert cli.main(["plan"]) == 130
+    assert cli.main(["plan", "--new"]) == 0
+    # The new conversation has ended with a plan, the first one goes on.
+    assert cli.main(["plan"]) == 0
+
+    first, new, reopened = talks
+    assert (new.session_id == first.session_id, new.resume) == (False, False)
+    assert (reopened.session_id, reopened.resume) == (first.session_id, True)
+    assert len(planning_runs(isolated)) == 2
+
+
 def test_gc_without_dead_runs(capsys):
     assert cli.main(["gc"]) == 0
     assert "no dead runs" in capsys.readouterr().err

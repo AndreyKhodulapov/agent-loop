@@ -72,9 +72,10 @@ if argv == ["--version"]:
 flag = "--resume" if "--resume" in argv else "--session-id"
 session_id = argv[argv.index(flag) + 1]
 settings = Path(argv[argv.index("--settings") + 1])
+# An interactive session reads the terminal, not the prompt.
 call = {
     "argv": argv,
-    "prompt": sys.stdin.read(),
+    "prompt": sys.stdin.read() if "-p" in argv else None,
     "env": dict(os.environ),
     "cwd": os.getcwd(),
     "pid": os.getpid(),

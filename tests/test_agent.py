@@ -1,5 +1,6 @@
 import json
 import os
+from dataclasses import replace
 
 import pytest
 from fakes import ASSISTANT, INIT, RATE_LIMIT, RESULT, SUBAGENT, USER, read_calls
@@ -98,6 +99,29 @@ def test_command_for_new_and_resumed_session(tmp_path):
     planner = agent.command(session(tmp_path, tools="Bash,Read"))
 
     assert planner[planner.index("--tools") + 1] == "Bash,Read"
+
+
+def test_talk_runs_in_the_terminal_of_the_operator(tmp_path, fake_claude, monkeypatch):
+    calls_path = fake_claude([], exit_code=3)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    rules = tmp_path / "planner.md"
+    rules.write_text("rule one")
+    opening = replace(
+        session(tmp_path, system_files=(rules,), tools="Bash,Read", session_id="s-1"),
+        prompt="# Conversation",
+    )
+
+    assert agent.talk(opening, tmp_path / "step-1.system.md") == 3
+    assert agent.talk(replace(opening, prompt="", resume=True), tmp_path / "step-2.system.md") == 3
+
+    first, reopened = read_calls(calls_path)
+    assert "-p" not in first["argv"] and "--output-format" not in first["argv"]
+    assert first["argv"][first["argv"].index("--tools") + 1] == "Bash,Read"
+    assert first["argv"][-3:] == ["--session-id", "s-1", "# Conversation"]
+    assert first["system"] == "rule one"
+    assert first["pgid"] == os.getpgid(0)
+    assert first["env"]["TERM"] == "xterm-256color"
+    assert reopened["argv"][-2:] == ["--resume", "s-1"]
 
 
 def commit(repo, files):

@@ -1,10 +1,11 @@
 """A run: the tasks of the run one after another on the current branch of the repository.
 
 `start` begins a run with the tasks of a cards file, `resume` goes on with a paused one.
-`plan_request` begins a run with the request of the operator, which stays in planning while
-`planner` works on it, and `answer` gives the planner the replies of the operator to its
-questions. A run holds the lock of the working directory and its own lock, works with the
-profile frozen at its start and keeps the services of the profile up while it works.
+`plan_request` begins a run with the request of the operator, from a file or in a conversation
+with the planner, which stays in planning while `planner` works on it, and `answer` gives the
+planner the replies of the operator to its questions. A run holds the lock of the working
+directory and its own lock, works with the profile frozen at its start and keeps the services of
+the profile up while it works.
 
 The run pauses when a task needs the operator: a question, the planner, a moved branch, Ctrl+C.
 Ctrl+C outside a session pauses the run with its open steps as `recovery` pauses a dead one.
@@ -113,31 +114,42 @@ def start(cfg: Config, tasks_file: Path) -> str | None:
                 return _interrupted(store, run)
 
 
-def plan_request(cfg: Config, request_file: Path) -> str | None:
-    """Plan the request of `request_file` for the current branch; returns why the run waits for
-    the operator, as `planner.go_on`, None when the plan is ready.
+def plan_request(cfg: Config, request_file: Path | None, new: bool = False) -> str | None:
+    """Plan the request of `request_file` for the current branch, or the one the operator gives
+    in a conversation with the planner when there is no file; returns why the run waits for the
+    operator, as `planner.go_on`, None when the plan is ready.
 
     The last run that has stopped planning the same request goes on; another request begins a
-    new run.
+    new run. Without a file, the last conversation that has not ended with a plan goes on,
+    unless the operator asks for a `new` one.
     """
     repo = _repo(cfg)
-    try:
-        request = request_file.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RunError(f"request: {exc}") from exc
-    if not request.strip():
-        raise RunError(f"{request_file} is empty")
+    request = None
+    if request_file is not None:
+        try:
+            request = request_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RunError(f"request: {exc}") from exc
+        if not request.strip():
+            raise RunError(f"{request_file} is empty")
     selfcheck.require(cfg.home)
     with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
-        run = _planning(store, cfg.home, repo, request)
+        if request is not None:
+            run = _planning(store, cfg.home, repo, request)
+        else:
+            run = None if new else _conversation(store, cfg.home, repo)
         if run is None:
             run = store.run(store.create_run(repo, _branch(repo), git.head(repo)))
             run_dir = step.run_dir(cfg.home, run.id)
             protected.save(repo, run_dir)
-            # Written last: a run with its request is set up.
-            (run_dir / planner.REQUEST_FILE).write_text(request, encoding="utf-8")
+            if request is not None:
+                # Written last: a run with its request is set up.
+                (run_dir / planner.REQUEST_FILE).write_text(request, encoding="utf-8")
         run_dir = step.run_dir(cfg.home, run.id)
         with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
+            if request is None:
+                logger.info("planning in a conversation on %s, the run is %s", run.branch, run.id)
+                return planner.talk(cfg, store, run)
             logger.info("planning %s on %s, the run is %s", request_file, run.branch, run.id)
             return planner.go_on(cfg, store, run)
 
@@ -297,6 +309,20 @@ def _planning(store: Store, home: Path, repo: Path, request: str) -> Run | None:
             and request_file.is_file()
             and not (run_dir / plan.PLAN_FILE).exists()
             and request_file.read_text(encoding="utf-8") == request
+        ):
+            return run
+    return None
+
+
+def _conversation(store: Store, home: Path, repo: Path) -> Run | None:
+    """The last run of `repo` whose conversation with the planner has not ended with a plan;
+    None if there is none."""
+    for run in reversed(store.runs("planning")):
+        # A run without a conversation has stopped before it was set up or plans a file.
+        if (
+            run.repo == str(repo)
+            and not (step.run_dir(home, run.id) / plan.PLAN_FILE).exists()
+            and any(s.kind == planner.TALK for s in store.planner_steps(run.id))
         ):
             return run
     return None

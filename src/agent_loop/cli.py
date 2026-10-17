@@ -69,9 +69,20 @@ def _parser() -> argparse.ArgumentParser:
 
     for name, summary in STUBS.items():
         commands.add_parser(name, help=summary).set_defaults(handler=_stub(name))
-    plan = commands.add_parser("plan", help="plan a request of the operator with the planner")
-    plan.add_argument(
-        "--from", dest="request", type=Path, required=True, help="the request, a markdown file"
+    plan = commands.add_parser(
+        "plan", help="plan a request of the operator in a conversation with the planner"
+    )
+    source = plan.add_mutually_exclusive_group()
+    source.add_argument(
+        "--from",
+        dest="request",
+        type=Path,
+        help="the request, a markdown file: plan it without a conversation",
+    )
+    source.add_argument(
+        "--new",
+        action="store_true",
+        help="start a new conversation instead of going on with the last one",
     )
     plan.set_defaults(handler=_plan)
     answer = commands.add_parser("answer", help="answer the questions of the planner")
@@ -110,7 +121,7 @@ def _stub(name: str) -> Callable[[argparse.Namespace, config.Config], int]:
 
 
 def _plan(args: argparse.Namespace, cfg: config.Config) -> int:
-    return _work(cfg, lambda: runner.plan_request(cfg, args.request))
+    return _work(cfg, lambda: runner.plan_request(cfg, args.request, args.new))
 
 
 def _answer(args: argparse.Namespace, cfg: config.Config) -> int:

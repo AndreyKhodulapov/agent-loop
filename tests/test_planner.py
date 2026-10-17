@@ -60,6 +60,19 @@ class Env:
 
         monkeypatch.setattr(step, "run", run)
 
+    def talk(self):
+        return planner.talk(self.cfg, self.store, self.store.run(self.run_id))
+
+    def script_talks(self, monkeypatch, *codes):
+        """Replace the conversations of the operator: each ends with its exit code."""
+        scripted = iter(codes)
+
+        def talk(session, system_file):
+            self.sessions.append(session)
+            return next(scripted)
+
+        monkeypatch.setattr(agent, "talk", talk)
+
     def questions_file(self):
         return self.run_dir / planner.QUESTIONS_FILE
 
@@ -221,3 +234,73 @@ def test_planner_waits_for_room_in_the_limits(env, monkeypatch):
 
     [wait] = waits
     assert 3590 < wait <= 3600
+
+
+@pytest.fixture
+def conversation(env):
+    (env.run_dir / planner.REQUEST_FILE).unlink()
+    return env
+
+
+def test_conversation_ends_with_the_plan_asked_in_it(conversation, monkeypatch):
+    conversation.script_talks(monkeypatch, 0)
+    conversation.script(monkeypatch, planned())
+
+    assert conversation.talk() is None
+
+    talk, asking = conversation.sessions
+    assert talk.prompt == prompts.planner_talk(SETTINGS)
+    assert (talk.schema, talk.resume, talk.tools) == (None, False, "Bash,Read")
+    assert guard.WRITE_RULE in json.loads(talk.settings.read_text())["permissions"]["deny"]
+    assert (asking.session_id, asking.resume) == (talk.session_id, True)
+    assert (asking.prompt, asking.schema) == (prompts.PLANNER_TALKED, planner.ANSWER_SCHEMA)
+    steps = conversation.store.planner_steps(conversation.run_id)
+    assert [s.kind for s in steps] == [planner.TALK, planner.PLAN]
+    assert (conversation.run_dir / "plan.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("first", "waits"),
+    [
+        ([asked()], planner.QUESTIONS),
+        ([paused("interrupt")], implement.INTERRUPT),
+        ([planned(tasks=[])] * (planner.RETRIES + 1), planner.REJECTED),
+    ],
+    ids=["questions", "interrupt", "rejected"],
+)
+def test_next_talk_reopens_the_conversation(conversation, monkeypatch, first, waits):
+    conversation.script_talks(monkeypatch, 0, 0)
+    conversation.script(monkeypatch, *first)
+
+    assert conversation.talk() == waits
+
+    assert not conversation.questions_file().exists()
+    with pytest.raises(planner.PlanError, match="plans in a conversation"):
+        conversation.answer()
+    # The retries start anew after the conversation.
+    conversation.script(monkeypatch, planned(tasks=[]), planned())
+    assert conversation.talk() is None
+    opened, reopened = conversation.sessions[0], conversation.sessions[-3]
+    assert (reopened.session_id, reopened.resume) == (opened.session_id, True)
+    assert (reopened.prompt, reopened.schema) == ("", None)
+
+
+def test_conversation_that_failed_to_start_is_opened_anew(conversation, monkeypatch):
+    conversation.script_talks(monkeypatch, 1, 0)
+    conversation.script(monkeypatch, planned())
+
+    with pytest.raises(planner.PlanError, match="exited with code 1"):
+        conversation.talk()
+    assert conversation.talk() is None
+
+    failed, opened, _ = conversation.sessions
+    assert opened.session_id != failed.session_id
+    assert (opened.resume, opened.prompt) == (False, prompts.planner_talk(SETTINGS))
+
+
+def test_full_context_of_a_conversation_goes_back_to_the_operator(conversation, monkeypatch):
+    conversation.script_talks(monkeypatch, 0)
+    conversation.script(monkeypatch, paused("context", 125_000))
+
+    with pytest.raises(planner.PlanError, match="/compact"):
+        conversation.talk()

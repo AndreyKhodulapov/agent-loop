@@ -49,6 +49,12 @@ PLANNER_RESUMED = (
     "agent-loop has resumed this session after a pause. Go on with the plan from where you"
     " stopped and answer as before."
 )
+# The prompt that asks the planner for the plan once the operator has left the conversation.
+PLANNER_TALKED = (
+    "The operator has ended the conversation. Answer with the plan agreed on in it. If the plan"
+    " cannot be built from what has been said, answer with the questions that are still open:"
+    " agent-loop reopens this conversation for the operator to talk them over."
+)
 
 
 @dataclass(frozen=True)
@@ -91,16 +97,31 @@ def system_files(role: str, settings: Settings) -> tuple[Path, ...]:
 def planner(request: str, settings: Settings) -> str:
     """The prompt of the planner of `request`, the task of the operator in their own words."""
     return "\n\n".join(
+        ["# Request of the operator", _fenced(request, "markdown"), *_plan_rules(settings)]
+    )
+
+
+def planner_talk(settings: Settings) -> str:
+    """The prompt that opens a conversation of the operator with the planner."""
+    return "\n\n".join(
         [
-            "# Request of the operator",
-            _fenced(request, "markdown"),
-            "## Size",
-            f"The work of one task, tests included, fits in {settings.diff_soft_lines} changed"
-            f" lines. A task over {settings.diff_hard_lines} lines comes back to the planner.",
-            "## Language",
-            f"Write the plan in {_language(settings)}: the operator reads and approves it.",
+            "# Conversation with the operator",
+            "The operator gives the request in this conversation and talks it over with you."
+            " Ask what to plan first. When the operator leaves, agent-loop asks you for the plan"
+            " in this conversation.",
+            *_plan_rules(settings),
         ]
     )
+
+
+def _plan_rules(settings: Settings) -> list[str]:
+    return [
+        "## Size",
+        f"The work of one task, tests included, fits in {settings.diff_soft_lines} changed"
+        f" lines. A task over {settings.diff_hard_lines} lines comes back to the planner.",
+        "## Language",
+        f"Write the plan in {_language(settings)}: the operator reads and approves it.",
+    ]
 
 
 def plan_errors(errors: list[str]) -> str:

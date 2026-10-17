@@ -1,9 +1,12 @@
 """The loop of the planner: its sessions turn the request of the operator into a plan.
 
-The planner answers with a plan or with questions. A plan that fails `plan.validate` goes back
-to the same session with its errors, at most `RETRIES` times; after that the run waits for the
-operator with the draft in the run directory. Questions go to `QUESTIONS.md` in the run
-directory, and `answer` gives the replies of the operator to the same session.
+The request comes from a file or from a conversation of the operator with the planner (`talk`),
+after which the loop asks the same session for the plan. The planner answers with a plan or with
+questions. A plan that fails `plan.validate` goes back to the same session with its errors, at
+most `RETRIES` times after the request or the last conversation; after that the run waits for the
+operator with the draft in the run directory. Questions on a request from a file go to
+`QUESTIONS.md` in the run directory, and `answer` gives the replies of the operator to the same
+session; questions and errors of a conversation are talked over when `talk` reopens it.
 
 The run stays in planning while the planner works: a stopped planner does not pause it, and
 `go_on` picks the work up from the last step of the planner. A paused session is resumed or
@@ -26,6 +29,7 @@ from agent_loop.store import Run, Step, Store
 logger = logging.getLogger(__name__)
 
 PLAN = "plan"
+TALK = "talk"
 QUESTIONS = "questions"
 # The plan still has errors after the retries: the run waits for the operator.
 REJECTED = "rejected"
@@ -66,6 +70,13 @@ def go_on(cfg: Config, store: Store, run: Run) -> str | None:
     return _Planner(cfg, store, run).go_on()
 
 
+def talk(cfg: Config, store: Store, run: Run) -> str | None:
+    """Open the conversation of the operator with the planner of `run` in the terminal, the one
+    the run has if it has one, and ask the planner for the plan when the operator has left;
+    returns as `go_on`."""
+    return _Planner(cfg, store, run).talk()
+
+
 def answer(cfg: Config, store: Store, run: Run) -> str | None:
     """Give the planner of `run` the replies of the operator from `QUESTIONS.md`; returns as
     `go_on`."""
@@ -79,6 +90,8 @@ class _Planner:
         self.run = run
         self.repo = Path(run.repo)
         self.run_dir = step.run_dir(cfg.home, run.id)
+        # A run that plans in a conversation has no request file.
+        self.conversation = not (self.run_dir / REQUEST_FILE).exists()
 
     def go_on(self) -> str | None:
         steps = self.store.planner_steps(self.run.id)
@@ -92,7 +105,32 @@ class _Planner:
             return self._loop(self._new())
         return self._loop(self._take(steps))
 
+    def talk(self) -> str | None:
+        steps = self.store.planner_steps(self.run.id)
+        # A conversation that has failed to start has nothing to go on with.
+        if steps and not (steps[-1].kind == TALK and steps[-1].outcome == "failed"):
+            upcoming = _Session("", steps[-1].session_id)
+        else:
+            upcoming = _Session(prompts.planner_talk(self.cfg.settings))
+        self._wait_for_room()
+        session = self._agent_session(upcoming, schema=None)
+        step_id = self.store.start_step(
+            self.run.id, None, TALK, git.head(self.repo), [], session.session_id
+        )
+        logger.info(
+            "talk the request over with the planner, the loop asks for the plan after /exit"
+        )
+        code = agent.talk(session, self.run_dir / f"step-{step_id}.system.md")
+        if code != 0:
+            self.store.finish_step(step_id, "failed", {"exit_code": code})
+            raise PlanError(f"claude has exited with code {code}")
+        self.store.finish_step(step_id, "completed", {"exit_code": code})
+        logger.info("the conversation is over, asking the planner for the plan")
+        return self._loop(_Session(prompts.PLANNER_TALKED, session.session_id))
+
     def answer(self) -> str | None:
+        if self.conversation:
+            raise PlanError(f"run {self.run.id} plans in a conversation, `loop plan` reopens it")
         steps = self.store.planner_steps(self.run.id)
         output = steps[-1].detail.get("answer") if steps else None
         if output is None or output["status"] != QUESTIONS or _errors(output):
@@ -113,9 +151,7 @@ class _Planner:
     def _loop(self, upcoming: _Session | str | None) -> str | None:
         """Run the `upcoming` session and the ones it leads to; returns as `go_on`."""
         while isinstance(upcoming, _Session):
-            resume_at = budget.no_room(self.cfg.home, self.cfg.settings)
-            if resume_at is not None:
-                time.sleep(max(0, resume_at - time.time()))
+            self._wait_for_room()
             outcome = self._session(upcoming)
             steps = self.store.planner_steps(self.run.id)
             if outcome.status == "failed":
@@ -141,6 +177,11 @@ class _Planner:
         if how.mode == "session":
             return _Session(prompts.PLANNER_RESUMED, how.session_id)
         if how.mode == "handoff":
+            if self.conversation:
+                raise PlanError(
+                    "the conversation has filled the context of the planner: `/compact` it in"
+                    " `loop plan`, or start anew with `loop plan --new`"
+                )
             # The planner writes no handoff: a new session reads the repository again.
             logger.warning("the context of the planner is full, planning anew in a new session")
             return self._new()
@@ -152,6 +193,13 @@ class _Planner:
         last = steps[-1]
         output = last.detail["answer"]
         errors = _errors(output)
+        if not errors and output["status"] == QUESTIONS and self.conversation:
+            logger.warning(
+                "the planner has questions, `loop plan` reopens the conversation to talk them"
+                " over:\n%s",
+                "\n".join(f"- {question}" for question in output["questions"]),
+            )
+            return QUESTIONS
         if not errors and output["status"] == QUESTIONS:
             self._replies(output["questions"])
             logger.warning(
@@ -169,22 +217,24 @@ class _Planner:
             )
             return None
         logger.warning("the plan has errors:\n%s", "\n".join(errors))
-        rejected = [
-            s
-            for s in steps
-            if s.outcome == "completed"
-            and s.detail["answer"] is not None
-            and _errors(s.detail["answer"])
-        ]
-        if len(rejected) <= RETRIES:
+        rejected = 0
+        # The retries start anew after a conversation: the operator may have fixed the plan in it.
+        for s in reversed(steps):
+            if s.kind == TALK:
+                break
+            if s.outcome == "completed" and s.detail["answer"] is not None:
+                rejected += bool(_errors(s.detail["answer"]))
+        if rejected <= RETRIES:
             return _Session(prompts.plan_errors(errors), last.session_id)
         if "plan" in output:
             plan.save(self.run_dir, output["plan"], DRAFT_FILE)
         logger.error(
-            "the plan still has errors after %d retries, the draft is in %s: change the request"
-            " and plan again",
+            "the plan still has errors after %d retries, the draft is in %s: %s",
             RETRIES,
             self.run_dir / DRAFT_FILE,
+            "`loop plan` reopens the conversation to fix it"
+            if self.conversation
+            else "change the request and plan again",
         )
         return REJECTED
 
@@ -206,6 +256,15 @@ class _Planner:
         return None
 
     def _session(self, upcoming: _Session) -> step.Outcome:
+        session = self._agent_session(upcoming, ANSWER_SCHEMA)
+        # The planner changes no files: nothing to roll back or to tell from its work.
+        step_id = self.store.start_step(
+            self.run.id, None, PLAN, git.head(self.repo), [], session.session_id
+        )
+        with log.scope(stage=PLAN):
+            return step.run(session, self.cfg, self.store, self.run.id, step_id)
+
+    def _agent_session(self, upcoming: _Session, schema: dict | None) -> agent.Session:
         settings = self.cfg.settings
         session = agent.Session(
             prompt=upcoming.prompt,
@@ -216,17 +275,17 @@ class _Planner:
             ),
             effort=settings.effort_planner,
             system_files=prompts.system_files("planner", settings),
-            schema=ANSWER_SCHEMA,
+            schema=schema,
             tools="Bash,Read",
         )
         if upcoming.session_id is not None:
             session = replace(session, session_id=upcoming.session_id, resume=True)
-        # The planner changes no files: nothing to roll back or to tell from its work.
-        step_id = self.store.start_step(
-            self.run.id, None, PLAN, git.head(self.repo), [], session.session_id
-        )
-        with log.scope(stage=PLAN):
-            return step.run(session, self.cfg, self.store, self.run.id, step_id)
+        return session
+
+    def _wait_for_room(self) -> None:
+        resume_at = budget.no_room(self.cfg.home, self.cfg.settings)
+        if resume_at is not None:
+            time.sleep(max(0, resume_at - time.time()))
 
     def _interrupted(self) -> str:
         logger.warning("the planner is stopped by the operator, the same `loop plan` goes on")
