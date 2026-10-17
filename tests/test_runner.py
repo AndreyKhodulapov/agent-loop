@@ -270,7 +270,7 @@ def test_task_gone_back_to_the_planner_is_replanned_and_the_run_goes_on(
 
 def test_run_stopped_while_replanning_replans_on_resume(home, cfg, approved, monkeypatch):
     Tasks(monkeypatch, moves("implementing", "replan", reason="fix_attempts"))
-    Replans(monkeypatch, implement.Stop("timeout"))
+    Replans(monkeypatch, step.Stop("timeout"))
 
     assert runner.start(cfg, None) == "timeout"
 
@@ -312,7 +312,7 @@ def test_replan_that_changes_the_criteria_waits_for_the_operator(
     home, cfg, approved, monkeypatch, operator, recorded
 ):
     Tasks(monkeypatch, moves("implementing", "replan", reason="too_big"))
-    Replans(monkeypatch, implement.Stop(planner.CRITERIA))
+    Replans(monkeypatch, step.Stop(planner.CRITERIA))
     criteria = Criteria(monkeypatch)
 
     assert runner.start(cfg, None) == planner.CRITERIA
@@ -394,7 +394,7 @@ def test_run_waits_for_the_limits_and_goes_on(home, cfg, approved, monkeypatch):
     monkeypatch.setattr(time, "sleep", slept.append)
     tasks = Tasks(
         monkeypatch,
-        moves(stop=implement.Stop(implement.BUDGET, resume_at)),
+        moves(stop=step.Stop(step.BUDGET, resume_at)),
         commits(),
         commits(),
     )
@@ -424,7 +424,7 @@ def test_ctrl_c_while_waiting_for_the_limits_leaves_the_run_paused(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(time, "sleep", interrupted)
-    Tasks(monkeypatch, moves(stop=implement.Stop(implement.BUDGET, int(time.time()) + 600)))
+    Tasks(monkeypatch, moves(stop=step.Stop(step.BUDGET, int(time.time()) + 600)))
 
     assert runner.start(cfg, None) == "interrupt"
     run, _, run_moves = the_run(home)
@@ -438,7 +438,7 @@ def test_ctrl_c_while_waiting_for_the_limits_leaves_the_run_paused(
 @pytest.mark.parametrize(
     "turn, reason",
     [
-        (moves("implementing", "gating", stop=implement.Stop(implement.INTERRUPT)), "interrupt"),
+        (moves("implementing", "gating", stop=step.Stop(step.INTERRUPT)), "interrupt"),
         (moves("implementing", "paused", reason="interrupt"), "interrupt"),
         (moves("implementing", "paused", reason="branch_changed"), "branch_changed"),
     ],

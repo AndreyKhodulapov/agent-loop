@@ -180,7 +180,8 @@ def test_questions_go_to_the_operator_and_the_replies_to_the_session(env, monkey
     assert env.go_on() == planner.QUESTIONS
     assert "The admin" in env.questions_file().read_text()
 
-    env.questions_file().write_text(env.questions_file().read_text() + "Yes\n")
+    # On the line of the heading, without a newline at the end.
+    env.questions_file().write_text(env.questions_file().read_text().rstrip() + " Yes")
     env.script(monkeypatch, planned(), criticized())
 
     assert env.answer() is None
@@ -204,21 +205,6 @@ def test_questions_file_that_lost_its_questions_is_written_anew(env, monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("pause", "resumed"),
-    [(paused("timeout"), True), (paused("context", 125_000), False)],
-    ids=["timeout", "full context"],
-)
-def test_paused_planner_goes_on(env, monkeypatch, pause, resumed):
-    env.script(monkeypatch, pause, planned(), criticized())
-
-    assert env.go_on() is None
-
-    first, second, _ = env.sessions
-    assert (second.session_id == first.session_id) == second.resume == resumed
-    assert second.prompt == (prompts.PLANNER_RESUMED if resumed else first.prompt)
-
-
-@pytest.mark.parametrize(
     "stop",
     [paused("interrupt"), answered({"status": "plan"}, "interrupt")],
     ids=["in the session", "after an answer to fix"],
@@ -226,25 +212,12 @@ def test_paused_planner_goes_on(env, monkeypatch, pause, resumed):
 def test_operator_stop_leaves_the_planner_to_the_next_loop_plan(env, monkeypatch, stop):
     env.script(monkeypatch, stop)
 
-    assert env.go_on() == implement.INTERRUPT
+    assert env.go_on() == step.INTERRUPT
 
     env.script(monkeypatch, planned(), criticized())
     assert env.go_on() is None
     first, second, _ = env.sessions
     assert (second.session_id, second.resume) == (first.session_id, True)
-
-
-def test_failed_planner_session_plans_anew_next_time(env, monkeypatch):
-    env.script(monkeypatch, step.Outcome("failed", "API error", None, 0))
-
-    with pytest.raises(planner.PlanError, match="has failed: API error"):
-        env.go_on()
-
-    env.script(monkeypatch, planned(), criticized())
-    assert env.go_on() is None
-    first, second, _ = env.sessions
-    assert second.session_id != first.session_id
-    assert not second.resume
 
 
 def test_planner_waits_for_room_in_the_limits(env, monkeypatch):
@@ -317,36 +290,6 @@ def test_blocking_findings_go_back_to_the_planner_for_the_rounds_of_the_critic(
     assert "left 1 blocking findings to the operator" in caplog.text
 
 
-@pytest.mark.parametrize(
-    ("pause", "resumed"),
-    [(paused("timeout"), True), (paused("context", 125_000), False)],
-    ids=["timeout", "full context"],
-)
-def test_paused_critic_goes_on(env, monkeypatch, pause, resumed):
-    env.script(monkeypatch, planned(), pause, criticized())
-
-    assert env.go_on() is None
-
-    _, first, second = env.sessions
-    assert (second.session_id == first.session_id) == second.resume == resumed
-    assert second.prompt == (prompts.CRITIC_RESUMED if resumed else first.prompt)
-    assert second.schema == planner.CRITIQUE_SCHEMA
-
-
-def test_failed_critic_reviews_the_same_plan_anew_next_time(env, monkeypatch):
-    env.script(monkeypatch, planned(), step.Outcome("failed", "API error", None, 0))
-
-    with pytest.raises(planner.PlanError, match="has failed: API error"):
-        env.go_on()
-    assert not (env.run_dir / "plan.json").exists()
-
-    env.script(monkeypatch, criticized())
-    assert env.go_on() is None
-    _, failed, critic = env.sessions
-    assert (critic.prompt, critic.resume) == (failed.prompt, False)
-    assert critic.session_id != failed.session_id
-
-
 @pytest.fixture
 def conversation(env):
     (env.run_dir / planner.REQUEST_FILE).unlink()
@@ -375,7 +318,7 @@ def test_conversation_ends_with_the_plan_asked_in_it(conversation, monkeypatch):
     ("first", "waits"),
     [
         ([asked()], planner.QUESTIONS),
-        ([paused("interrupt")], implement.INTERRUPT),
+        ([paused("interrupt")], step.INTERRUPT),
         ([planned(tasks=[])] * (planner.RETRIES + 1), planner.REJECTED),
     ],
     ids=["questions", "interrupt", "rejected"],
@@ -526,7 +469,7 @@ def test_replan_that_keeps_its_errors_stops_the_run(replanning, monkeypatch):
     env.script(monkeypatch, replanned(), criticized(finding()), *rejected)
     before = env.store.tasks(env.run_id)
 
-    assert replan(env) == implement.Stop(planner.REJECTED)
+    assert replan(env) == step.Stop(planner.REJECTED)
 
     assert env.store.tasks(env.run_id) == before
     assert not (env.run_dir / planner.CRITIQUE_FILE).exists()
@@ -575,9 +518,9 @@ def test_blocking_findings_of_the_critic_go_back_to_the_replanner_once(
 @pytest.mark.parametrize(
     ("outcomes", "applied"),
     [
-        ([paused(implement.INTERRUPT)], False),
-        ([replace(replanned(), reason=implement.INTERRUPT)], False),
-        ([replanned(), replace(criticized(), reason=implement.INTERRUPT)], True),
+        ([paused(step.INTERRUPT)], False),
+        ([replace(replanned(), reason=step.INTERRUPT)], False),
+        ([replanned(), replace(criticized(), reason=step.INTERRUPT)], True),
     ],
     ids=["in the session", "after the answer", "after the critic"],
 )
@@ -585,7 +528,7 @@ def test_operator_stop_stops_the_run(replanning, monkeypatch, outcomes, applied)
     env = replanning
     env.script(monkeypatch, *outcomes)
 
-    assert replan(env) == implement.Stop(implement.INTERRUPT)
+    assert replan(env) == step.Stop(step.INTERRUPT)
 
     statuses = [t.status for t in env.store.tasks(env.run_id)]
     assert statuses[0] == ("dropped" if applied else "replan")
@@ -593,8 +536,8 @@ def test_operator_stop_stops_the_run(replanning, monkeypatch, outcomes, applied)
 
 def test_replanning_stopped_by_the_operator_goes_on_in_its_session(replanning, monkeypatch):
     env = replanning
-    env.script(monkeypatch, paused(implement.INTERRUPT))
-    assert replan(env) == implement.Stop(implement.INTERRUPT)
+    env.script(monkeypatch, paused(step.INTERRUPT))
+    assert replan(env) == step.Stop(step.INTERRUPT)
 
     env.script(monkeypatch, replanned(), criticized())
     assert replan(env) is None
@@ -606,8 +549,8 @@ def test_replanning_stopped_by_the_operator_goes_on_in_its_session(replanning, m
 
 def test_answer_the_run_has_left_goes_to_the_critic(replanning, monkeypatch):
     env = replanning
-    env.script(monkeypatch, replace(replanned(), reason=implement.INTERRUPT))
-    assert replan(env) == implement.Stop(implement.INTERRUPT)
+    env.script(monkeypatch, replace(replanned(), reason=step.INTERRUPT))
+    assert replan(env) == step.Stop(step.INTERRUPT)
 
     env.script(monkeypatch, criticized())
     assert replan(env) is None
@@ -617,52 +560,90 @@ def test_answer_the_run_has_left_goes_to_the_critic(replanning, monkeypatch):
     assert env.store.tasks(env.run_id)[0].status == "dropped"
 
 
-def test_failed_critic_of_the_replan_reviews_it_anew_next_time(replanning, monkeypatch):
-    env = replanning
-    env.script(monkeypatch, replanned(), step.Outcome("failed", "API error", None, 0))
-    with pytest.raises(planner.PlanError, match="critic of the replan has failed: API error"):
-        replan(env)
-
-    env.script(monkeypatch, criticized())
-    assert replan(env) is None
-
-    _, failed, critic = env.sessions
-    assert (critic.prompt, critic.resume) == (failed.prompt, False)
-    assert critic.session_id != failed.session_id
-
-
 @pytest.mark.parametrize(
     ("pause", "resumed"),
     [(paused("timeout"), True), (paused("context", 125_000), False)],
     ids=["timeout", "full context"],
 )
-def test_paused_replanning_goes_on(replanning, monkeypatch, pause, resumed):
-    env = replanning
-    env.script(monkeypatch, pause, replanned(), criticized())
+@pytest.mark.parametrize(
+    ("fixture", "go_on", "before", "after", "prompt", "schema"),
+    [
+        (
+            "env",
+            Env.go_on,
+            [],
+            [planned(), criticized()],
+            prompts.PLANNER_RESUMED,
+            planner.ANSWER_SCHEMA,
+        ),
+        (
+            "env",
+            Env.go_on,
+            [planned()],
+            [criticized()],
+            prompts.CRITIC_RESUMED,
+            planner.CRITIQUE_SCHEMA,
+        ),
+        (
+            "replanning",
+            replan,
+            [],
+            [replanned(), criticized()],
+            prompts.PLANNER_RESUMED,
+            planner.REPLAN_SCHEMA,
+        ),
+        (
+            "replanning",
+            replan,
+            [replanned()],
+            [criticized()],
+            prompts.CRITIC_RESUMED,
+            planner.CRITIQUE_SCHEMA,
+        ),
+    ],
+    ids=["planner", "critic", "replanner", "critic of the replan"],
+)
+def test_paused_session_goes_on(
+    request, monkeypatch, fixture, go_on, before, after, prompt, schema, pause, resumed
+):
+    env = request.getfixturevalue(fixture)
+    env.script(monkeypatch, *before, pause, *after)
 
-    assert replan(env) is None
+    assert go_on(env) is None
 
-    first, second, _ = env.sessions
+    first, second = env.sessions[len(before) : len(before) + 2]
     assert (second.session_id == first.session_id) == second.resume == resumed
-    assert second.prompt == (prompts.PLANNER_RESUMED if resumed else first.prompt)
-    assert second.schema == planner.REPLAN_SCHEMA
+    assert second.prompt == (prompt if resumed else first.prompt)
+    assert second.schema == schema
 
 
 @pytest.mark.parametrize(
-    ("pause", "resumed"),
-    [(paused("timeout"), True), (paused("context", 125_000), False)],
-    ids=["timeout", "full context"],
+    ("fixture", "go_on", "before", "after", "who"),
+    [
+        ("env", Env.go_on, [], [planned(), criticized()], "planner session"),
+        ("env", Env.go_on, [planned()], [criticized()], "planner session"),
+        ("replanning", replan, [], [replanned(), criticized()], "replanning session"),
+        ("replanning", replan, [replanned()], [criticized()], "critic of the replan"),
+    ],
+    ids=["planner", "critic", "replanner", "critic of the replan"],
 )
-def test_paused_critic_of_the_replan_goes_on(replanning, monkeypatch, pause, resumed):
-    env = replanning
-    env.script(monkeypatch, replanned(), pause, criticized())
+def test_failed_session_starts_anew_next_time(
+    request, monkeypatch, fixture, go_on, before, after, who
+):
+    env = request.getfixturevalue(fixture)
+    plan_file = env.run_dir / plan.PLAN_FILE
+    saved = plan_file.exists() and plan_file.read_text()
+    env.script(monkeypatch, *before, step.Outcome("failed", "API error", None, 0))
 
-    assert replan(env) is None
+    with pytest.raises(planner.PlanError, match=f"{who} has failed: API error"):
+        go_on(env)
+    assert (plan_file.exists() and plan_file.read_text()) == saved
 
-    _, first, second = env.sessions
-    assert (second.session_id == first.session_id) == second.resume == resumed
-    assert second.prompt == (prompts.CRITIC_RESUMED if resumed else first.prompt)
-    assert second.schema == planner.CRITIQUE_SCHEMA
+    env.script(monkeypatch, *after)
+    assert go_on(env) is None
+    failed, anew = env.sessions[len(before) : len(before) + 2]
+    assert (anew.prompt, anew.resume) == (failed.prompt, False)
+    assert anew.session_id != failed.session_id
 
 
 def test_replanner_that_keeps_stopping_fails_the_run(replanning, monkeypatch):
@@ -688,7 +669,7 @@ def test_replanning_waits_for_room_in_the_limits(replanning, monkeypatch):
     monkeypatch.setattr(budget, "no_room", lambda home, settings: resume_at)
     env.script(monkeypatch)
 
-    assert replan(env) == implement.Stop(implement.BUDGET, resume_at)
+    assert replan(env) == step.Stop(step.BUDGET, resume_at)
 
     assert env.sessions == []
 
@@ -716,7 +697,7 @@ def test_replan_that_changes_the_criteria_waits_for_the_operator(
     env.script(monkeypatch, *outcomes)
     before = env.store.tasks(env.run_id)
 
-    assert replan(env) == implement.Stop(planner.CRITERIA)
+    assert replan(env) == step.Stop(planner.CRITERIA)
 
     assert env.store.tasks(env.run_id) == before
     assert plan.load(env.run_dir) == PLAN
@@ -728,7 +709,7 @@ def test_replan_that_changes_the_criteria_waits_for_the_operator(
     assert "Approved criteria:\n- The admin lists, adds and removes dishes" in question
     assert "New criteria:\n- The admin lists and adds dishes\n\nWhy: Prices first" in question
     # The run that has stopped asks the operator again without a session.
-    assert replan(env) == implement.Stop(planner.CRITERIA)
+    assert replan(env) == step.Stop(planner.CRITERIA)
 
     planner.approve_criteria(env.cfg, env.store, run_of(env))
     assert replan(env) is None
@@ -747,7 +728,7 @@ def test_replan_that_changes_the_criteria_waits_for_the_operator(
 def test_objection_to_the_criteria_goes_to_the_replanner_and_a_critic(replanning, monkeypatch):
     env = replanning
     env.script(monkeypatch, replanned(criteria=NARROWED), criticized())
-    assert replan(env) == implement.Stop(planner.CRITERIA)
+    assert replan(env) == step.Stop(planner.CRITERIA)
     question = planner.criteria_question(env.cfg, env.store, run_of(env))
 
     planner.object_to_criteria(env.cfg, env.store, run_of(env), question, "Keep the removal")

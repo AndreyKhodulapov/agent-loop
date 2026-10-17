@@ -313,9 +313,9 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
         else:
             go_on = implement.start if task.status == "pending" else implement.resume
             stop = go_on(cfg, store, run, task, len(tasks), profile, previous)
-        if stop is not None and stop.reason == implement.BUDGET:
+        if stop is not None and stop.reason == step.BUDGET:
             if not _wait(store, run, stop.resume_at):
-                return implement.INTERRUPT
+                return step.INTERRUPT
             continue
         if stop is not None and stop.reason == planner.CRITERIA:
             question = planner.criteria_question(cfg, store, run)
@@ -348,12 +348,12 @@ def _work(cfg: Config, store: Store, run: Run, profile: Profile) -> str | None:
             return task.status
         # Other pauses and a task in replan go on at once: the task resumes its session or goes
         # to the planner, the planner replans it.
-        if task.status == "paused" and task.reason in (implement.INTERRUPT, gates.BRANCH_CHANGED):
+        if task.status == "paused" and task.reason in (step.INTERRUPT, gates.BRANCH_CHANGED):
             return _pause(store, run, task.reason)
 
 
 def _wait(store: Store, run: Run, resume_at: int) -> bool:
-    store.move_run(run.id, "paused", implement.BUDGET)
+    store.move_run(run.id, "paused", step.BUDGET)
     try:
         time.sleep(max(0, resume_at - time.time()))
     except KeyboardInterrupt:
@@ -376,11 +376,9 @@ def _interrupted(store: Store, run: Run) -> str:
     logger.warning("stopped by the operator")
     # Ctrl+C in `down` comes after the run has paused or is done.
     if store.run(run.id).status == "running":
-        recovery.pause(store, run, implement.INTERRUPT)
-        logger.warning(
-            "the run is paused (%s), `loop resume %s` goes on", implement.INTERRUPT, run.id
-        )
-    return implement.INTERRUPT
+        recovery.pause(store, run, step.INTERRUPT)
+        logger.warning("the run is paused (%s), `loop resume %s` goes on", step.INTERRUPT, run.id)
+    return step.INTERRUPT
 
 
 def _report_operator_actions(store: Store, tasks: list[Task]) -> None:

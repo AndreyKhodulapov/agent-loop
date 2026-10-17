@@ -38,19 +38,6 @@ GATE = "gate"
 FIX = "fix"
 COMMIT = "commit"
 REPLY = "reply"
-INTERRUPT = "interrupt"
-BUDGET = "budget"
-
-
-@dataclass(frozen=True)
-class Stop:
-    """Why the run stops before the task is through; the task keeps its status."""
-
-    # interrupt: the operator has stopped the run while a session was answering, the answer is
-    # taken; budget: the subscription limits leave no room for the next session.
-    reason: str
-    # Unix seconds when the limits are expected to leave room, for a budget stop.
-    resume_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -71,7 +58,7 @@ class _Session:
 
 def start(
     cfg: Config, store: Store, run: Run, task: Task, total: int, profile: Profile, previous: str
-) -> Stop | None:
+) -> step.Stop | None:
     """Take a pending `task`, one of `total` tasks of `run`, through the loop.
 
     `profile` is the frozen profile of the run, `previous` is what `prompts.previous_tasks` tells
@@ -84,7 +71,7 @@ def start(
 
 def resume(
     cfg: Config, store: Store, run: Run, task: Task, total: int, profile: Profile, previous: str
-) -> Stop | None:
+) -> step.Stop | None:
     """Go on with a `task` that has stopped before it was through; the rest is as in `start`.
 
     The task is paused, or it is implementing, gating or fixing after the run stopped between
@@ -115,13 +102,13 @@ class _Task:
         self.untracked = _untracked(steps) if steps else git.untracked(self.repo)
         self.tests = task.tests
 
-    def start(self, previous: str) -> Stop | None:
+    def start(self, previous: str) -> step.Stop | None:
         self.tests = gates.count_tests(self.profile, self.repo)
         if self.tests is not None:
             self.store.set_tests(self.task.id, self.tests)
         return self._loop(self._implementer(previous))
 
-    def resume(self, previous: str) -> Stop | None:
+    def resume(self, previous: str) -> step.Stop | None:
         steps = self.store.steps(self.task.id)
         if not steps:
             # The run stopped before the first session of the task.
@@ -153,7 +140,7 @@ class _Task:
             return None
         return self._loop(None)
 
-    def _resume_paused(self, steps: list[Step], previous: str) -> Stop | None:
+    def _resume_paused(self, steps: list[Step], previous: str) -> step.Stop | None:
         last = steps[-1]
         if last.kind in (GATE, COMMIT):
             # The branch has moved: the work is checked again before it is committed.
@@ -171,7 +158,7 @@ class _Task:
             return self._loop(self._implementer(previous, handoff, self._work()))
         return self._loop(self._fixer(last_verdict(steps), handoff))
 
-    def _loop(self, upcoming: _Session | None) -> Stop | None:
+    def _loop(self, upcoming: _Session | None) -> step.Stop | None:
         """Run the `upcoming` session, or the gate if it is None, and go on until the task is
         through with the loop or the run has to stop."""
         while True:
@@ -190,9 +177,9 @@ class _Task:
                 if not self._take(self.store.steps(self.task.id)[-1]):
                     # The task waits for the operator or the planner, whoever stopped the run.
                     return None
-                if outcome.status == "completed" and outcome.reason == INTERRUPT:
+                if outcome.status == "completed" and outcome.reason == step.INTERRUPT:
                     logger.warning("stopped by the operator after the answer of the session")
-                    return Stop(INTERRUPT)
+                    return step.Stop(step.INTERRUPT)
             self._enter("gating")
             upcoming = self._after_gate(self._gate())
             if upcoming is None:
@@ -220,9 +207,9 @@ class _Task:
         secrets = gates.secret_files(added, self.profile)
         return [path for path in added if path not in secrets]
 
-    def _budget(self) -> Stop | None:
+    def _budget(self) -> step.Stop | None:
         resume_at = budget.no_room(self.cfg.home, self.cfg.settings)
-        return None if resume_at is None else Stop(BUDGET, resume_at)
+        return None if resume_at is None else step.Stop(step.BUDGET, resume_at)
 
     def _session(self, upcoming: _Session) -> step.Outcome:
         settings = self.cfg.settings

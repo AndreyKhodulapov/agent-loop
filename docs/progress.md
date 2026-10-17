@@ -1339,7 +1339,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Предлагаемое сообщение коммита: `feat(planner): wait for the operator when a replan changes the criteria of the plan`.
 
-### 4.3 Ревью ветки `planner` — находки 2026-10-17, правки в следующей сессии
+### 4.3 Ревью ветки `planner` — находки 2026-10-17, правки готовы 2026-10-17 (4.3а)
 
 Ревью диффа `main...planner` (42 файла, +4735/−323) одним проходом в основном контексте. Тесты 492 зелёных, ruff чистый. Находки по убыванию серьёзности, правки — одним коммитом в `planner` перед проверкой на реальном CLI.
 
@@ -1355,6 +1355,25 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Проверено и чисто: сценарии перепланирования (`_chain`, `_replans`, `_take_replan`, `_settle`, OBJECTION/APPROVAL, повторный вход после Ctrl+C, мёртвого оркестратора, пауз, окно между `plan.save` и `store.replan`), транзакции `store.replan`/`approve`/`start`, миграции 6–7, recovery планировщика и перепланировщика; ссылок на планы в коде нет, markdown-выделения и декоративных разделителей нет, проверки на `None` и `try/except` оправданы, тесты не ослаблены.
 
+#### 4.3а Правки по ревью — готово 2026-10-17
+
+Сделано (по номерам находок 4.3):
+1. `plan._closed`: закрыт весь `.claude/` (`(".claude", *protected.OPERATOR_FILES)` в самой функции), как в `loop-settings.json`. `protected.OPERATOR_FILES` не тронут: он же строит профиль sandbox команд gate, и `.claude` там закрыл бы gate-командам запись во весь `.claude/` — это смена поведения sandbox, а не правка проверки плана. Параметр `.claude/CLAUDE.md` в `test_plan::test_files_closed_to_the_sessions_go_back_to_the_planner`.
+2. Не правил: находка неверна. `store.replan` не перенумеровывает отменённые задачи, `seq` идут 1…`len(tasks)` с отменёнными внутри, и по ним же лог, WIP-рефы и номера `remaining` у перепланировщика. `total` без `dropped` дал бы «task 5 of 4» (задача 2 из 3 заменена двумя: живые 1, 3, 4, 5). «Task 2 of 3» при двух живых — последний номер, а не число задач; менять — только вместе с номерами в промпте, что разведёт их с логом.
+3. `replies._pairs`: ответ отрезается по `^### Answer\b` (`re.M`, `maxsplit=1`) — ответ на строке заголовка и заголовок без перевода строки в конце файла разбираются. В `test_questions_go_to_the_operator_and_the_replies_to_the_session` второй ответ пишется как `### Answer Yes` без `\n` в конце.
+4. Докстринг `planner.py`: из абзаца о перепланировании убрано повторение про `step.how_to_resume`, осталось «остановленное Ctrl+C или мёртвым оркестратором перепланирование продолжает `loop resume`»; общее правило про паузы — в последнем абзаце.
+5. Не правил: `ANSWER_SCHEMA`, `CRITIQUE_SCHEMA`, `REPLAN_SCHEMA`, `DRAFT_FILE`, `export.LABELS`, `guard.READ_ONLY_INSTRUCTION` — константы контракта, с которыми сверяются тесты, как `prompts.ANSWER_SCHEMA` (одно использование в `implement`) и `guard.INSTRUCTION`. Атрибуты `_Planner` заставили бы тесты лезть в приватный класс.
+6. `Stop`, `INTERRUPT`, `BUDGET` перенесены из `implement` в `step` — нижний модуль, который импортируют оба цикла; `planner`, `runner`, `cli` и тесты берут их оттуда, `cli` больше не импортирует `implement`. `set_aside`, `last_answer`, `last_verdict` остались в `implement` и `planner.replan` зовёт их как раньше: это чтение работы и шагов задачи, перенос вызова в `runner` протащил бы через `replan` три параметра и переселил бы проверки промпта перепланировщика из `test_planner` в `test_runner`.
+7. `test_cli::test_approve_makes_the_plan_the_tasks_of_the_run` → `test_approve_takes_a_plan_once`, только коды выхода (задачи в store проверяет `test_runner::test_approved_plan_becomes_the_tasks_of_the_run`). В `test_planner` четыре `test_paused_*_goes_on` → `test_paused_session_goes_on`, три `test_failed_*_anew` → `test_failed_session_starts_anew_next_time`, параметры по виду шага (планировщик, критик, перепланировщик, критик перепланирования); добавлены проверка схемы у возобновлённого планировщика, упавший перепланировщик и неизменность `plan.json` после сбоя для всех видов.
+8. Комментарий в `plan._closed`: «Case does not matter, as in the sandbox: the file system ignores it, `.Git` is `.git`.»
+9. Не правил (низкий приоритет): абзац «Files closed to the sessions» по-прежнему в `planner.md`, `replanner.md`, список — и в `session.md`.
+
+Тесты: 493 зелёных (было 492: −11 непараметризованных, +12 параметров), ruff чистый.
+
+Заметка без правки: `session.md` называет закрытым `.npmrc`, но в репозитории его не закрывает ничто — в `loop-settings.json` только `Read(~/.npmrc)`, в `commands.HOME_SECRETS` — домашний `.npmrc`. Либо убрать из `session.md`, либо добавить в `OPERATOR_FILES`.
+
+Предлагаемое сообщение коммита: `fix(planner): close all of .claude in plans, parse inline answers, move Stop to step`.
+
 ### Дальше
 
-Этап 4 по плану закрыт (4.0–4.2). Перед этапом 5 — правки по находкам ревью 4.3 (один коммит в `planner`), затем проверка на реальном CLI всего непроверенного из 4.2а–д2 (сценарии в «Чего нет» каждого шага) и решение человека: ревью ветки `planner`, пробный прогон и мерж, как было с `implementation-loop` (этап 3а). Облегчённый режим `loop run --quick task.md` (раздел 3, 2026-10-11) не сделан.
+Этап 4 по плану закрыт (4.0–4.2). Перед этапом 5 — проверка на реальном CLI всего непроверенного из 4.2а–д2 (сценарии в «Чего нет» каждого шага) и решение человека: ревью ветки `planner`, пробный прогон и мерж, как было с `implementation-loop` (этап 3а). Облегчённый режим `loop run --quick task.md` (раздел 3, 2026-10-11) не сделан.

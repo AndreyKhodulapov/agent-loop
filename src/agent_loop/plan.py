@@ -145,10 +145,13 @@ def _task_errors(name: str, task: dict) -> list[str]:
 
 
 def _closed(path: str) -> bool:
-    # In any case, as the sandbox matches them: the file system ignores it.
+    # Case does not matter, as in the sandbox: the file system ignores it, `.Git` is `.git`.
     path = PurePosixPath(path.strip().lower())
     top = path.as_posix()
-    if any(top == name or top.startswith(f"{name}/") for name in protected.OPERATOR_FILES):
+    # The permission rules of the sessions deny an edit anywhere in `.claude`, not only in the
+    # protected paths of the CLI.
+    closed = (".claude", *protected.OPERATOR_FILES)
+    if any(top == name or top.startswith(f"{name}/") for name in closed):
         return True
     secrets = (*protected.SECRETS, protected.ENV_FILES)
     return any(fnmatch.fnmatchcase(path.name, pattern) for pattern in secrets)

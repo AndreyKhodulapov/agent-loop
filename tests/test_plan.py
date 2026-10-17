@@ -139,6 +139,7 @@ def test_files_closed_to_the_sessions_go_back_to_the_planner():
         ".Git/hooks/pre-commit",
         ".husky/pre-commit",
         ".claude/settings.json",
+        ".claude/CLAUDE.md",
         "deploy/.env",
     ]
     open_ = ["app/main.py", ".gitignore", ".github/workflows/ci.yml", "app/key.py", ".claudeignore"]

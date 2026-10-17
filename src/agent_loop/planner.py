@@ -19,9 +19,8 @@ replaces the task with new ones and keeps, modifies or drops each task after it.
 errors goes back to the same session, at most `RETRIES` times. A critic reviews the plan a valid
 answer leaves; blocking findings go back to the same session once, and its fixed answer is taken
 without another critic. The plan the replan leaves goes to `plan.json` with the findings in
-`critique.json` and `PLAN.md`. A paused session goes on as `step.how_to_resume` decides, at once
-or, after Ctrl+C or a dead orchestrator, on `loop resume`, which also takes an answer the loop
-has not taken yet. A replan that changes the acceptance criteria of the plan waits for the
+`critique.json` and `PLAN.md`. A replanning stopped by Ctrl+C or a dead orchestrator goes on with
+`loop resume`. A replan that changes the acceptance criteria of the plan waits for the
 operator after its critic: `loop approve` takes it (`approve_criteria`), an objection in
 `QUESTIONS.md` goes back to the same session (`object_to_criteria`), and a critic reviews its
 new answer.
@@ -164,7 +163,7 @@ def go_on(cfg: Config, store: Store, run: Run) -> str | None:
     """Plan the request of the planning `run`, from where its planner has stopped if it has.
 
     Returns why the run waits: `QUESTIONS` for the replies of the operator, `REJECTED` or
-    `implement.INTERRUPT`; None when the plan is in `plan.PLAN_FILE` of the run directory.
+    `step.INTERRUPT`; None when the plan is in `plan.PLAN_FILE` of the run directory.
     """
     return _Planner(cfg, store, run).go_on()
 
@@ -182,14 +181,14 @@ def answer(cfg: Config, store: Store, run: Run) -> str | None:
     return _Planner(cfg, store, run).answer()
 
 
-def replan(cfg: Config, store: Store, run: Run, task: Task, previous: str) -> implement.Stop | None:
+def replan(cfg: Config, store: Store, run: Run, task: Task, previous: str) -> step.Stop | None:
     """Replan the tasks left in the running `run` after `task` has gone back to the planner.
 
     The work of the task goes to its WIP ref first (`implement.set_aside`). `previous` is what
     `prompts.previous_tasks` tells about the tasks before it. A session of the replanning or of
     its critic the run has left paused goes on as `step.how_to_resume` decides, an answer it has
-    left is taken. Returns why the run stops: the limits leave no room (`implement.BUDGET`), the
-    operator has stopped it (`implement.INTERRUPT`), the answer keeps its errors (`REJECTED`) or
+    left is taken. Returns why the run stops: the limits leave no room (`step.BUDGET`), the
+    operator has stopped it (`step.INTERRUPT`), the answer keeps its errors (`REJECTED`) or
     changes the acceptance criteria of the plan (`CRITERIA`); None when the store has the new
     tasks and `plan.json` the plan they make.
     """
@@ -290,7 +289,7 @@ class _Planner:
             _Session(prompts.planner_answers(questions, answers), steps[-1].session_id)
         )
 
-    def replan(self, task: Task, previous: str) -> implement.Stop | None:
+    def replan(self, task: Task, previous: str) -> step.Stop | None:
         tasks = self.store.tasks(self.run.id)
         left = [t for t in tasks if t.seq > task.seq and t.status == "pending"]
         done = [t for t in tasks if t.status in ("committed", "done")]
@@ -318,13 +317,13 @@ class _Planner:
         while isinstance(upcoming, _Session):
             resume_at = budget.no_room(self.cfg.home, self.cfg.settings)
             if resume_at is not None:
-                return implement.Stop(implement.BUDGET, resume_at)
+                return step.Stop(step.BUDGET, resume_at)
             outcome = self._session(upcoming)
             who = "critic of the replan" if upcoming.kind == CRITIQUE else "replanning session"
             if outcome.status == "failed":
                 raise PlanError(f"the {who} has failed: {outcome.reason}")
-            if outcome.status == "paused" and outcome.reason == implement.INTERRUPT:
-                return implement.Stop(implement.INTERRUPT)
+            if outcome.status == "paused" and outcome.reason == step.INTERRUPT:
+                return step.Stop(step.INTERRUPT)
             steps = self._replans(r.since)
             if outcome.status == "paused":
                 upcoming = self._replan_resumed(r, steps)
@@ -332,11 +331,11 @@ class _Planner:
             if steps[-1].detail["answer"] is None:
                 raise PlanError(f"the {who} has ended without an answer")
             upcoming = self._take_replan(r, _chain(steps))
-            if isinstance(upcoming, implement.Stop):
+            if isinstance(upcoming, step.Stop):
                 return upcoming
-            if outcome.reason == implement.INTERRUPT:
+            if outcome.reason == step.INTERRUPT:
                 # An answer the loop has not taken yet is taken by the next `loop resume`.
-                return implement.Stop(implement.INTERRUPT)
+                return step.Stop(step.INTERRUPT)
         return upcoming
 
     def waiting(self) -> tuple[Task, Step]:
@@ -361,7 +360,7 @@ class _Planner:
             s for s in self.store.planner_steps(self.run.id) if s.kind in kinds and s.id > since
         ]
 
-    def _replan_upcoming(self, r: _Replan) -> _Session | implement.Stop | None:
+    def _replan_upcoming(self, r: _Replan) -> _Session | step.Stop | None:
         """The session that goes on with the replanning the run has left, or why the run stops;
         None when the answer it has left is taken and the store has the new tasks."""
         steps = self._replans(r.since)
@@ -381,7 +380,7 @@ class _Planner:
                 return self._replan_critic(r, _answered(chain, REPLAN)[0].detail["answer"])
             return r.fresh
         upcoming = self._take_replan(r, chain)
-        if isinstance(upcoming, implement.Stop) and upcoming.reason == REJECTED:
+        if isinstance(upcoming, step.Stop) and upcoming.reason == REJECTED:
             # An answer that keeps its errors has stopped the run, `loop resume` replans anew.
             return r.fresh
         return upcoming
@@ -406,7 +405,7 @@ class _Planner:
         who = "critic of the replan" if critic else "replanner"
         raise PlanError(f"the {who} keeps stopping ({how.reason})")
 
-    def _take_replan(self, r: _Replan, chain: list[Step]) -> _Session | implement.Stop | None:
+    def _take_replan(self, r: _Replan, chain: list[Step]) -> _Session | step.Stop | None:
         """Take the answer of the last step of `chain`, or the one the operator has approved
         after it: returns the session that fixes or reviews the replan, why the run stops, or
         None when the store has the new tasks."""
@@ -434,7 +433,7 @@ class _Planner:
                     "the replan still has errors after %d retries, `loop resume` replans anew",
                     RETRIES,
                 )
-                return implement.Stop(REJECTED)
+                return step.Stop(REJECTED)
             return _Session(prompts.plan_errors(errors), last.session_id, REPLAN)
         critiques = _answered(chain, CRITIQUE)
         if not critiques:
@@ -444,7 +443,7 @@ class _Planner:
 
     def _settle(
         self, r: _Replan, output: dict, findings: list[dict], fixed: bool, approved: bool
-    ) -> implement.Stop | None:
+    ) -> step.Stop | None:
         """Apply the replan of `output`, unless it changes the acceptance criteria of the plan
         and the operator has not `approved` the change yet: then returns why the run stops."""
         if _changes_criteria(r, output) and not approved:
@@ -454,7 +453,7 @@ class _Planner:
                 r.task.seq,
                 "\n".join(f"- {criterion}" for criterion in output["criteria"]),
             )
-            return implement.Stop(CRITERIA)
+            return step.Stop(CRITERIA)
         self._apply(r, output, findings, fixed)
         return None
 
@@ -520,14 +519,14 @@ class _Planner:
             if outcome.status == "failed":
                 raise PlanError(f"the planner session has failed: {outcome.reason}")
             if outcome.status == "paused":
-                if outcome.reason == implement.INTERRUPT:
+                if outcome.reason == step.INTERRUPT:
                     return self._interrupted()
                 upcoming = self._resumed(steps)
                 continue
             if steps[-1].detail["answer"] is None:
                 raise PlanError("the planner session has ended without an answer")
             upcoming = self._take(steps)
-            if outcome.reason == implement.INTERRUPT and isinstance(upcoming, _Session):
+            if outcome.reason == step.INTERRUPT and isinstance(upcoming, _Session):
                 return self._interrupted()
         return upcoming
 
@@ -683,7 +682,7 @@ class _Planner:
 
     def _interrupted(self) -> str:
         logger.warning("the planner is stopped by the operator, the same `loop plan` goes on")
-        return implement.INTERRUPT
+        return step.INTERRUPT
 
 
 def _answered(steps: list[Step], kind: str) -> list[Step]:

@@ -35,6 +35,8 @@ CTX_LOG_STEP = 10_000
 CONTEXT_PAUSES_TO_REPLAN = 2
 # The step did not start: the CLI settings of the project changed, a human has to look.
 PROJECT_SETTINGS = "project_settings"
+INTERRUPT = "interrupt"
+BUDGET = "budget"
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,18 @@ class Resume:
     session_id: str | None = None
     # Why the task goes back to the planner: context_pauses or stall_pauses.
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class Stop:
+    """Why the run stops before a task or its replan is through; the task keeps its status."""
+
+    # interrupt: the operator has stopped the run while a session was answering, the answer is
+    # taken; budget: the subscription limits leave no room for the next session. A replan
+    # stops for reasons of the planner too.
+    reason: str
+    # Unix seconds when the limits are expected to leave room, for a budget stop.
+    resume_at: int | None = None
 
 
 @dataclass

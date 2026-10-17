@@ -466,7 +466,7 @@ def test_paused_session_keeps_the_work_in_progress(env, monkeypatch):
 @pytest.mark.parametrize(
     "status, stop, moved_to",
     [
-        ("done", implement.Stop("interrupt"), ("gating", None)),
+        ("done", step.Stop("interrupt"), ("gating", None)),
         # The answer, not the stop, tells where the task is.
         ("blocked", None, ("needs_human", "blocked")),
     ],
@@ -627,7 +627,7 @@ def test_task_stopped_before_its_fixer_gets_one(env, monkeypatch):
 
     env.script(monkeypatch, (run_out_of_limits, answered()))
 
-    assert env.start() == implement.Stop("budget", resets_at)
+    assert env.start() == step.Stop("budget", resets_at)
 
     assert env.task().status == "fixing"
     assert [s.kind for s in env.steps()] == ["implement", "gate"]
@@ -646,7 +646,7 @@ def test_no_room_in_the_limits_leaves_the_task_as_it_is(env, monkeypatch):
     budget.save_limits(env.cfg.home / budget.LIMITS_FILE, agent.Limits(window, None))
     env.script(monkeypatch)
 
-    assert env.start() == implement.Stop("budget", resets_at)
+    assert env.start() == step.Stop("budget", resets_at)
 
     assert env.task().status == "pending"
     assert env.steps() == []

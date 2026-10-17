@@ -56,7 +56,9 @@ def _pairs(path: Path) -> list[tuple[str, str]]:
         return []
     sections = re.split(r"^## Question \d+$", path.read_text(encoding="utf-8"), flags=re.M)
     pairs = []
+    heading = rf"^{re.escape(ANSWER_HEADING)}\b"
     for section in sections[1:]:
-        question, _, reply = section.partition(f"\n{ANSWER_HEADING}\n")
-        pairs.append((question.strip(), reply.strip()))
+        # The operator may write the reply on the line of the heading, with no newline after it.
+        question, *reply = re.split(heading, section, maxsplit=1, flags=re.M)
+        pairs.append((question.strip(), "".join(reply).strip()))
     return pairs

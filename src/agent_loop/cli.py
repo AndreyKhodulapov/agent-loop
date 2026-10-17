@@ -11,13 +11,13 @@ from agent_loop import (
     agent,
     config,
     git,
-    implement,
     log,
     planner,
     recovery,
     replies,
     runner,
     selfcheck,
+    step,
 )
 from agent_loop.commands import CommandError
 from agent_loop.store import DB_FILE, Store, StoreError
@@ -188,7 +188,7 @@ def _work(cfg: config.Config, run: Callable[[], str | None]) -> int:
     if paused is None:
         return 0
     # The operator has stopped the run, in a session or outside it.
-    return 130 if paused == implement.INTERRUPT else 1
+    return 130 if paused == step.INTERRUPT else 1
 
 
 def _show_config(args: argparse.Namespace, cfg: config.Config) -> int:

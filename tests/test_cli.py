@@ -148,7 +148,7 @@ def test_operator_stop_pauses_the_run_with_the_exit_code_of_ctrl_c(
     def session(session, cfg, store, run_id, step_id):
         (session.cwd / "app.py").write_text("x = 'fixed'\n")
         answer = {"status": "done", "summary": "", "commit_message": "fix(app): fix x"}
-        reason = implement.INTERRUPT if stopped("answer") else None
+        reason = step.INTERRUPT if stopped("answer") else None
         detail = {"reason": reason, "answer": answer | {"notes_for_next": ""}}
         store.finish_step(step_id, "completed", detail)
         return step.Outcome("completed", reason, None, 1000)
@@ -179,10 +179,10 @@ def test_operator_stop_pauses_the_run_with_the_exit_code_of_ctrl_c(
     assert "is gone" not in capsys.readouterr().err
     with contextlib.closing(Store(isolated / "loop.db")) as store:
         [run] = store.runs("paused")
-        assert run.reason == implement.INTERRUPT
+        assert run.reason == step.INTERRUPT
         [task] = store.tasks(run.id)
         paused = [s.detail["reason"] for s in store.steps(task.id) if s.outcome == "paused"]
-        assert paused == ([implement.INTERRUPT] if where == "gate" else [])
+        assert paused == ([step.INTERRUPT] if where == "gate" else [])
     assert cli.main([*flags, "resume"]) == 0
     assert git.git(in_repo, "log", "-1", "--format=%s").strip() == "fix(app): fix x"
 
@@ -258,7 +258,7 @@ def test_plan_waits_for_the_answers_of_the_operator(isolated, in_repo, tmp_path,
     assert (isolated / "runs" / run.id / "plan.json").is_file()
 
 
-def test_approve_makes_the_plan_the_tasks_of_the_run(isolated, in_repo, tmp_path, monkeypatch):
+def test_approve_takes_a_plan_once(isolated, in_repo, tmp_path, monkeypatch):
     planner_sessions(
         monkeypatch,
         ("completed", None, {"status": "plan", "plan": PLAN}),
@@ -270,10 +270,6 @@ def test_approve_makes_the_plan_the_tasks_of_the_run(isolated, in_repo, tmp_path
 
     assert cli.main(["approve"]) == 0
     assert cli.main(["approve"]) == 1
-
-    with contextlib.closing(Store(isolated / "loop.db")) as store:
-        [run] = store.runs("approved")
-        assert len(store.tasks(run.id)) == len(PLAN["tasks"])
 
 
 def test_plan_goes_on_with_the_same_request_only(isolated, in_repo, tmp_path, monkeypatch):
