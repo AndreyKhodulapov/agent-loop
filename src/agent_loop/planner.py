@@ -16,8 +16,8 @@ saved with the findings of the last critic; the operator decides on those that s
 A task of a running run that goes back to the planner is replanned at once (`replan`): a new
 session gets the approved plan, what the task has left and the tasks after it, and its answer
 replaces the task with new ones and keeps, modifies or drops each task after it. An answer with
-errors goes back to the same session, at most `RETRIES` times; a stopped session pauses the run,
-and `loop resume` replans in a new one.
+errors goes back to the same session, at most `RETRIES` times. A paused session goes on as
+`step.how_to_resume` decides, at once or, after Ctrl+C or a dead orchestrator, on `loop resume`.
 
 The run stays in planning while the planner works: a stopped planner does not pause it, and
 `go_on` picks the work up from the last step of the planner. A paused session is resumed or
@@ -144,9 +144,10 @@ def replan(cfg: Config, store: Store, run: Run, task: Task, previous: str) -> im
     """Replan the tasks left in the running `run` after `task` has gone back to the planner.
 
     The work of the task goes to its WIP ref first (`implement.set_aside`). `previous` is what
-    `prompts.previous_tasks` tells about the tasks before it. Returns why the run stops: the
-    limits leave no room (`implement.BUDGET`), the session has paused (its reason) or its answer
-    keeps its errors (`REJECTED`); None when the store has the new tasks.
+    `prompts.previous_tasks` tells about the tasks before it. A replanning session the run has
+    left paused goes on as `step.how_to_resume` decides. Returns why the run stops: the limits
+    leave no room (`implement.BUDGET`), the operator has stopped it (`implement.INTERRUPT`) or
+    the answer keeps its errors (`REJECTED`); None when the store has the new tasks.
     """
     return _Planner(cfg, store, run).replan(task, previous)
 
@@ -232,16 +233,26 @@ class _Planner:
         prompt = prompts.replanner(
             plan.load(self.run_dir), task, left, previous, self.cfg.settings, said, verdict, wip
         )
-        upcoming = _Session(prompt, kind=REPLAN)
-        for _ in range(RETRIES + 1):
+        fresh = _Session(prompt, kind=REPLAN)
+        # The sessions that replan the task come after its own steps.
+        since = steps[-1].id
+        replans = self._replans(since)
+        upcoming = fresh
+        if replans and replans[-1].outcome == "paused":
+            upcoming = self._replan_resumed(replans, fresh)
+        rejected = 0
+        while True:
             resume_at = budget.no_room(self.cfg.home, self.cfg.settings)
             if resume_at is not None:
                 return implement.Stop(implement.BUDGET, resume_at)
             outcome = self._session(upcoming)
             if outcome.status == "failed":
                 raise PlanError(f"the replanning session has failed: {outcome.reason}")
+            if outcome.status == "paused" and outcome.reason == implement.INTERRUPT:
+                return implement.Stop(implement.INTERRUPT)
             if outcome.status == "paused":
-                return implement.Stop(outcome.reason)
+                upcoming = self._replan_resumed(self._replans(since), fresh)
+                continue
             last = self.store.planner_steps(self.run.id)[-1]
             output = last.detail["answer"]
             if output is None:
@@ -253,11 +264,31 @@ class _Planner:
                     return implement.Stop(implement.INTERRUPT)
                 return None
             logger.warning("the replan has errors:\n%s", "\n".join(errors))
+            rejected += 1
+            if rejected > RETRIES:
+                logger.error(
+                    "the replan still has errors after %d retries, `loop resume` replans anew",
+                    RETRIES,
+                )
+                return implement.Stop(REJECTED)
             upcoming = _Session(prompts.plan_errors(errors), last.session_id, REPLAN)
-        logger.error(
-            "the replan still has errors after %d retries, `loop resume` replans anew", RETRIES
-        )
-        return implement.Stop(REJECTED)
+
+    def _replans(self, since: int) -> list[Step]:
+        """The steps of the replanning sessions after the step `since`."""
+        return [
+            s for s in self.store.planner_steps(self.run.id) if s.kind == REPLAN and s.id > since
+        ]
+
+    def _replan_resumed(self, replans: list[Step], fresh: _Session) -> _Session:
+        """The session that goes on after the last of `replans` has paused; `fresh` replans anew."""
+        how = step.how_to_resume(replans, self.cfg.settings.ctx_soft_tokens)
+        if how.mode == "session":
+            return _Session(prompts.PLANNER_RESUMED, how.session_id, REPLAN)
+        if how.mode == "handoff":
+            # The replanner writes no handoff: a new session reads the repository again.
+            logger.warning("the context of the replanner is full, replanning in a new session")
+            return fresh
+        raise PlanError(f"the replanner keeps stopping ({how.reason})")
 
     def _replace(self, task: Task, left: list[Task], output: dict) -> None:
         """Put the replan of `output` into the store: new tasks for `task`, actions on `left`."""

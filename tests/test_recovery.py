@@ -198,6 +198,32 @@ def test_dead_planner_is_paused_and_its_run_stays_planning(home, db, repo, orpha
     assert recovery.reap(db, home) == []
 
 
+def test_dead_replanner_is_paused_and_the_work_of_its_task_kept(home, db, repo, orphan):
+    session_id, proc, _ = orphan
+    run_id, task_id = running_run(db, repo)
+    checkpoint = git.head(repo)
+    implemented = db.start_step(run_id, task_id, "implement", checkpoint, [], "s-1")
+    db.finish_step(implemented, "completed", {"answer": {"status": "too_big"}})
+    db.move_task(task_id, "replan", "too_big")
+    ref = git.wip_ref(run_id, 1)
+    (repo / "app.py").write_text("x = 2\n")
+    git.save_wip(repo, ref, [], checkpoint)
+    git.drop_work(repo, [])
+    saved = git.git(repo, "rev-parse", ref)
+    db.start_step(run_id, None, "replan", checkpoint, [], session_id)
+
+    assert recovery.reap(db, home) == [run_id]
+
+    assert proc.wait(timeout=5) == -signal.SIGTERM
+    [paused] = db.planner_steps(run_id)
+    assert (paused.outcome, paused.detail) == ("paused", {"reason": "died"})
+    [task] = db.tasks(run_id)
+    assert (task.status, task.reason) == ("replan", "too_big")
+    assert db.run(run_id).status == "paused"
+    assert git.git(repo, "rev-parse", ref) == saved
+    assert git.git(repo, "status", "--porcelain") == ""
+
+
 def test_broken_run_does_not_block_the_others(home, db, repo, tmp_path):
     gone = tmp_path / "moved-away"
     gone.mkdir()

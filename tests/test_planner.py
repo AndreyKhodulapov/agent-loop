@@ -509,26 +509,68 @@ def test_replan_that_keeps_its_errors_stops_the_run(replanning, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("outcome", "stop", "applied"),
+    ("outcome", "applied"),
     [
-        (paused("timeout"), implement.Stop("timeout"), False),
-        (paused(implement.INTERRUPT), implement.Stop(implement.INTERRUPT), False),
-        (
-            replace(replanned(), reason=implement.INTERRUPT),
-            implement.Stop(implement.INTERRUPT),
-            True,
-        ),
+        (paused(implement.INTERRUPT), False),
+        (replace(replanned(), reason=implement.INTERRUPT), True),
     ],
-    ids=["paused", "interrupted", "interrupted after the answer"],
+    ids=["in the session", "after the answer"],
 )
-def test_stopped_replanning_stops_the_run(replanning, monkeypatch, outcome, stop, applied):
+def test_operator_stop_stops_the_run(replanning, monkeypatch, outcome, applied):
     env = replanning
     env.script(monkeypatch, outcome)
 
-    assert replan(env) == stop
+    assert replan(env) == implement.Stop(implement.INTERRUPT)
 
     statuses = [t.status for t in env.store.tasks(env.run_id)]
     assert statuses[0] == ("dropped" if applied else "replan")
+
+
+def test_replanning_stopped_by_the_operator_goes_on_in_its_session(replanning, monkeypatch):
+    env = replanning
+    env.script(monkeypatch, paused(implement.INTERRUPT))
+    assert replan(env) == implement.Stop(implement.INTERRUPT)
+
+    env.script(monkeypatch, replanned())
+    assert replan(env) is None
+
+    first, second = env.sessions
+    assert (second.session_id, second.resume) == (first.session_id, True)
+    assert (second.prompt, second.schema) == (prompts.PLANNER_RESUMED, planner.REPLAN_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    ("pause", "resumed"),
+    [(paused("timeout"), True), (paused("context", 125_000), False)],
+    ids=["timeout", "full context"],
+)
+def test_paused_replanning_goes_on(replanning, monkeypatch, pause, resumed):
+    env = replanning
+    env.script(monkeypatch, pause, replanned())
+
+    assert replan(env) is None
+
+    first, second = env.sessions
+    assert (second.session_id == first.session_id) == second.resume == resumed
+    assert second.prompt == (prompts.PLANNER_RESUMED if resumed else first.prompt)
+    assert second.schema == planner.REPLAN_SCHEMA
+
+
+def test_replanner_that_keeps_stopping_fails_the_run(replanning, monkeypatch):
+    env = replanning
+    # A stall of an earlier replan of the run is not one of this task.
+    step_id = env.store.start_step(env.run_id, None, planner.REPLAN, "abc123", [], "s0")
+    env.store.finish_step(step_id, "paused", {"reason": "timeout"})
+    task = next(t for t in env.store.tasks(env.run_id) if t.status == "replan")
+    [answered_step] = env.store.steps(task.id)
+    later = env.store.start_step(env.run_id, task.id, implement.IMPLEMENT, "abc123", [], "s1")
+    env.store.finish_step(later, "completed", answered_step.detail)
+    env.script(monkeypatch, *[paused("timeout")] * 3)
+
+    with pytest.raises(planner.PlanError, match=r"keeps stopping \(stall_pauses\)"):
+        replan(env)
+
+    assert len(env.sessions) == 3
 
 
 def test_replanning_waits_for_room_in_the_limits(replanning, monkeypatch):

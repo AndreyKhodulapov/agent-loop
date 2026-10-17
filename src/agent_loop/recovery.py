@@ -10,7 +10,8 @@ progress goes to the WIP ref of the task and the step is finished as paused, so 
 the session (`step.how_to_resume`). A commit step stopped after the commit of the task is on the
 branch is finished as completed instead: the task is committed. Services it has left up are
 stopped with `down` of the frozen profile. A run that is planning stays in planning: only the
-session of its planner is terminated and its step paused, `loop plan` goes on with it.
+session of its planner is terminated and its step paused, `loop plan` goes on with it. The
+session of a running run that replans a task is paused the same way, its task stays in replan.
 
 A live run that the operator stops outside a session pauses its open steps the same way.
 """
@@ -139,6 +140,11 @@ def pause(store: Store, run: Run, reason: str) -> None:
         # The orchestrator may have stopped between starting the step and moving the task.
         if "paused" in TASK_TRANSITIONS[task.status]:
             store.move_task(task.id, "paused", reason)
+    # A run stopped while it replans: the work of the task is in its WIP ref already.
+    for open_step in store.planner_steps(run.id):
+        if open_step.finished_at is None:
+            _terminate(open_step.session_id)
+            store.finish_step(open_step.id, "paused", {"reason": reason})
     store.move_run(run.id, "paused", reason)
 
 
