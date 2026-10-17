@@ -7,16 +7,14 @@ import signal
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_loop import agent, config, git, implement, log, recovery, runner, selfcheck
+from agent_loop import agent, config, git, implement, log, planner, recovery, runner, selfcheck
 from agent_loop.commands import CommandError
 from agent_loop.store import DB_FILE, Store, StoreError
 
 logger = logging.getLogger(__name__)
 
 STUBS = {
-    "plan": "plan a task with the planner and the plan critic",
     "approve": "approve the plan and freeze it",
-    "answer": "answer the questions of a run waiting for a human",
     "status": "show runs and their state",
     "stats": "show metrics of finished runs",
 }
@@ -39,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     _exit_on_termination()
     # Every command that works with runs first pauses the ones that died, so a run is never
     # left as running without an orchestrator.
-    if args.command in (*STUBS, "run", "resume"):
+    if args.command in (*STUBS, "plan", "answer", "run", "resume"):
         _reap(cfg)
     return args.handler(args, cfg)
 
@@ -71,6 +69,16 @@ def _parser() -> argparse.ArgumentParser:
 
     for name, summary in STUBS.items():
         commands.add_parser(name, help=summary).set_defaults(handler=_stub(name))
+    plan = commands.add_parser("plan", help="plan a request of the operator with the planner")
+    plan.add_argument(
+        "--from", dest="request", type=Path, required=True, help="the request, a markdown file"
+    )
+    plan.set_defaults(handler=_plan)
+    answer = commands.add_parser("answer", help="answer the questions of the planner")
+    answer.add_argument(
+        "run_id", nargs="?", help="the run to answer, the last planning one by default"
+    )
+    answer.set_defaults(handler=_answer)
     run = commands.add_parser("run", help="run the tasks of a cards file on the current branch")
     run.add_argument(
         "tasks", type=Path, help="JSON list of title, goal, criteria, files, tests, decisions"
@@ -101,6 +109,14 @@ def _stub(name: str) -> Callable[[argparse.Namespace, config.Config], int]:
     return handler
 
 
+def _plan(args: argparse.Namespace, cfg: config.Config) -> int:
+    return _work(cfg, lambda: runner.plan_request(cfg, args.request))
+
+
+def _answer(args: argparse.Namespace, cfg: config.Config) -> int:
+    return _work(cfg, lambda: runner.answer(cfg, args.run_id))
+
+
 def _run(args: argparse.Namespace, cfg: config.Config) -> int:
     return _work(cfg, lambda: runner.start(cfg, args.tasks))
 
@@ -116,6 +132,7 @@ def _work(cfg: config.Config, run: Callable[[], str | None]) -> int:
     # the run as well as a refusal to start.
     except (
         runner.RunError,
+        planner.PlanError,
         agent.AgentError,
         config.ConfigError,
         CommandError,

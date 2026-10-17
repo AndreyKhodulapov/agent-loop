@@ -29,3 +29,15 @@ The sessions cannot change the files of the operator: `.git/`, `.claude/`, `.mcp
 ## Questions
 
 Ask the operator only what the repository cannot tell you and the plan cannot be built without, and ask all your questions at once. A choice with a sensible default is not a question: take the default and record it in `decisions`.
+
+## Your answer
+
+Your final answer goes through the structured output tool:
+
+- `status`: `plan` when the plan is ready, `questions` when you need the operator first.
+- `plan`: the plan, with a `plan` status.
+- `questions`: with a `questions` status, one string per question; each makes sense on its own. The operator's answers come back in this conversation.
+
+When agent-loop finds errors in your plan, it sends them back: fix them and answer with the whole plan again.
+
+If a tool call is denied with an instruction from agent-loop to stop, end your turn: the loop resumes this conversation later.

@@ -21,7 +21,6 @@ the gate commands leave join the untracked files, they are not the work either.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -218,17 +217,8 @@ class _Task:
         return [path for path in added if path not in secrets]
 
     def _budget(self) -> Stop | None:
-        limits = budget.load_limits(self.cfg.home / budget.LIMITS_FILE)
-        if limits is None:
-            return None
-        verdict = budget.check(limits, time.time(), self.cfg.settings)
-        if verdict.allowed:
-            return None
-        resume_at = time.strftime("%Y-%m-%d %H:%M", time.localtime(verdict.resume_at))
-        logger.warning(
-            "no room for a session in the limits (%s) until %s", verdict.summary, resume_at
-        )
-        return Stop(BUDGET, verdict.resume_at)
+        resume_at = budget.no_room(self.cfg.home, self.cfg.settings)
+        return None if resume_at is None else Stop(BUDGET, resume_at)
 
     def _session(self, upcoming: _Session) -> step.Outcome:
         settings = self.cfg.settings

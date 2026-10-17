@@ -6,9 +6,11 @@ the run directory: thresholds (`policy.json`), context fill that the loop copies
 decided goes to `guard.json`, which tells the loop why the session ended.
 
 Soft stop: the call is denied with an instruction to write the handoff and end the turn; only
-the handoff write and the structured answer pass. Hard stop: `continue: false` ends the session
-after the current call, and the call itself is denied unless it writes the handoff. A hook that
-fails blocks the call and records `guard_error`: a session must not run without its caps.
+the handoff write and the structured answer pass. A read-only session, the planner's, has no
+handoff to write: it is told to end the turn, and the loop resumes the conversation later.
+Hard stop: `continue: false` ends the session after the current call, and the call itself is
+denied unless it writes the handoff. A hook that fails blocks the call and records
+`guard_error`: a session must not run without its caps.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ STOP_FILE = "stop"
 STATE_FILE = "guard.json"
 HANDOFF = Path(".loop") / "handoff.md"
 BASE_SETTINGS = Path(__file__).with_name("loop-settings.json")
+WRITE_RULE = "Edit(./**)"
 POLICY_FIELDS = (
     "ctx_soft_tokens",
     "ctx_hard_tokens",
@@ -62,6 +65,10 @@ INSTRUCTION = (
     " tools. Write {handoff} for the next session: what is done, what is left, which files are"
     " in progress and what you were about to do. Then end your turn."
 )
+READ_ONLY_INSTRUCTION = (
+    "agent-loop is pausing this step: {why}. Do not continue and do not call other tools: end"
+    " your turn. The loop resumes this conversation later."
+)
 
 
 @dataclass(frozen=True)
@@ -77,14 +84,22 @@ class State:
     denied: int
 
 
-def prepare(run_dir: Path, home: Path, settings: Settings, workdir: Path) -> Path:
+def prepare(
+    run_dir: Path, home: Path, settings: Settings, workdir: Path, read_only: bool = False
+) -> Path:
     """Get the run directory ready for a new session; returns its `--settings` file.
 
     Called before every session, also a resumed one: the stop request, the context fill and the
-    decisions of the previous session must not leak into it.
+    decisions of the previous session must not leak into it. A `read_only` session cannot write
+    the working directory, with Bash neither.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     session_settings = json.loads(BASE_SETTINGS.read_text(encoding="utf-8"))
+    if read_only:
+        # The CLI adds an Edit rule in deny to the write denials of the sandbox of Bash.
+        permissions = session_settings["permissions"]
+        permissions["allow"].remove(WRITE_RULE)
+        permissions["deny"].append(WRITE_RULE)
     # -I keeps the working directory out of sys.path: a module of the repository under work
     # must not shadow ours.
     hook = shlex.join([sys.executable, "-I", "-m", "agent_loop.guard", str(run_dir)])
@@ -95,7 +110,7 @@ def prepare(run_dir: Path, home: Path, settings: Settings, workdir: Path) -> Pat
     policy = {
         "settings": {name: getattr(settings, name) for name in POLICY_FIELDS},
         "limits_file": str(home / budget.LIMITS_FILE),
-        "handoff": str(workdir / HANDOFF),
+        "handoff": None if read_only else str(workdir / HANDOFF),
     }
     (run_dir / POLICY_FILE).write_text(json.dumps(policy), encoding="utf-8")
     write_live(run_dir, 0)
@@ -144,14 +159,20 @@ def pressure(
 
 
 def respond(
-    tool_name: str, writes_handoff: bool, stop: Stop, denied: int, handoff: Path
+    tool_name: str, writes_handoff: bool, stop: Stop, denied: int, handoff: Path | None
 ) -> tuple[dict | None, State]:
-    """Hook output for one call under a stop and the new guard state; None output lets it pass."""
+    """Hook output for one call under a stop and the new guard state; None output lets it pass.
+
+    `handoff` is None for a read-only session.
+    """
     hard = stop.hard or denied >= SOFT_DENIALS
     state = State(stop.reason, hard, denied)
     if tool_name in ALWAYS_ALLOWED or (writes_handoff and not hard):
         return None, state
-    instruction = INSTRUCTION.format(why=WHY[stop.reason], handoff=handoff)
+    if handoff is None:
+        instruction = READ_ONLY_INSTRUCTION.format(why=WHY[stop.reason])
+    else:
+        instruction = INSTRUCTION.format(why=WHY[stop.reason], handoff=handoff)
     if hard:
         output: dict = {"continue": False, "stopReason": f"agent-loop: {stop.reason}"}
         # The handoff write still goes through: continue: false ends the session after it.
@@ -187,7 +208,7 @@ def _check(run_dir: Path) -> int:
     if stop is None:
         return 0
     previous = outcome(run_dir)
-    handoff = Path(policy["handoff"])
+    handoff = None if policy["handoff"] is None else Path(policy["handoff"])
     output, state = respond(
         call["tool_name"],
         _writes(call, handoff),
@@ -201,8 +222,8 @@ def _check(run_dir: Path) -> int:
     return 0
 
 
-def _writes(call: dict, path: Path) -> bool:
-    if call["tool_name"] not in HANDOFF_TOOLS:
+def _writes(call: dict, path: Path | None) -> bool:
+    if path is None or call["tool_name"] not in HANDOFF_TOOLS:
         return False
     target = Path(call["tool_input"]["file_path"])
     return (Path(call["cwd"]) / target).resolve() == path.resolve()

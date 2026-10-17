@@ -44,6 +44,11 @@ RESUMED = (
     " stopped and answer as before. The handoff you wrote at the pause is removed: if you are"
     " stopped again, write the handoff anew in full."
 )
+# The prompt of a paused planner session resumed with --resume.
+PLANNER_RESUMED = (
+    "agent-loop has resumed this session after a pause. Go on with the plan from where you"
+    " stopped and answer as before."
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,30 @@ def planner(request: str, settings: Settings) -> str:
             f"Write the plan in {_language(settings)}: the operator reads and approves it.",
         ]
     )
+
+
+def plan_errors(errors: list[str]) -> str:
+    """The prompt that sends a plan the loop cannot take back to its planner session."""
+    return "\n\n".join(
+        [
+            "agent-loop cannot take the plan of your answer:",
+            "\n".join(f"- {error}" for error in errors),
+            "Fix the plan and answer again with the whole plan.",
+        ]
+    )
+
+
+def planner_answers(questions: list[str], replies: list[str]) -> str:
+    """The prompt that gives the planner session the `replies` of the operator to its
+    `questions`, in their order."""
+    sections = ["# Answers of the operator"]
+    for number, (question, reply) in enumerate(zip(questions, replies, strict=True), start=1):
+        sections += [f"## Question {number}", question, "### Answer", _fenced(reply, "markdown")]
+    sections.append(
+        "Go on with the plan and answer as before: with the plan, or with the questions the"
+        " answers leave open."
+    )
+    return "\n\n".join(sections)
 
 
 def implementer(

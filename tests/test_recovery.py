@@ -182,6 +182,22 @@ def test_live_run_is_left_alone_and_dead_one_stops_its_services(home, db, repo, 
     assert not marker.exists()
 
 
+def test_dead_planner_is_paused_and_its_run_stays_planning(home, db, repo, orphan):
+    session_id, proc, _ = orphan
+    run_id = db.create_run(repo, "main", "abc123")
+    db.start_step(run_id, None, "plan", "abc123", [], session_id)
+    with recovery.hold(lock_path(home, run_id)):
+        assert recovery.reap(db, home) == []
+
+    assert recovery.reap(db, home) == [run_id]
+
+    assert proc.wait(timeout=5) == -signal.SIGTERM
+    [paused] = db.planner_steps(run_id)
+    assert (paused.outcome, paused.detail) == ("paused", {"reason": "died"})
+    assert db.run(run_id).status == "planning"
+    assert recovery.reap(db, home) == []
+
+
 def test_broken_run_does_not_block_the_others(home, db, repo, tmp_path):
     gone = tmp_path / "moved-away"
     gone.mkdir()

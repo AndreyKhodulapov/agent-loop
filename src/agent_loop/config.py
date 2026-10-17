@@ -30,6 +30,7 @@ class Settings:
     model_planner: str = "opus"
     model_implementer: str = "opus"
     model_critic: str = "opus"
+    effort_planner: str = "high"
     effort_implementer: str = "high"
     effort_critic: str = "max"
     knowledge_dir: Path | None = None
@@ -271,7 +272,7 @@ def _validate(settings: Settings) -> None:
     errors = []
     if settings.doc_lang not in DOC_LANGS:
         errors.append(f"doc_lang must be one of {', '.join(DOC_LANGS)}")
-    for name in ("effort_implementer", "effort_critic"):
+    for name in ("effort_planner", "effort_implementer", "effort_critic"):
         if getattr(settings, name) not in EFFORTS:
             errors.append(f"{name} must be one of {', '.join(EFFORTS)}")
     for name in ("model_planner", "model_implementer", "model_critic"):

@@ -59,6 +59,7 @@ class Session:
     schema: dict | None = None
     # `[env]` of the repository profile, on top of `ENV_KEYS`.
     env: dict[str, str] = field(default_factory=dict)
+    tools: str = "Bash,Read,Edit,Write"
     # Known before the start, so the caller can store it before the process may die.
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     resume: bool = False
@@ -115,7 +116,7 @@ def command(session: Session, system_file: Path | None = None) -> list[str]:
         "--restricted",
         # `StructuredOutput` is added by the CLI itself when there is a schema.
         "--tools",
-        "Bash,Read,Edit,Write",
+        session.tools,
         "--settings",
         str(session.settings),
         "--permission-prompts",

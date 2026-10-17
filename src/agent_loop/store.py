@@ -380,6 +380,13 @@ class Store:
         ).fetchall()
         return [_step(row) for row in rows]
 
+    def planner_steps(self, run_id: str) -> list[Step]:
+        """Steps of the run without a task: the sessions of its planner."""
+        rows = self._conn.execute(
+            "SELECT * FROM steps WHERE run_id = ? AND task_id IS NULL ORDER BY id", (run_id,)
+        ).fetchall()
+        return [_step(row) for row in rows]
+
     def session_steps(self, session_id: str) -> list[Step]:
         rows = self._conn.execute(
             "SELECT * FROM steps WHERE session_id = ? ORDER BY id", (session_id,)

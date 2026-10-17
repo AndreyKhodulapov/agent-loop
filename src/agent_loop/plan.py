@@ -78,8 +78,8 @@ def validate(plan: dict) -> list[str]:
     return errors
 
 
-def save(run_dir: Path, plan: dict) -> None:
-    write_atomic(run_dir / PLAN_FILE, json.dumps(plan, ensure_ascii=False, indent=2))
+def save(run_dir: Path, plan: dict, name: str = PLAN_FILE) -> None:
+    write_atomic(run_dir / name, json.dumps(plan, ensure_ascii=False, indent=2))
 
 
 def load(run_dir: Path) -> dict:

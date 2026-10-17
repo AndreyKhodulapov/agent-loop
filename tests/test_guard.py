@@ -209,6 +209,17 @@ def test_prepare_clears_the_previous_session(run_dir, tmp_path):
     )
 
 
+def test_read_only_session_is_told_only_to_end_its_turn(run_dir, tmp_path):
+    workdir = tmp_path / "repo"
+    guard.prepare(run_dir, tmp_path / "home", SETTINGS, workdir, read_only=True)
+    guard.request_stop(run_dir, "interrupt")
+
+    output = hook(run_dir, "Write", {"file_path": str(workdir / guard.HANDOFF)})
+
+    reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason == guard.READ_ONLY_INSTRUCTION.format(why=guard.WHY["interrupt"])
+
+
 def test_hook_does_not_import_from_the_working_directory(run_dir):
     # A module of the repository under work named like a stdlib one must not be picked up.
     workdir = run_dir.parents[2] / "repo"

@@ -8,7 +8,9 @@ reset time has passed is treated as absent: the server has opened a new one.
 from __future__ import annotations
 
 import json
+import logging
 import math
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +18,8 @@ from pathlib import Path
 from agent_loop.agent import Limits, Window
 from agent_loop.config import Settings
 from agent_loop.files import write_atomic
+
+logger = logging.getLogger(__name__)
 
 LIMITS_FILE = "limits.json"
 DAY = 24 * 3600
@@ -61,6 +65,20 @@ def check(limits: Limits, now: float, settings: Settings) -> Verdict:
         f" · 7d {_share(seven_day, cap_7d, now, settings)}"
     )
     return Verdict(not waits, max(waits) if waits else None, summary)
+
+
+def no_room(home: Path, settings: Settings) -> int | None:
+    """Unix seconds when the shared limits are expected to leave room for the next session; None
+    when they leave room now or no session has reported them yet."""
+    limits = load_limits(home / LIMITS_FILE)
+    if limits is None:
+        return None
+    verdict = check(limits, time.time(), settings)
+    if verdict.allowed:
+        return None
+    resume_at = time.strftime("%Y-%m-%d %H:%M", time.localtime(verdict.resume_at))
+    logger.warning("no room for a session in the limits (%s) until %s", verdict.summary, resume_at)
+    return verdict.resume_at
 
 
 def overrun(limits: Limits, now: float, settings: Settings) -> float | None:

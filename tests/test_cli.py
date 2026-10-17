@@ -8,6 +8,7 @@ import time
 
 import pytest
 from fakes import INIT, RESULT, read_calls
+from test_plan import PLAN
 
 from agent_loop import agent, cli, commands, config, gates, git, implement, selfcheck, step
 from agent_loop.store import Store, StoreError
@@ -208,6 +209,64 @@ def test_run_stopped_by_an_error_is_paused_as_a_dead_one(
     with contextlib.closing(Store(isolated / "loop.db")) as store:
         [run] = store.runs("paused")
         assert run.reason == "died"
+
+
+def planner_sessions(monkeypatch, *outcomes):
+    """Replace the planner sessions: each ends with its (status, reason, answer), recorded like
+    `step.run` does."""
+    scripted = iter(outcomes)
+
+    def session(session, cfg, store, run_id, step_id):
+        status, reason, output = next(scripted)
+        detail = {"reason": reason, "context_tokens": 1000, "answer": output}
+        store.finish_step(step_id, status, detail)
+        return step.Outcome(status, reason, None, 1000)
+
+    monkeypatch.setattr(step, "run", session)
+
+
+def planning_runs(home):
+    with contextlib.closing(Store(home / "loop.db")) as store:
+        return store.runs("planning")
+
+
+def test_plan_waits_for_the_answers_of_the_operator(isolated, in_repo, tmp_path, monkeypatch):
+    planner_sessions(
+        monkeypatch,
+        ("completed", None, {"status": "questions", "questions": ["Who removes a dish?"]}),
+        ("completed", None, {"status": "plan", "plan": PLAN}),
+    )
+    request = tmp_path / "request.md"
+    request.write_text("Add the admin of dishes")
+
+    assert cli.main(["plan", "--from", str(request)]) == 1
+
+    [run] = planning_runs(isolated)
+    questions = isolated / "runs" / run.id / "QUESTIONS.md"
+    assert cli.main(["answer"]) == 1
+    questions.write_text(questions.read_text() + "The admin\n")
+    assert cli.main(["answer", run.id]) == 0
+    assert (isolated / "runs" / run.id / "plan.json").is_file()
+
+
+def test_plan_goes_on_with_the_same_request_only(isolated, in_repo, tmp_path, monkeypatch):
+    planner_sessions(
+        monkeypatch,
+        ("paused", "interrupt", None),
+        ("completed", None, {"status": "plan", "plan": PLAN}),
+        ("completed", None, {"status": "plan", "plan": PLAN}),
+    )
+    request = tmp_path / "request.md"
+    request.write_text("Add the admin of dishes")
+
+    assert cli.main(["plan", "--from", str(request)]) == 130
+    assert cli.main(["plan", "--from", str(request)]) == 0
+    [planned] = planning_runs(isolated)
+
+    request.write_text("Remove the admin of dishes")
+    assert cli.main(["plan", "--from", str(request)]) == 0
+    assert [run.id for run in planning_runs(isolated)][0] == planned.id
+    assert len(planning_runs(isolated)) == 2
 
 
 def test_gc_without_dead_runs(capsys):

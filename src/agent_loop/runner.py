@@ -1,8 +1,10 @@
 """A run: the tasks of the run one after another on the current branch of the repository.
 
-`start` begins a run with the tasks of a cards file, `resume` goes on with a paused one. A run
-holds the lock of the working directory and its own lock, works with the profile frozen at its
-start and keeps the services of the profile up while it works.
+`start` begins a run with the tasks of a cards file, `resume` goes on with a paused one.
+`plan_request` begins a run with the request of the operator, which stays in planning while
+`planner` works on it, and `answer` gives the planner the replies of the operator to its
+questions. A run holds the lock of the working directory and its own lock, works with the
+profile frozen at its start and keeps the services of the profile up while it works.
 
 The run pauses when a task needs the operator: a question, the planner, a moved branch, Ctrl+C.
 Ctrl+C outside a session pauses the run with its open steps as `recovery` pauses a dead one.
@@ -25,6 +27,8 @@ from agent_loop import (
     git,
     implement,
     log,
+    plan,
+    planner,
     prompts,
     protected,
     recovery,
@@ -84,9 +88,7 @@ def start(cfg: Config, tasks_file: Path) -> str | None:
     tasks = load_tasks(tasks_file)
     selfcheck.require(cfg.home)
     with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
-        branch = git.branch(repo)
-        if branch == "HEAD":
-            raise RunError("HEAD is detached, check out the branch to work on")
+        branch = _branch(repo)
         changed = git.git(repo, "status", "--porcelain", "--untracked-files=no")
         if changed:
             raise RunError(f"the tracked files have changes, commit or stash them:\n{changed}")
@@ -111,6 +113,47 @@ def start(cfg: Config, tasks_file: Path) -> str | None:
                 return _interrupted(store, run)
 
 
+def plan_request(cfg: Config, request_file: Path) -> str | None:
+    """Plan the request of `request_file` for the current branch; returns why the run waits for
+    the operator, as `planner.go_on`, None when the plan is ready.
+
+    The last run that has stopped planning the same request goes on; another request begins a
+    new run.
+    """
+    repo = _repo(cfg)
+    try:
+        request = request_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RunError(f"request: {exc}") from exc
+    if not request.strip():
+        raise RunError(f"{request_file} is empty")
+    selfcheck.require(cfg.home)
+    with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
+        run = _planning(store, cfg.home, repo, request)
+        if run is None:
+            run = store.run(store.create_run(repo, _branch(repo), git.head(repo)))
+            run_dir = step.run_dir(cfg.home, run.id)
+            protected.save(repo, run_dir)
+            # Written last: a run with its request is set up.
+            (run_dir / planner.REQUEST_FILE).write_text(request, encoding="utf-8")
+        run_dir = step.run_dir(cfg.home, run.id)
+        with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
+            logger.info("planning %s on %s, the run is %s", request_file, run.branch, run.id)
+            return planner.go_on(cfg, store, run)
+
+
+def answer(cfg: Config, run_id: str | None) -> str | None:
+    """Give the planner of the planning run `run_id`, or of the last one of the repository, the
+    replies of the operator to its questions; returns as `plan_request`."""
+    repo = _repo(cfg)
+    selfcheck.require(cfg.home)
+    with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
+        run = _waiting(store, repo, run_id, "planning")
+        run_dir = step.run_dir(cfg.home, run.id)
+        with log.scope(run=run.id), recovery.hold(run_dir / recovery.LOCK_FILE):
+            return planner.answer(cfg, store, run)
+
+
 def resume(cfg: Config, run_id: str | None) -> str | None:
     """Go on with the paused run `run_id`, or with the last paused run of the repository.
 
@@ -119,7 +162,7 @@ def resume(cfg: Config, run_id: str | None) -> str | None:
     repo = _repo(cfg)
     selfcheck.require(cfg.home)
     with _hold_repo(repo), contextlib.closing(Store(cfg.home / DB_FILE)) as store:
-        run = _paused(store, repo, run_id)
+        run = _waiting(store, repo, run_id, "paused")
         if run.base is None:
             raise RunError(
                 f"run {run.id} has no record of the HEAD it started from, start a new run"
@@ -243,11 +286,28 @@ def _head(store: Store, run: Run) -> str:
     return head
 
 
-def _paused(store: Store, repo: Path, run_id: str | None) -> Run:
+def _planning(store: Store, home: Path, repo: Path, request: str) -> Run | None:
+    """The last run of `repo` that has stopped planning `request`; None if there is none."""
+    for run in reversed(store.runs("planning")):
+        run_dir = step.run_dir(home, run.id)
+        request_file = run_dir / planner.REQUEST_FILE
+        # A run without its request has stopped before it was set up.
+        if (
+            run.repo == str(repo)
+            and request_file.is_file()
+            and not (run_dir / plan.PLAN_FILE).exists()
+            and request_file.read_text(encoding="utf-8") == request
+        ):
+            return run
+    return None
+
+
+def _waiting(store: Store, repo: Path, run_id: str | None, status: str) -> Run:
+    """The run `run_id` of `repo` in `status`, or the last such run of `repo`."""
     if run_id is None:
-        runs = [r for r in store.runs("paused") if r.repo == str(repo)]
+        runs = [r for r in store.runs(status) if r.repo == str(repo)]
         if not runs:
-            raise RunError(f"no paused run in {repo}")
+            raise RunError(f"no {status} run in {repo}")
         return runs[-1]
     try:
         run = store.run(run_id)
@@ -255,8 +315,8 @@ def _paused(store: Store, repo: Path, run_id: str | None) -> Run:
         raise RunError(str(exc)) from exc
     if run.repo != str(repo):
         raise RunError(f"run {run_id} works in {run.repo}")
-    if run.status != "paused":
-        raise RunError(f"run {run_id} is {run.status}, not paused")
+    if run.status != status:
+        raise RunError(f"run {run_id} is {run.status}, not {status}")
     return run
 
 
@@ -264,6 +324,13 @@ def _repo(cfg: Config) -> Path:
     if cfg.repo_root is None:
         raise RunError("not in a git repository")
     return cfg.repo_root
+
+
+def _branch(repo: Path) -> str:
+    branch = git.branch(repo)
+    if branch == "HEAD":
+        raise RunError("HEAD is detached, check out the branch to work on")
+    return branch
 
 
 def _hold_repo(repo: Path) -> TextIO:

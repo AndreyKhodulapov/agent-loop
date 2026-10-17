@@ -9,7 +9,8 @@ A dead run is paused the way a live one pauses: its orphaned session is terminat
 progress goes to the WIP ref of the task and the step is finished as paused, so the task resumes
 the session (`step.how_to_resume`). A commit step stopped after the commit of the task is on the
 branch is finished as completed instead: the task is committed. Services it has left up are
-stopped with `down` of the frozen profile.
+stopped with `down` of the frozen profile. A run that is planning stays in planning: only the
+session of its planner is terminated and its step paused, `loop plan` goes on with it.
 
 A live run that the operator stops outside a session pauses its open steps the same way.
 """
@@ -64,8 +65,8 @@ def hold_repo(repo: Path) -> TextIO | None:
 
 
 def reap(store: Store, home: Path) -> list[str]:
-    """Pause the running runs whose orchestrator is gone; returns their ids."""
-    reaped = []
+    """Pause the running runs and the planners whose orchestrator is gone; returns their runs."""
+    reaped = _reap_planners(store, home)
     for run in store.runs("running"):
         run_dir = step.run_dir(home, run.id)
         lock = hold(run_dir / LOCK_FILE)
@@ -88,6 +89,25 @@ def reap(store: Store, home: Path) -> list[str]:
                 if services.is_file():
                     commands.down(commands.frozen(run_dir), Path(run.repo))
                     services.unlink()
+        reaped.append(run.id)
+    return reaped
+
+
+def _reap_planners(store: Store, home: Path) -> list[str]:
+    reaped = []
+    for run in store.runs("planning"):
+        if all(s.finished_at is not None for s in store.planner_steps(run.id)):
+            continue
+        lock = hold(step.run_dir(home, run.id) / LOCK_FILE)
+        if lock is None:
+            continue
+        with lock, log.scope(run=run.id):
+            # Another `loop` may have finished the step between the listing and the lock.
+            for open_step in store.planner_steps(run.id):
+                if open_step.finished_at is None:
+                    logger.warning("the orchestrator of the planner is gone, pausing its session")
+                    _terminate(open_step.session_id)
+                    store.finish_step(open_step.id, "paused", {"reason": DIED})
         reaped.append(run.id)
     return reaped
 

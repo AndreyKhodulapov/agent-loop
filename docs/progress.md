@@ -1006,7 +1006,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Закоммичено человеком: `6883ca4`.
 
-### 4.1 Планировщик — разбиение утверждено 2026-10-16, 4.1а–б готовы, дальше 4.1в
+### 4.1 Планировщик — разбиение утверждено 2026-10-16, 4.1а–в готовы, дальше 4.1г
 
 Решения человека (2026-10-16), по рекомендациям агента; записаны в план, раздел 3. Пять коммитов в `planner`, порядок обязателен: каждый опирается на предыдущий.
 
@@ -1069,7 +1069,37 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 - `prompts/planner.md` — роль: задача на ~1000 строк с тестами, карточка самодостаточна, не просить правок закрытых файлов (это пункт 3 этапа 4, здесь только правило в роли), вопросы — только когда без ответа план не построить. Сборка промпта планировщика в `prompts`.
 - Тесты: схема и `validate` (параметризация), миграция на базе со старыми шагами.
 
-#### 4.1в Headless `loop plan --from task.md` и `loop answer` для вопросов (~400–500 строк)
+#### 4.1в Headless `loop plan --from task.md` и `loop answer` для вопросов — готово 2026-10-17
+
+Сделано (+800/−47 строк с тестами, 20 файлов; оценка была 400–500, выросло на тестах и на продолжении остановленного планирования):
+1. `planner.py` (уровень `implement`, ниже `runner`) — цикл сессий планировщика:
+   - `ANSWER_SCHEMA`: `status` `plan`/`questions`, `plan` по `plan.PLAN_SCHEMA`, `questions` — список строк. `_errors`: нет вопросов при `questions`, нет плана при `plan`, иначе `plan.validate`.
+   - План с ошибками — ошибки в ту же сессию через `--resume` (`prompts.plan_errors`), не больше `RETRIES = 2`. Счётчик — все отклонённые ответы планировщика в прогоне (из store, переживает перезапуск). Дальше `REJECTED`: черновик в `runs/<run>/plan-draft.json`, ошибки в лог, «change the request and plan again».
+   - Вопросы — `runs/<run>/QUESTIONS.md` (`## Question N`, текст, `### Answer`), путь и `loop answer <run>` в логе, возврат `QUESTIONS`. Файл переписывается, только если в нём не те вопросы: повторный `loop plan` не стирает начатые ответы.
+   - `answer`: последний шаг — вопросы без ошибок, иначе `PlanError` «has no questions to answer»; пустой ответ — `PlanError` с номерами; файл без этих вопросов пишется заново и `PlanError`. Ответы — в ту же сессию (`prompts.planner_answers`).
+   - `go_on` продолжает по последнему шагу: нет шагов — новая сессия с запросом; `paused` — `step.how_to_resume` (`session` — `--resume` с `prompts.PLANNER_RESUMED`; `handoff` — новая сессия с запросом заново; `replan` — `PlanError` «keeps stopping, split the request»); `failed` или нет ответа — новая сессия; иначе ответ берётся (`_take`).
+   - В процессе: `failed` — `PlanError`; пауза `interrupt` — возврат `implement.INTERRUPT` (код 130); ответ на фоне Ctrl+C берётся, но следующей сессии нет; прочие паузы продолжаются сразу. Перед каждой сессией `budget.no_room`: нет места — `time.sleep` в процессе, прогон остаётся в `planning`.
+   - Сессия: `model_planner`, `effort_planner`, `tools="Bash,Read"`, `guard.prepare(..., read_only=True)`, `prompts.system_files("planner")`; шаг `plan` с `task_id = None`, checkpoint — HEAD, `untracked` пустой.
+2. `runner.plan_request(cfg, request_file)`: пустой или нечитаемый файл — `RunError`. Ищет последний прогон этого репозитория в `planning` с тем же текстом `runs/<run>/request.md` и без `plan.json` — продолжает его; иначе новый прогон (`_branch` — отказ на detached HEAD, общий со `start`), `protected.save`, затем `request.md` (последним: прогон с запросом собран). Лок репозитория и прогона, как у `start`. `runner.answer(cfg, run_id)` — прогон `run_id` или последний в `planning` (`_paused` обобщён в `_waiting(..., status)`).
+3. `cli`: `loop plan --from <file>` (пока обязателен, 4.1г сделает его необязательным), `loop answer [run]`; `plan` и `answer` убраны из `STUBS`, перед ними тоже `_reap`; `planner.PlanError` в списке `_work`. Коды: план готов — 0, вопросы и `REJECTED` — 1, Ctrl+C — 130.
+4. `recovery.reap` → `_reap_planners`: прогон в `planning` с открытым шагом планировщика и свободным локом — сирота `_terminate`, шаг `paused(died)`, прогон остаётся в `planning`. `store.planner_steps(run_id)` — шаги прогона без задачи.
+5. `guard.prepare(..., read_only=False)`: при `read_only` `Edit(./**)` (`WRITE_RULE`) переезжает из `allow` в `deny`, `handoff` в `policy.json` — `None`; мягкая остановка — `READ_ONLY_INSTRUCTION` («end your turn, the loop resumes this conversation later»), запись handoff не пропускается.
+6. `agent.Session.tools` (по умолчанию `Bash,Read,Edit,Write`); `config.effort_planner = "high"` (+ `.env.example`, проверка); `budget.no_room(home, settings)` — проверка лимитов с предупреждением в логе, `implement._budget` через неё; `plan.save(run_dir, plan, name=PLAN_FILE)` — для черновика.
+7. `planner.md`: раздел ответа (`status`, `plan`, `questions`, ошибки плана возвращаются) и остановка guard — закончить ход.
+
+Тесты (421: 420 зелёных + флак ниже, ruff чистый): `test_planner` (11: read-only сессия и сохранённый план, повторы с ошибками, `REJECTED` и черновик, вопросы → ответы → план, файл без вопросов, паузы `timeout`/полный контекст, Ctrl+C в сессии и после ответа, `failed`, ожидание лимитов); `test_cli` — вопросы и `loop answer` (коды 1/1/0), продолжение того же запроса после Ctrl+C и новый прогон для другого; `test_recovery` — мёртвый планировщик; `test_guard` — read-only инструкция через hook; `test_agent` — `tools`; `test_config` — `effort_planner`.
+
+Флак, не связанный с шагом: `test_step::test_tool_results_keep_the_stream_alive` упал в 1 полном прогоне и в 2 из 12 одиночных (падает за ~1.3 с: idle-таймаут 1.2 с, первый `sleep:0.6` фальшивого `claude` идёт после старта Python). `step.py` и его путь не менялись. Починить отдельно: увеличить запас (например, `sleep:0.4` при таймауте 1.2 с).
+
+Для 4.1г и дальше:
+- `loop plan` без `--from` — интерактивный режим 4.1г; продолжение остановленного — тот же поиск `runner._planning` (у интерактивного запроса текста нет: решить, как его узнавать).
+- Новая сессия после полного контекста (`handoff`) начинает план заново: ответы на вопросы прежней сессии в неё не попадают.
+- Прогон в `REJECTED` или с `replan` от `how_to_resume` остаётся в `planning` навсегда; выход — другой запрос (новый прогон). Брошенные прогоны в `planning` копятся: учесть в `loop status` (этап 6) и, если понадобится, отмену прогона.
+- 4.1д: `runner.answer` различает по статусу прогона — `planning` → `planner.answer`, `paused` с задачей в `needs_human` → ответ задаче.
+
+Предлагаемое сообщение коммита: `feat(planner): add headless loop plan with questions and loop answer`.
+
+Как было задумано:
 
 - `loop plan --from task.md`: прогон в `planning`, шаг планировщика через `step.run` (бюджет перед шагом как в `implement._budget`). Схема ответа: `status` `questions` (список `questions`) или `plan` (объект по `PLAN_SCHEMA`).
 - План не прошёл `plan.validate` — ошибки в ту же сессию через `--resume`, не больше 2 раз; дальше прогон ждёт человека (лог с ошибками, план-черновик в `runs/<run>/`).

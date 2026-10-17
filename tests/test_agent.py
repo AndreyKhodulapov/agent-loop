@@ -95,6 +95,10 @@ def test_command_for_new_and_resumed_session(tmp_path):
     for flag in ("--effort", "--append-system-prompt-file", "--json-schema"):
         assert flag not in resumed
 
+    planner = agent.command(session(tmp_path, tools="Bash,Read"))
+
+    assert planner[planner.index("--tools") + 1] == "Bash,Read"
+
 
 def commit(repo, files):
     for name, text in files.items():

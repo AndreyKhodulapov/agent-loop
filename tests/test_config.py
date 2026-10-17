@@ -160,6 +160,7 @@ def test_unknown_key_in_env_file(tmp_path, home):
     [
         ("LOOP_DOC_LANG=de\n", "doc_lang must be one of"),
         ("LOOP_EFFORT_CRITIC=extreme\n", "effort_critic"),
+        ("LOOP_EFFORT_PLANNER=extreme\n", "effort_planner"),
         ("LOOP_FIX_ATTEMPTS=many\n", "fix_attempts"),
         ("LOOP_FIX_ATTEMPTS=0\n", "fix_attempts must be positive"),
         ("LOOP_RESERVE_5H=1.5\n", "reserve_5h must be in"),
