@@ -242,10 +242,10 @@ class _Watch:
             logger.warning(
                 "Ctrl+C: the agent writes a handoff and stops, press Ctrl+C again to stop it now"
             )
-            self._request_stop("interrupt", time.monotonic())
+            self._request_stop(INTERRUPT, time.monotonic())
         elif self._interrupts == 2:
             logger.warning("Ctrl+C again: terminating the session")
-            self._kill("interrupt")
+            self._kill(INTERRUPT)
         else:
             # The second Ctrl+C is still waiting for the session to exit after SIGTERM.
             logger.warning("Ctrl+C once more: killing the session")
