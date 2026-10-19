@@ -55,7 +55,10 @@ def env(tmp_path):
     workdir.mkdir()
     db = Store(home / "loop.db")
     run_id = db.create_run(workdir, "feature/x", "abc123")
-    task_id = db.add_task(run_id, "Add x", {"goal": "x"})
+    db.approve(run_id, "hash", [("Add x", {"goal": "x"})])
+    db.start(run_id, "feature/x", "abc123")
+    [task] = db.tasks(run_id)
+    task_id = task.id
     cfg = Config(home, workdir, None, SETTINGS, {})
     protected.save(workdir, step.run_dir(home, run_id))
     settings_file = guard.prepare(step.run_dir(home, run_id), home, SETTINGS, workdir)
@@ -244,6 +247,26 @@ def test_session_with_a_project_hook_does_not_start(env, fake_claude):
     recorded = env.step()
     assert recorded.outcome == "failed"
     assert recorded.detail["restored"] == [".claude/settings.json"]
+
+
+def test_session_of_a_planning_run_needs_no_copy_of_the_protected_files(tmp_path, fake_claude):
+    # The copy is taken by `loop run`, the planner works before it.
+    home = tmp_path / "home"
+    workdir = tmp_path / "repo"
+    (workdir / ".claude").mkdir(parents=True)
+    (workdir / ".claude" / "settings.json").write_text("{}")
+    db = Store(home / "loop.db")
+    run_id = db.create_run(workdir, "feature/x", "abc123")
+    settings_file = guard.prepare(step.run_dir(home, run_id), home, SETTINGS, workdir)
+    session = agent.Session(prompt="plan x", model="haiku", cwd=workdir, settings=settings_file)
+    step_id = db.start_step(run_id, None, "plan", "abc123", [], session.session_id)
+    fake_claude([INIT, ANSWER])
+
+    outcome = step.run(session, Config(home, workdir, None, SETTINGS, {}), db, run_id, step_id)
+
+    assert outcome.status == "completed"
+    assert (workdir / ".claude" / "settings.json").read_text() == "{}"
+    db.close()
 
 
 def test_exit_without_result_fails_the_step_and_raises(env, fake_claude):

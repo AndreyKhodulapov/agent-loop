@@ -114,9 +114,12 @@ def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id:
     `guard.prepare` and passes the settings file it returns in the session. A CLI that exits
     without a result fails the step and raises. If the protected files have changed since the
     run started, they are put back and the step fails with `PROJECT_SETTINGS` without a session.
+    A planning run has no copy yet: its sessions change no files, and what the operator changes
+    before `loop run` is theirs.
     """
     directory = run_dir(cfg.home, run_id)
-    restored = protected.restore(session.cwd, directory)
+    planning = store.run(run_id).status == "planning"
+    restored = [] if planning else protected.restore(session.cwd, directory)
     if restored:
         logger.error(
             "the CLI settings of the project have changed during the run, put back: %s",

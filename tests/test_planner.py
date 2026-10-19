@@ -16,7 +16,6 @@ from agent_loop import (
     plan,
     planner,
     prompts,
-    protected,
     replies,
     step,
 )
@@ -105,7 +104,7 @@ def env(repo, tmp_path):
     db = Store(home / "loop.db")
     run_id = db.create_run(repo, "main", git.head(repo))
     run_dir = step.run_dir(home, run_id)
-    protected.save(repo, run_dir)
+    run_dir.mkdir(parents=True)
     (run_dir / planner.REQUEST_FILE).write_text(REQUEST)
     yield Env(Config(home, repo, None, SETTINGS, {}), db, run_id, run_dir, [])
     db.close()
