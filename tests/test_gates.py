@@ -172,6 +172,17 @@ def test_diff_size_counts_the_work_of_the_step_only(repo, work):
     assert check(repo, work).lines == 2
 
 
+def test_moved_file_counts_by_its_changed_lines(repo, work):
+    (repo / "big.py").write_text("x = 1\n" * 50)
+    commit(repo, "big module")
+    work = dataclasses.replace(work, checkpoint=git.head(repo))
+    (repo / "pkg").mkdir()
+    (repo / "big.py").rename(repo / "pkg" / "big.py")
+    (repo / "pkg" / "big.py").write_text("x = 2\n" + "x = 1\n" * 49)
+
+    assert check(repo, work) == gates.Verdict("pass", lines=2)
+
+
 def edit_test(repo, old, new):
     path = repo / "tests" / "test_app.py"
     path.write_text(path.read_text().replace(old, new))

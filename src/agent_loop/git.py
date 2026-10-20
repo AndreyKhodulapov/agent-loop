@@ -147,8 +147,8 @@ def strings_in(repo: Path, strings: Iterable[str], rev: str) -> set[str]:
 def diff(repo: Path, base: str, added: list[str], *options: str, paths: Sequence[str] = ()) -> str:
     """`git diff` of the work on top of `base`: the changes of tracked files and `added`.
 
-    Renames show as a removal and an addition. Diff drivers and textconv filters are named in the
-    repository config and attributes, so they are never run.
+    Renames show as a removal and an addition, unless `options` ask for `-M`. Diff drivers and
+    textconv filters are named in the repository config and attributes, so they are never run.
     """
     with _work_index(repo, base, added) as env:
         return git(

@@ -56,7 +56,8 @@ class Verdict:
     findings: tuple[str, ...] = ()
     # New files kept out of the commit: they look like secrets.
     secrets: tuple[str, ...] = ()
-    # Lines added and removed against the checkpoint, secrets left out.
+    # Lines added and removed against the checkpoint, secrets left out; a moved file counts
+    # by its changed lines.
     lines: int = 0
     # New files the commands have left, reports and caches the ignore rules miss: not the work.
     artifacts: tuple[str, ...] = ()
@@ -87,7 +88,7 @@ def check(
     secrets = secret_files(added, profile)
     work = [path for path in added if path not in secrets]
     numstat = _numstat(git.diff(repo, step.checkpoint, work, "--numstat", "-z"))
-    lines = sum(numstat.values())
+    lines = _size(repo, step.checkpoint, work)
 
     findings = []
     reason = None
@@ -137,7 +138,7 @@ def check(
     # After the commands: `fmt` may have changed the work, and tracked files beyond it, which
     # the commit takes as well.
     numstat = _numstat(git.diff(repo, step.checkpoint, work, "--numstat", "-z"))
-    lines = sum(numstat.values())
+    lines = _size(repo, step.checkpoint, work)
     style = _style(repo, step.checkpoint, work, list(numstat))
     env_secrets = _env_secrets(repo, step.checkpoint)
     if env_secrets:
@@ -498,6 +499,18 @@ def _mask(text: str, env_secrets: dict[str, str]) -> str:
     for value in sorted(env_secrets, key=len, reverse=True):
         text = text.replace(value, f"<{env_secrets[value]}>")
     return text
+
+
+def _size(repo: Path, base: str, work: list[str]) -> int:
+    """Lines added and removed by the work on top of `base`; a moved file counts by the lines
+    it has changed, not as a removal and an addition of all of them."""
+    output = git.diff(repo, base, work, "-M", "--numstat")
+    # A binary file counts as no lines.
+    return sum(
+        int(added) + int(removed)
+        for added, removed, _ in (line.split("\t", 2) for line in output.splitlines())
+        if added != "-"
+    )
 
 
 def _numstat(output: str) -> dict[str, int]:
