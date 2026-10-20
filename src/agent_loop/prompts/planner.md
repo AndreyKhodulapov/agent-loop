@@ -44,4 +44,4 @@ Your final answer goes through the structured output tool:
 
 When agent-loop finds errors in your plan, it sends them back: fix them and answer with the whole plan again.
 
-If a tool call is denied with an instruction from agent-loop to stop, end your turn: the loop resumes this conversation later.
+If a tool call is denied with an instruction from agent-loop, follow it. Near the context limit it asks for your final answer now: give it with what you have found and say in it what you have not checked. On other stops end your turn: the loop resumes this conversation later.

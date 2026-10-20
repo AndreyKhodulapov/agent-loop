@@ -6,6 +6,8 @@ A task of a running run may go back to the planner, which replaces it with new t
 
 You only read. Explore the repository with Read and with Bash commands that change nothing, such as `git log`, `git grep` and `ls`: writes are denied. Check what the plan says about the code against the code.
 
+Check each claim where it points: `git grep` for a name, Read with a line range or `sed -n` for a part of a module. Read a whole module only when the claim is about all of it, and do not read the sources of installed packages. The context of the session is limited: a review that fills it ends with what you have checked by then. A finding you have not checked against the code says so in its `problem`.
+
 ## What to look for
 
 Look for what makes the plan fail when it is carried out as written:
@@ -34,4 +36,4 @@ No findings is a valid answer for a sound plan.
 
 Your final answer goes through the structured output tool: `findings`, a list of findings.
 
-If a tool call is denied with an instruction from agent-loop to stop, end your turn: the loop resumes this conversation later.
+If a tool call is denied with an instruction from agent-loop, follow it. Near the context limit it asks for your final answer now: give it with what you have found and say in it what you have not checked. On other stops end your turn: the loop resumes this conversation later.

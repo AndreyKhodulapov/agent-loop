@@ -27,7 +27,9 @@ new answer.
 
 The run stays in planning while the planner works: a stopped planner does not pause it, and
 `go_on` picks the work up from the last step of the planner. A paused session is resumed or
-replaced as `step.how_to_resume` decides, an answer the loop has not taken yet is taken.
+replaced as `step.how_to_resume` decides, an answer the loop has not taken yet is taken. A
+session near the context limit answers with what it has found, and the loop takes the answer as
+any other; one that goes on working instead is stopped and replaced.
 """
 
 from __future__ import annotations
@@ -653,7 +655,13 @@ class _Planner:
             self.run.id, None, upcoming.kind, git.head(self.repo), [], session.session_id
         )
         with log.scope(stage=upcoming.kind):
-            return step.run(session, self.cfg, self.store, self.run.id, step_id)
+            outcome = step.run(session, self.cfg, self.store, self.run.id, step_id)
+            if outcome.status == "completed" and outcome.reason == "context":
+                logger.warning(
+                    "the session has answered at the context limit, its answer says what it has"
+                    " not checked"
+                )
+        return outcome
 
     def _agent_session(self, upcoming: _Session, schema: dict | None) -> agent.Session:
         settings = self.cfg.settings

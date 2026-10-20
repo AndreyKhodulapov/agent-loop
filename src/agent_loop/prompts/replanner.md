@@ -32,4 +32,4 @@ A critic reviews the plan as your answer leaves it before agent-loop takes it. I
 
 When the operator objects to your change of the criteria, the objection comes back to you: answer again in full.
 
-If a tool call is denied with an instruction from agent-loop to stop, end your turn: the loop resumes this conversation later.
+If a tool call is denied with an instruction from agent-loop, follow it. Near the context limit it asks for your final answer now: give it with what you have found and say in it what you have not checked. On other stops end your turn: the loop resumes this conversation later.

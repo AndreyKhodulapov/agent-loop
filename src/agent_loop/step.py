@@ -46,7 +46,8 @@ class Outcome:
     # Why the step paused (context, budget, interrupt, timeout, idle, guard_error) or what
     # failed (project_settings or the error of the CLI). For a completed step, the stop the loop
     # asked for while the agent was answering: after an interrupt the run stops once the step
-    # is through.
+    # is through. A read-only session near the context limit answers with `context`: what it
+    # has not checked is in its answer.
     reason: str | None
     # None when the session was terminated before its result.
     result: agent.Result | None
@@ -274,10 +275,12 @@ class _Watch:
 def _outcome(
     result: agent.Result | None, state: guard.State | None, killed: str | None, context: int
 ) -> Outcome:
-    # The answer is the truth about the step unless the guard has denied the agent a call: a
-    # stop that came while the agent was answering, or a session terminated after its answer,
-    # does not undo the work.
-    stopped = state is not None and (state.denied > 0 or state.reason == guard.GUARD_ERROR)
+    # The answer is the truth about the step unless the guard has denied the agent a call
+    # without asking for the answer: a stop that came while the agent was answering, or a
+    # session terminated after its answer, does not undo the work.
+    stopped = state is not None and (
+        state.reason == guard.GUARD_ERROR or state.denied > 0 and not state.answer_now
+    )
     if result is not None and result.structured_output is not None and not stopped:
         return Outcome("completed", state.reason if state is not None else killed, result, context)
     # A guard stop wins over the way the session ended: after a context stop the step must

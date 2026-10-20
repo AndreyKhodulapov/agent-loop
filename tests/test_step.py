@@ -27,6 +27,15 @@ FULL = {
     },
 }
 
+# Past the soft context limit, under the hard one.
+SOFT_FULL = {
+    **FULL,
+    "message": {
+        **FULL["message"],
+        "usage": {**FULL["message"]["usage"], "cache_read_input_tokens": SETTINGS.ctx_soft_tokens},
+    },
+}
+
 
 @dataclass
 class Env:
@@ -183,6 +192,25 @@ def test_answer_completes_the_step_despite_a_stop(env, fake_claude, scenario):
     assert (outcome.status, outcome.reason) == ("completed", "interrupt")
     assert outcome.result.structured_output == {"status": "done"}
     assert env.step().outcome == "completed"
+
+
+@pytest.mark.parametrize(
+    ("read_only", "status"), [(True, "completed"), (False, "paused")], ids=["read-only", "writes"]
+)
+def test_answer_after_a_soft_context_stop_completes_only_a_read_only_step(
+    env, fake_claude, read_only, status
+):
+    # A read-only session is told to answer, one that writes to write the handoff.
+    guard.prepare(env.run_dir, env.cfg.home, SETTINGS, env.session.cwd, read_only=read_only)
+    calls_path = fake_claude([INIT, SOFT_FULL, "tool:Bash", "tool:StructuredOutput", ANSWER])
+
+    outcome = env.run()
+
+    denied, answer = read_calls(calls_path.parent / "hooks.jsonl")
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert answer is None
+    assert (outcome.status, outcome.reason) == (status, "context")
+    assert env.step().outcome == status
 
 
 def set_idle_timeout(env, monkeypatch, seconds):

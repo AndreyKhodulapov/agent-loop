@@ -7,7 +7,9 @@ decided goes to `guard.json`, which tells the loop why the session ended.
 
 Soft stop: the call is denied with an instruction to write the handoff and end the turn; only
 the handoff write and the structured answer pass. A read-only session, the planner's, has no
-handoff to write: it is told to end the turn, and the loop resumes the conversation later.
+handoff to write. Near the context limit it is told to answer now with what it has found: a new
+session would have to read the repository again from the start. On other stops it is told to
+end the turn, and the loop resumes the conversation later.
 Hard stop: `continue: false` ends the session after the current call, and the call itself is
 denied unless it writes the handoff. A hook that fails blocks the call and records
 `guard_error`: a session must not run without its caps.
@@ -19,7 +21,7 @@ import json
 import shlex
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from agent_loop import budget
@@ -69,6 +71,11 @@ READ_ONLY_INSTRUCTION = (
     "agent-loop is pausing this step: {why}. Do not continue and do not call other tools: end"
     " your turn. The loop resumes this conversation later."
 )
+ANSWER_INSTRUCTION = (
+    "agent-loop is ending this step: {why}. Do not continue and do not call other tools: give"
+    " your final answer now through the structured output tool, with what you have found so"
+    " far, and say in it what you have not checked."
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,8 @@ class State:
     reason: str
     hard: bool
     denied: int
+    # The agent is told to answer now: its answer is the answer of the step.
+    answer_now: bool = False
 
 
 def prepare(
@@ -166,10 +175,13 @@ def respond(
     `handoff` is None for a read-only session.
     """
     hard = stop.hard or denied >= SOFT_DENIALS
-    state = State(stop.reason, hard, denied)
+    answer_now = handoff is None and stop.reason == "context"
+    state = State(stop.reason, hard, denied, answer_now)
     if tool_name in ALWAYS_ALLOWED or (writes_handoff and not hard):
         return None, state
-    if handoff is None:
+    if answer_now:
+        instruction = ANSWER_INSTRUCTION.format(why=WHY[stop.reason])
+    elif handoff is None:
         instruction = READ_ONLY_INSTRUCTION.format(why=WHY[stop.reason])
     else:
         instruction = INSTRUCTION.format(why=WHY[stop.reason], handoff=handoff)
@@ -179,7 +191,7 @@ def respond(
         if not writes_handoff:
             output["hookSpecificOutput"] = _deny(instruction)
         return output, state
-    return {"hookSpecificOutput": _deny(instruction)}, State(stop.reason, hard, denied + 1)
+    return {"hookSpecificOutput": _deny(instruction)}, replace(state, denied=denied + 1)
 
 
 def main(argv: list[str]) -> int:

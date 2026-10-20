@@ -260,6 +260,24 @@ def test_critic_reviews_the_plan_in_a_new_read_only_session(env, monkeypatch, fi
     assert (env.run_dir / "plan.json").is_file()
 
 
+@pytest.mark.parametrize(
+    "outcomes",
+    [
+        [answered({"status": "plan", "plan": PLAN}, "context"), criticized()],
+        [planned(), answered({"findings": []}, "context")],
+    ],
+    ids=["planner", "critic"],
+)
+def test_answer_at_the_context_limit_is_taken(env, monkeypatch, caplog, outcomes):
+    env.script(monkeypatch, *outcomes)
+
+    assert env.go_on() is None
+
+    assert len(env.sessions) == 2
+    assert json.loads((env.run_dir / "plan.json").read_text()) == PLAN
+    assert "answered at the context limit" in caplog.text
+
+
 def test_blocking_findings_go_back_to_the_planner_for_the_rounds_of_the_critic(
     env, monkeypatch, caplog
 ):

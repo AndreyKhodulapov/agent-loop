@@ -209,15 +209,29 @@ def test_prepare_clears_the_previous_session(run_dir, tmp_path):
     )
 
 
-def test_read_only_session_is_told_only_to_end_its_turn(run_dir, tmp_path):
+@pytest.mark.parametrize(
+    ("stop", "instruction", "answer_now"),
+    [
+        ("interrupt", guard.READ_ONLY_INSTRUCTION, False),
+        ("context", guard.ANSWER_INSTRUCTION, True),
+    ],
+    ids=["stop request", "soft context"],
+)
+def test_read_only_session_ends_its_turn_or_answers_now(
+    run_dir, tmp_path, stop, instruction, answer_now
+):
     workdir = tmp_path / "repo"
     guard.prepare(run_dir, tmp_path / "home", SETTINGS, workdir, read_only=True)
-    guard.request_stop(run_dir, "interrupt")
+    if stop == "context":
+        guard.write_live(run_dir, SETTINGS.ctx_soft_tokens)
+    else:
+        guard.request_stop(run_dir, stop)
 
     output = hook(run_dir, "Write", {"file_path": str(workdir / guard.HANDOFF)})
 
     reason = output["hookSpecificOutput"]["permissionDecisionReason"]
-    assert reason == guard.READ_ONLY_INSTRUCTION.format(why=guard.WHY["interrupt"])
+    assert reason == instruction.format(why=guard.WHY[stop])
+    assert guard.outcome(run_dir) == guard.State(stop, False, 1, answer_now)
 
 
 def test_hook_does_not_import_from_the_working_directory(run_dir):
