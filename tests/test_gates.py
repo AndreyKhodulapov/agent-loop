@@ -604,11 +604,28 @@ def test_failed_collect_goes_to_the_fixer(repo, work):
     assert verdict.findings == ("collect: exit code 2\nImportError",)
 
 
-def test_count_tests_needs_a_number_from_the_collect_command(repo):
+@pytest.mark.parametrize(
+    ("output", "count"),
+    [
+        ("tests/test_app.py::test_a\n\n228 tests collected in 0.53s\n", 228),
+        ("===== 1 test collected, 2 warnings in 0.1s =====", 1),
+        ("no tests collected (3 deselected) in 0.1s", 0),
+        ("228 tests collected in 0.53s\nSkipping virtualenv creation\n", 228),
+        ("  228\n", 228),
+    ],
+)
+def test_count_tests_reads_the_total_of_the_collect_command(repo, output, count):
+    profile = Profile(commands={"collect": f"printf '{output}'"})
+
+    assert gates.count_tests(profile, repo) == count
+
+
+def test_count_tests_needs_a_total_from_the_collect_command(repo):
     assert gates.count_tests(Profile(), repo) is None
-    assert gates.count_tests(Profile(commands={"collect": "echo 228 tests"}), repo) == 228
-    with pytest.raises(ConfigError, match="no number in the last line"):
+    with pytest.raises(ConfigError, match="ends with 'done'"):
         gates.count_tests(Profile(commands={"collect": "echo 5 tests; echo done"}), repo)
+    with pytest.raises(ConfigError, match="drop -q"):
+        gates.count_tests(Profile(commands={"collect": "printf 'a.py: 740\nb.py: 69\n'"}), repo)
 
 
 @pytest.mark.parametrize(

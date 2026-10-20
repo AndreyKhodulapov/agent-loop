@@ -196,17 +196,27 @@ def secret_files(paths: list[str], profile: Profile) -> tuple[str, ...]:
 def count_tests(profile: Profile, repo: Path) -> int | None:
     """Tests the `collect` command of the profile finds; None if the profile has no such command.
 
-    The count is the first integer in the last non-empty line of the output: pytest ends with
-    `228 tests collected in 0.53s`, `grep -c` prints the bare number.
+    The count is taken from the summary of pytest, `228 tests collected in 0.53s`, or else from
+    a bare number in the last non-empty line, as `grep -c` prints it. Any other number could be
+    a part of the count: `pytest -qq` ends with the tests of the last file.
     """
     if "collect" not in profile.commands:
         return None
-    output = commands.run(profile, "collect", repo)
-    last = next((line for line in reversed(output.splitlines()) if line.strip()), "")
-    match = re.search(r"\d+", last)
-    if match is None:
-        raise ConfigError(f"collect: no number in the last line of the output: {last!r}")
-    return int(match.group())
+    lines = commands.run(profile, "collect", repo).splitlines()
+    for line in reversed(lines):
+        match = re.search(r"\b(\d+|no)(/\d+)? tests? collected\b", line)
+        if match is not None:
+            return 0 if match.group(1) == "no" else int(match.group(1))
+    last = next((line.strip() for line in reversed(lines) if line.strip()), "")
+    if last.isdigit():
+        return int(last)
+    if re.fullmatch(r"\S+: \d+", last):
+        raise ConfigError(
+            f"collect: {last!r} counts the tests of one file, drop -q: pytest -qq prints no total"
+        )
+    raise ConfigError(
+        f"collect: the output ends with {last!r}, not 'N tests collected' or a number"
+    )
 
 
 def branch_moved(repo: Path, branch: str, checkpoint: str) -> str | None:

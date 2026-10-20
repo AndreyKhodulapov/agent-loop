@@ -113,6 +113,17 @@ def test_install_runs_outside_the_sandbox_with_the_whole_environment(sandboxed, 
     assert (sandboxed.parent / "home" / "installed").is_file()
 
 
+@pytest.mark.parametrize("name", ["install", "test"])
+def test_command_does_not_see_the_venv_of_the_loop(sandboxed, monkeypatch, name):
+    monkeypatch.setattr(sys, "prefix", "/opt/agent-loop/.venv")
+    venv_bin = "/opt/agent-loop/.venv/bin"
+    monkeypatch.setenv("VIRTUAL_ENV", sys.prefix)
+    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, "/usr/bin", venv_bin, "/bin"]))
+    profile = Profile(commands={name: "echo $VIRTUAL_ENV; echo $PATH"})
+
+    assert commands.run(profile, name, sandboxed) == "\n/usr/bin:/bin\n"
+
+
 def test_sandbox_keeps_the_home_paths_the_sessions_cannot_read():
     deny = json.loads(guard.BASE_SETTINGS.read_text())["permissions"]["deny"]
     home = {r[len("Read(~/") : -1].removesuffix("/**") for r in deny if r.startswith("Read(~/")}

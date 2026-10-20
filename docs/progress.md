@@ -1421,7 +1421,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Итог 2026-10-19: потрачено около $7.7 (планировщик $2.21, критики $5.46), 5h — 11%. Прогон `949726c3` брошен в `planning`: команды отмены нет, новый прогон даст только изменённый запрос.
 
-#### 4.4а Правки по прогону — план 2026-10-19, коммит 1 готов 2026-10-20
+#### 4.4а Правки по прогону — план 2026-10-19, коммиты 1–2 готовы 2026-10-20
 
 Человек решил (2026-10-19): правки — коммитами в `planner`, затем повтор планирования; продолжить в следующей сессии. Порядок — по важности для прогона: коммит 1 блокирует его, 2–3 — нет (обходы есть). Каждый коммит — правка, тесты, ruff, предложенное сообщение, запись сюда; коммитит человек.
 
@@ -1444,6 +1444,13 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 - `commands.run`: несандбоксные команды без `VIRTUAL_ENV` оркестратора (`env.pop`). Проверить, нужен ли ещё `PATH` без `bin` venv цикла (Poetry смотрит только `VIRTUAL_ENV`; uv — `VIRTUAL_ENV` и активный venv). После правки `env -u VIRTUAL_ENV` в профиле bank-service можно оставить — безвреден.
 - `gates.count_tests`: число из строки `N tests collected` (pytest, `N test collected`, `no tests collected` → 0), иначе — голое число в последней строке (`grep -c`); строка вида `path: 69` — `ConfigError` с подсказкой убрать `-q`. Тесты — параметры в `test_gates`.
 
+Коммит 2 — готово 2026-10-20:
+- `commands._environ`: окружение команд профиля без `VIRTUAL_ENV` и без `bin` venv цикла в `PATH` (только если цикл запущен из venv: `sys.prefix != sys.base_prefix`). `uv run loop` ставит и то, и другое; `PATH` с `bin` venv цикла давал бы командам его `python` и `pytest`. Касается обеих ветвей `commands.run`: несандбоксные команды получают остальное окружение целиком, сандбоксные — `agent.ENV_KEYS` из того же очищенного окружения. Сессии агента (`agent._env`) по-прежнему получают `PATH` с venv цикла — не трогал: их команды идут через `poetry run`/`uv run` по `CLAUDE.md`, писать в venv цикла sandbox CLI не даёт.
+- `gates.count_tests`: число из последней строки вида `N tests collected` / `N test collected` / `N/M tests collected` (выбранные) / `no tests collected` (→ 0) в любом месте вывода; иначе — голое число в последней непустой строке (`grep -c`, `wc -l`). Строка `path: N` (`pytest -qq`) — `ConfigError` с подсказкой убрать `-q`; прочее — `ConfigError` с последней строкой. Форматы `-q`, `-qq`, без `-q`, с `-k` проверены на реальном pytest. `echo 228 tests` больше не считается — ожидание в тесте заменено.
+- Тесты: `test_commands::test_command_does_not_see_the_venv_of_the_loop` (`install`, `test`; `sys.prefix` подменён); `test_gates::test_count_tests_reads_the_total_of_the_collect_command` (5 форматов), `test_count_tests_needs_a_total_from_the_collect_command` (вместо `..._needs_a_number_...`: `None` без команды, неизвестный формат, `-qq`). Без правки новые тесты падают. 506 зелёных (было 499), ruff чистый.
+
+Предлагаемое сообщение коммита: `fix(gates): run commands outside the loop venv, count tests by the pytest total`.
+
 Коммит 3. Возобновление неначатой сессии и ошибка адаптера (находки 4, 5):
 - `step.how_to_resume` (и путь планировщика `_resumed`): шаг на паузе без начатой сессии (нет потока `step-N.jsonl` или в нём нет `init`) — новая сессия, не `--resume`. Решить при правке, где проверять: по файлу потока или по полю в `detail` (`num_turns`/контекст отсутствуют у шага `died` до старта).
 - `agent`: на `result` без `terminal_reason` с `is_error` — сообщение из `errors` (`No conversation found with session ID ...`), а не обрезанный JSON.
@@ -1459,4 +1466,4 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 ### Дальше
 
-Этап 4 по плану закрыт (4.0–4.2), ревью ветки `planner` пройдено (4.3–4.3б). Пробный прогон — 4.4; в 4.4а готов коммит 1, следующий — коммит 2 (окружение и подсчёт тестов gate), затем коммит 3 и повтор планирования; после прогона — мерж `planner`, как было с `implementation-loop` (этап 3а). Облегчённый режим `loop run --quick task.md` (раздел 3, 2026-10-11) не сделан.
+Этап 4 по плану закрыт (4.0–4.2), ревью ветки `planner` пройдено (4.3–4.3б). Пробный прогон — 4.4; в 4.4а готовы коммиты 1–2, следующий — коммит 3 (возобновление неначатой сессии, ошибка адаптера), затем повтор планирования; после прогона — мерж `planner`, как было с `implementation-loop` (этап 3а). Облегчённый режим `loop run --quick task.md` (раздел 3, 2026-10-11) не сделан.

@@ -19,6 +19,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from dataclasses import asdict
@@ -102,17 +103,18 @@ def run(profile: Profile, name: str, repo: Path) -> str:
     The command runs in its own process group: on timeout or on the way out of the loop the
     whole group is killed, `docker compose` and test workers included. A command of `SANDBOXED`
     runs under `sandbox-exec`, with the environment of a session and a temporary directory of
-    its own.
+    its own. Neither sees the virtual environment the loop runs in.
     """
     timeout = profile.timeouts.get(name, 10 * 60)
     argv = ["/bin/sh", "-c", profile.commands[name]]
-    env = {**os.environ, **profile.env}
+    environ = _environ()
+    env = {**environ, **profile.env}
     with contextlib.ExitStack() as stack:
         if name in SANDBOXED:
             # Removed after the command: the next session of the agent could read what is left.
             tmp = Path(stack.enter_context(tempfile.TemporaryDirectory())).resolve()
             argv = ["sandbox-exec", "-p", _sandbox(repo.resolve(), tmp), *argv]
-            env = {key: os.environ[key] for key in agent.ENV_KEYS if key in os.environ}
+            env = {key: environ[key] for key in agent.ENV_KEYS if key in environ}
             env |= {"TMPDIR": f"{tmp}/", **profile.env}
         proc = subprocess.Popen(
             argv,
@@ -168,6 +170,18 @@ def down(profile: Profile, repo: Path) -> None:
     except CommandError as exc:
         # Running services do not spoil the result of the run, the operator stops them.
         logger.error("cannot stop the services: %s", exc)
+
+
+def _environ() -> dict[str, str]:
+    # `uv run loop` activates the venv of the loop: Poetry would install the dependencies of the
+    # repository into it, `python` and `pytest` of a command would be those of the loop.
+    environ = {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
+    if sys.prefix != sys.base_prefix:
+        venv_bin = os.path.join(sys.prefix, "bin")
+        environ["PATH"] = os.pathsep.join(
+            path for path in environ["PATH"].split(os.pathsep) if path != venv_bin
+        )
+    return environ
 
 
 def _sandbox(repo: Path, tmp: Path) -> str:
