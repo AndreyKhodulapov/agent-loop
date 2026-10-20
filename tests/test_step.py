@@ -402,11 +402,45 @@ def ended(outcome, reason, session_id, context_tokens=50_000):
     ],
 )
 def test_how_to_resume(steps, expected):
-    assert step.how_to_resume(steps, SETTINGS.ctx_soft_tokens) == expected
+    assert step.how_to_resume(steps, SETTINGS.ctx_soft_tokens, True) == expected
+
+
+@pytest.mark.parametrize(
+    ("paused", "expected"),
+    [
+        (ended("paused", "died", "s-1", 0), step.Resume("new")),
+        (ended("paused", "context", "s-1"), step.Resume("handoff")),
+    ],
+    ids=["died", "full context"],
+)
+def test_session_the_cli_has_not_started_is_not_resumed(paused, expected):
+    assert step.how_to_resume([paused], SETTINGS.ctx_soft_tokens, False) == expected
+
+
+@pytest.mark.parametrize(
+    ("stream", "resumed", "expected"),
+    [(None, False, False), ([], False, False), ([INIT, FULL], False, True), (None, True, True)],
+    ids=["no stream", "empty stream", "init", "resumes an earlier step"],
+)
+def test_cli_has_the_session_once_its_first_step_has_init(env, stream, resumed, expected):
+    paused_id = env.step_id
+    if resumed:
+        env.store.finish_step(env.step_id, "paused", {"reason": "interrupt"})
+        task_id = env.store.tasks(env.run_id)[0].id
+        paused_id = env.store.start_step(
+            env.run_id, task_id, "implement", "abc123", [], env.session.session_id
+        )
+    if stream is not None:
+        lines = "".join(json.dumps(event) + "\n" for event in stream)
+        (env.run_dir / f"step-{paused_id}.jsonl").write_text(lines)
+    env.store.finish_step(paused_id, "paused", {"reason": "died"})
+    paused = env.store.session_steps(env.session.session_id)[-1]
+
+    assert step.started(env.store, env.run_dir, paused) == expected
 
 
 def test_how_to_resume_takes_only_a_paused_step():
     failed = replace(ended("failed", None, "s-1"), detail={"error": "no result"})
 
     with pytest.raises(ValueError, match="has not paused, it is failed"):
-        step.how_to_resume([failed], SETTINGS.ctx_soft_tokens)
+        step.how_to_resume([failed], SETTINGS.ctx_soft_tokens, True)

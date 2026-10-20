@@ -69,6 +69,20 @@ def test_unexpected_shape_is_a_protocol_error(raw, message):
         agent.parse_event(raw)
 
 
+def test_result_of_a_cli_that_has_failed_before_the_session_is_its_error():
+    # What 2.1.303 prints on --resume of a session it does not have.
+    failed = {k: v for k, v in RESULT.items() if k != "terminal_reason"}
+    failed |= {
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "num_turns": 0,
+        "errors": ["No conversation found with session ID: s-1"],
+    }
+
+    with pytest.raises(agent.AgentError, match="^claude has failed: No conversation found with"):
+        agent.parse_event(json.dumps(failed))
+
+
 def test_command_for_new_and_resumed_session(tmp_path):
     new = session(
         tmp_path,

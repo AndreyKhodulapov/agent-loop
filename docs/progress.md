@@ -1421,7 +1421,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Итог 2026-10-19: потрачено около $7.7 (планировщик $2.21, критики $5.46), 5h — 11%. Прогон `949726c3` брошен в `planning`: команды отмены нет, новый прогон даст только изменённый запрос.
 
-#### 4.4а Правки по прогону — план 2026-10-19, коммиты 1–2 готовы 2026-10-20
+#### 4.4а Правки по прогону — план 2026-10-19, коммиты 1–3 готовы 2026-10-20
 
 Человек решил (2026-10-19): правки — коммитами в `planner`, затем повтор планирования; продолжить в следующей сессии. Порядок — по важности для прогона: коммит 1 блокирует его, 2–3 — нет (обходы есть). Каждый коммит — правка, тесты, ruff, предложенное сообщение, запись сюда; коммитит человек.
 
@@ -1440,6 +1440,8 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Предлагаемое сообщение коммита: `feat(guard): ask a read-only session for its answer at the soft context limit`.
 
+Закоммичено человеком: `7feb070`.
+
 Коммит 2. Окружение и подсчёт тестов gate (находки 1, 2):
 - `commands.run`: несандбоксные команды без `VIRTUAL_ENV` оркестратора (`env.pop`). Проверить, нужен ли ещё `PATH` без `bin` venv цикла (Poetry смотрит только `VIRTUAL_ENV`; uv — `VIRTUAL_ENV` и активный venv). После правки `env -u VIRTUAL_ENV` в профиле bank-service можно оставить — безвреден.
 - `gates.count_tests`: число из строки `N tests collected` (pytest, `N test collected`, `no tests collected` → 0), иначе — голое число в последней строке (`grep -c`); строка вида `path: 69` — `ConfigError` с подсказкой убрать `-q`. Тесты — параметры в `test_gates`.
@@ -1451,9 +1453,23 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 Предлагаемое сообщение коммита: `fix(gates): run commands outside the loop venv, count tests by the pytest total`.
 
+Закоммичено человеком: `d81298e`.
+
 Коммит 3. Возобновление неначатой сессии и ошибка адаптера (находки 4, 5):
 - `step.how_to_resume` (и путь планировщика `_resumed`): шаг на паузе без начатой сессии (нет потока `step-N.jsonl` или в нём нет `init`) — новая сессия, не `--resume`. Решить при правке, где проверять: по файлу потока или по полю в `detail` (`num_turns`/контекст отсутствуют у шага `died` до старта).
 - `agent`: на `result` без `terminal_reason` с `is_error` — сообщение из `errors` (`No conversation found with session ID ...`), а не обрезанный JSON.
+
+Коммит 3 — готово 2026-10-20:
+- Где проверять — решено: при возобновлении, по потоку шага, а не по `detail` и не в `recovery`. `detail` шага `died` одинаков у начатой и неначатой сессии, а `recovery.pause` не знает каталога прогона; проверка при возобновлении ловит и шаг, оборванный в `step.run` до `init` (два Ctrl+C подряд, `idle`).
+- `step.started(store, directory, paused)`: сессия есть в CLI, если её начал более ранний шаг (`store.session_steps`; так и разговор оператора — у шага `talk` нет потока) или в потоке шага, который её начал, есть `init`. Нет файла или нет `init` — сессии нет. Путь потока — `step._stream`, общий со `step.run`.
+- `step.how_to_resume(steps, ctx_soft_tokens, started)`: там, где раньше был `session`, для неначатой — новый режим `new`. Полный контекст и `replan` по-прежнему решают раньше.
+- `implement._resume_paused`: `new` идёт тем же путём, что `handoff` (новый исполнитель или fixer с работой в WIP; handoff-файла нет), с предупреждением в логе.
+- `planner._how_to_resume` — общий для `_resumed` и `_replan_resumed` (шаги того же вида + `started`). `new`: планировщик — `_new()` (у планировщика разговора сессия начата в разговоре, так что новым бывает только планировщик по файлу запроса), критик — новый критик; перепланировщик — `r.fresh`, критик перепланирования — `_replan_critic`. В логе — «has not started», а не «context is full».
+- `agent.parse_event`: `result` без `terminal_reason` с непустым `errors` — `AgentError("claude has failed: <errors>")`; `step.run` записывает его в шаг `failed`, `loop plan` выходит с этой ошибкой. Остальные `result` без `terminal_reason` — `ProtocolError`, как раньше.
+- Тесты: подделки `step.run` в `test_implement` и `test_planner` пишут `init` в поток (`fakes.start_stream`), как CLI. `test_step::test_session_the_cli_has_not_started_is_not_resumed` (`died` → `new`, полный контекст → `handoff`), `test_cli_has_the_session_once_its_first_step_has_init` (нет потока, пустой поток, `init`, продолжение более раннего шага); `test_agent::test_result_of_a_cli_that_has_failed_before_the_session_is_its_error` (форма из `step-41.jsonl` прогона `949726c3`); `test_planner::test_paused_session_goes_on` — параметр «not started» для всех четырёх ролей, `test_session_the_cli_has_not_started_is_started_anew` (сценарий 4.4: шаг `plan` на паузе без потока → новый планировщик, план сохранён); `test_implement::test_session_the_cli_has_not_started_is_started_anew`. Без правки новые тесты падают. 519 зелёных (было 506), ruff чистый.
+- Флак, не связанный с правкой: `test_step::test_tool_results_keep_the_stream_alive` (паузы 0,6 с при `idle` 1,2 с) один раз упал под нагрузкой, 8 из 8 повторов зелёные.
+
+Предлагаемое сообщение коммита: `fix(step): start a new session in place of one the CLI has not started`.
 
 После правок — повтор планирования:
 1. В `request.md` (`agent_runs/modular-bank-service/`) добавить в «Working rules»: зависимость добавляется в `pyproject.toml` в той задаче, которой она нужна; цикл сам пересобирает `poetry.lock` и ставит её после сессии. Планировщик не знал этого и вынес зависимости в отдельную задачу. Изменённый текст даёт новый прогон вместо тупикового `949726c3`.
@@ -1466,4 +1482,4 @@ TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:{free_port
 
 ### Дальше
 
-Этап 4 по плану закрыт (4.0–4.2), ревью ветки `planner` пройдено (4.3–4.3б). Пробный прогон — 4.4; в 4.4а готовы коммиты 1–2, следующий — коммит 3 (возобновление неначатой сессии, ошибка адаптера), затем повтор планирования; после прогона — мерж `planner`, как было с `implementation-loop` (этап 3а). Облегчённый режим `loop run --quick task.md` (раздел 3, 2026-10-11) не сделан.
+Этап 4 по плану закрыт (4.0–4.2), ревью ветки `planner` пройдено (4.3–4.3б). Пробный прогон — 4.4; в 4.4а готовы коммиты 1–3, следующий шаг — повтор планирования (пункты «После правок» в 4.4а); после прогона — мерж `planner`, как было с `implementation-loop` (этап 3а). Облегчённый режим `loop run --quick task.md` (раздел 3, 2026-10-11) не сделан.

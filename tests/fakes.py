@@ -133,3 +133,10 @@ sys.exit(scenario.get("exit", 0))
 
 def read_calls(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def start_stream(run_dir, step_id, session_id):
+    """Write the `init` a session starts its stream with, for a test that replaces `step.run`."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    init = json.dumps(INIT).replace("{session_id}", session_id)
+    (run_dir / f"step-{step_id}.jsonl").write_text(init + "\n")

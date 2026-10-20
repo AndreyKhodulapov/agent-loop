@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
+from fakes import start_stream
 from test_plan import PLAN, TASK
 
 from agent_loop import (
@@ -74,6 +75,7 @@ class Env:
         def run(session, cfg, store, run_id, step_id):
             outcome = next(scripted)
             self.sessions.append(session)
+            start_stream(step.run_dir(cfg.home, run_id), step_id, session.session_id)
             output = outcome.result and outcome.result.structured_output
             detail = {"reason": outcome.reason, "context_tokens": outcome.context_tokens}
             store.finish_step(step_id, outcome.status, detail | {"answer": output})
@@ -578,9 +580,13 @@ def test_answer_the_run_has_left_goes_to_the_critic(replanning, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("pause", "resumed"),
-    [(paused("timeout"), True), (paused("context", 125_000), False)],
-    ids=["timeout", "full context"],
+    ("pause", "started", "resumed"),
+    [
+        (paused("timeout"), True, True),
+        (paused("context", 125_000), True, False),
+        (paused("timeout"), False, False),
+    ],
+    ids=["timeout", "full context", "not started"],
 )
 @pytest.mark.parametrize(
     ("fixture", "go_on", "before", "after", "prompt", "schema"),
@@ -621,9 +627,11 @@ def test_answer_the_run_has_left_goes_to_the_critic(replanning, monkeypatch):
     ids=["planner", "critic", "replanner", "critic of the replan"],
 )
 def test_paused_session_goes_on(
-    request, monkeypatch, fixture, go_on, before, after, prompt, schema, pause, resumed
+    request, monkeypatch, fixture, go_on, before, after, prompt, schema, pause, started, resumed
 ):
     env = request.getfixturevalue(fixture)
+    if not started:
+        monkeypatch.setattr(step, "started", lambda store, directory, paused: False)
     env.script(monkeypatch, *before, pause, *after)
 
     assert go_on(env) is None
@@ -632,6 +640,22 @@ def test_paused_session_goes_on(
     assert (second.session_id == first.session_id) == second.resume == resumed
     assert second.prompt == (prompt if resumed else first.prompt)
     assert second.schema == schema
+
+
+def test_session_the_cli_has_not_started_is_started_anew(env, monkeypatch):
+    # The orchestrator has died before the CLI started the planner: the step is paused, its
+    # session is not in the CLI.
+    head = git.head(env.cfg.repo_root)
+    died = env.store.start_step(env.run_id, None, planner.PLAN, head, [], "s-died")
+    env.store.finish_step(died, "paused", {"reason": "died"})
+    env.script(monkeypatch, planned(), criticized())
+
+    assert env.go_on() is None
+
+    anew, _ = env.sessions
+    assert (anew.resume, anew.session_id != "s-died") == (False, True)
+    assert REQUEST in anew.prompt
+    assert json.loads((env.run_dir / plan.PLAN_FILE).read_text()) == PLAN
 
 
 @pytest.mark.parametrize(

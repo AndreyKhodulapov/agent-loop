@@ -210,6 +210,9 @@ def parse_event(line: str) -> Event | None:
         if kind == "rate_limit_event":
             windows = raw["rate_limit_info"]["unifiedWindows"]
             return Limits(_window(windows.get("five_hour")), _window(windows.get("seven_day")))
+        if kind == "result" and "terminal_reason" not in raw and raw.get("errors"):
+            # The CLI has failed before the session, as on `--resume` of a session it lacks.
+            raise AgentError(f"claude has failed: {'; '.join(raw['errors'])}")
         if kind == "result":
             return Result(
                 session_id=raw["session_id"],

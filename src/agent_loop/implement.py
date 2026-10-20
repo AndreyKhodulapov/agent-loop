@@ -145,14 +145,18 @@ class _Task:
         if last.kind in (GATE, COMMIT):
             # The branch has moved: the work is checked again before it is committed.
             return self._loop(None)
-        how = step.how_to_resume(steps, self.cfg.settings.ctx_soft_tokens)
+        started = step.started(self.store, self.run_dir, last)
+        how = step.how_to_resume(steps, self.cfg.settings.ctx_soft_tokens, started)
         if how.mode == "replan":
             logger.error("the task keeps pausing (%s), it goes back to the planner", how.reason)
             self._move("replan", how.reason)
             return None
         if how.mode == "session":
             return self._loop(_Session(last.kind, prompts.RESUMED, how.session_id))
-        # A session stopped hard has not written the handoff: the work in progress tells enough.
+        if how.mode == "new":
+            logger.warning("the session has not started, a new one goes on with the task")
+        # A session stopped hard or never started has not written the handoff: the work in
+        # progress tells enough.
         handoff = self.handoff.read_text(encoding="utf-8") if self.handoff.is_file() else None
         if last.kind == IMPLEMENT:
             return self._loop(self._implementer(previous, handoff, self._work()))

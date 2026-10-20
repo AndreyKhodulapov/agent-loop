@@ -4,6 +4,7 @@ import time
 from dataclasses import asdict, dataclass
 
 import pytest
+from fakes import start_stream
 
 from agent_loop import agent, budget, gates, git, guard, implement, prompts, protected, step
 from agent_loop.config import Config, Profile, Settings
@@ -100,6 +101,7 @@ class Env:
             if action is not None:
                 action(session.cwd)
             self.sessions.append(session)
+            start_stream(step.run_dir(cfg.home, run_id), step_id, session.session_id)
             answer = outcome.result and outcome.result.structured_output
             detail = {"reason": outcome.reason, "context_tokens": outcome.context_tokens}
             store.finish_step(step_id, outcome.status, detail | {"answer": answer})
@@ -517,6 +519,24 @@ def test_paused_session_goes_on_with_its_context(env, monkeypatch):
     assert resumed.system_files == prompts.system_files("implementer", SETTINGS)
     # The work in progress of a committed task is in its commit.
     assert git.git(env.repo, "for-each-ref", git.WIP_REFS) == ""
+
+
+def test_session_the_cli_has_not_started_is_started_anew(env, monkeypatch):
+    # The orchestrator has died before the CLI started the implementer: the step is paused, its
+    # session is not in the CLI.
+    env.store.move_task(env.task_id, "implementing")
+    died = env.store.start_step(env.run_id, env.task_id, "implement", git.head(env.repo), [], "s-1")
+    env.store.finish_step(died, "paused", {"reason": "died"})
+    env.store.move_task(env.task_id, "paused", "died")
+    env.script(monkeypatch, (write("app.py", "x = 'fixed'\n"), answered()))
+
+    assert env.resume() is None
+
+    assert env.task().status == "committed"
+    [anew] = env.sessions
+    assert (anew.resume, anew.session_id != "s-1") == (False, True)
+    assert anew.prompt != prompts.RESUMED
+    assert anew.system_files == prompts.system_files("implementer", SETTINGS)
 
 
 def test_session_with_a_full_context_goes_on_from_the_handoff(env, monkeypatch):

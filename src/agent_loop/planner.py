@@ -390,22 +390,24 @@ class _Planner:
     def _replan_resumed(self, r: _Replan, steps: list[Step]) -> _Session:
         """The session that goes on after the last of `steps` has paused."""
         kind = steps[-1].kind
-        how = step.how_to_resume(
-            [s for s in steps if s.kind == kind], self.cfg.settings.ctx_soft_tokens
-        )
+        how = self._how_to_resume(steps)
         critic = kind == CRITIQUE
         if how.mode == "session":
             resumed = prompts.CRITIC_RESUMED if critic else prompts.PLANNER_RESUMED
             return _Session(resumed, how.session_id, kind)
-        if how.mode == "handoff" and critic:
+        who = "critic of the replan" if critic else "replanner"
+        if how.mode == "replan":
+            raise PlanError(f"the {who} keeps stopping ({how.reason})")
+        if how.mode == "new":
+            logger.warning("the %s has not started, starting it in a new session", who)
+        elif critic:
             logger.warning("the context of the critic is full, a new critic reviews the replan")
-            return self._replan_critic(r, _answered(_chain(steps), REPLAN)[0].detail["answer"])
-        if how.mode == "handoff":
+        else:
             # The replanner writes no handoff: a new session reads the repository again.
             logger.warning("the context of the replanner is full, replanning in a new session")
-            return r.fresh
-        who = "critic of the replan" if critic else "replanner"
-        raise PlanError(f"the {who} keeps stopping ({how.reason})")
+        if critic:
+            return self._replan_critic(r, _answered(_chain(steps), REPLAN)[0].detail["answer"])
+        return r.fresh
 
     def _take_replan(self, r: _Replan, chain: list[Step]) -> _Session | step.Stop | None:
         """Take the answer of the last step of `chain`, or the one the operator has approved
@@ -550,13 +552,19 @@ class _Planner:
 
     def _resumed(self, steps: list[Step]) -> _Session:
         kind = steps[-1].kind
-        how = step.how_to_resume(
-            [s for s in steps if s.kind == kind], self.cfg.settings.ctx_soft_tokens
-        )
+        how = self._how_to_resume(steps)
         if how.mode == "session" and kind == CRITIQUE:
             return _Session(prompts.CRITIC_RESUMED, how.session_id, CRITIQUE)
         if how.mode == "session":
             return _Session(prompts.PLANNER_RESUMED, how.session_id)
+        if how.mode == "new" and kind == CRITIQUE:
+            logger.warning("the critic has not started, a new critic reviews the plan")
+            return self._critic(steps)
+        if how.mode == "new":
+            # The planner of a conversation goes on with the session of the conversation, which
+            # has started: only the planner of a request file can be new.
+            logger.warning("the planner has not started, planning in a new session")
+            return self._new()
         if how.mode == "handoff" and kind == CRITIQUE:
             logger.warning("the context of the critic is full, a new critic reviews the plan")
             return self._critic(steps)
@@ -571,6 +579,15 @@ class _Planner:
             return self._new()
         who = "critic" if kind == CRITIQUE else "planner"
         raise PlanError(f"the {who} keeps stopping ({how.reason}), split the request")
+
+    def _how_to_resume(self, steps: list[Step]) -> step.Resume:
+        """How the paused session of the last of `steps` goes on: by the steps of its kind."""
+        last = steps[-1]
+        return step.how_to_resume(
+            [s for s in steps if s.kind == last.kind],
+            self.cfg.settings.ctx_soft_tokens,
+            step.started(self.store, self.run_dir, last),
+        )
 
     def _take(self, steps: list[Step]) -> _Session | str | None:
         """Take the answer of the last step: returns the session that fixes or reviews the plan,

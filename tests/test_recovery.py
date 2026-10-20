@@ -108,7 +108,7 @@ def test_dead_run_is_paused_with_its_session_stopped_and_work_saved(home, db, re
     assert bystander.poll() is None
     [paused] = db.steps(task_id)
     assert (paused.outcome, paused.detail) == ("paused", {"reason": "died"})
-    assert step.how_to_resume([paused], Settings().ctx_soft_tokens) == step.Resume(
+    assert step.how_to_resume([paused], Settings().ctx_soft_tokens, True) == step.Resume(
         "session", session_id
     )
     [task] = db.tasks(run_id)

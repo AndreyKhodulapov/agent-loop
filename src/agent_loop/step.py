@@ -57,7 +57,8 @@ class Outcome:
 @dataclass(frozen=True)
 class Resume:
     # session: continue the paused session with --resume; handoff: a new session starts from
-    # the handoff and the work in progress; replan: the task goes back to the planner.
+    # the handoff and the work in progress; new: the CLI has never started the paused session,
+    # a new one takes its place; replan: the task goes back to the planner.
     mode: str
     session_id: str | None = None
     # Why the task goes back to the planner: context_pauses or stall_pauses.
@@ -129,7 +130,7 @@ def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id:
         outcome = Outcome("failed", PROJECT_SETTINGS, None, 0)
         store.finish_step(step_id, outcome.status, _detail(outcome) | {"restored": restored})
         return outcome
-    log_path = directory / f"step-{step_id}.jsonl"
+    log_path = _stream(directory, step_id)
     started = time.monotonic()
     deadlines = Deadlines(
         cfg.settings.step_timeout_min * 60, _idle_timeout(session.settings), started, started
@@ -170,12 +171,13 @@ def run(session: agent.Session, cfg: Config, store: Store, run_id: str, step_id:
     return outcome
 
 
-def how_to_resume(steps: list[Step], ctx_soft_tokens: int) -> Resume:
+def how_to_resume(steps: list[Step], ctx_soft_tokens: int, started: bool) -> Resume:
     """How to go on with a task whose last step paused; `steps` are all steps of the task.
 
     The paused session keeps its context, so it is resumed, unless the context was full: then a
     new session starts from the handoff, and a task that has filled the context again is too big
-    for one session. A task that stalls again and again goes back to the planner too.
+    for one session. A task that stalls again and again goes back to the planner too. A session
+    the CLI has not `started` has nothing to resume.
     """
     last = steps[-1]
     if last.outcome != "paused":
@@ -187,13 +189,33 @@ def how_to_resume(steps: list[Step], ctx_soft_tokens: int) -> Resume:
     if stalls >= 3:
         return Resume("replan", reason="stall_pauses")
     if not _context_full(last, ctx_soft_tokens):
-        return Resume("session", last.session_id)
+        return Resume("session", last.session_id) if started else Resume("new")
     context_pauses = sum(
         1 for s in steps if s.outcome == "paused" and _context_full(s, ctx_soft_tokens)
     )
     if context_pauses >= CONTEXT_PAUSES_TO_REPLAN:
         return Resume("replan", reason="context_pauses")
     return Resume("handoff")
+
+
+def started(store: Store, directory: Path, paused: Step) -> bool:
+    """Whether the CLI has the session of the `paused` step, in the run directory `directory`.
+
+    A session started by an earlier step, a conversation of the operator among them, is there.
+    One the paused step has started is there once its stream has `init`: the step may have died
+    before, on an error of the loop or with its orchestrator, and `--resume` would fail.
+    """
+    if store.session_steps(paused.session_id)[0].id != paused.id:
+        return True
+    stream = _stream(directory, paused.id)
+    if not stream.is_file():
+        return False
+    with open(stream, encoding="utf-8") as lines:
+        return any(isinstance(agent.parse_event(line), agent.Init) for line in lines)
+
+
+def _stream(directory: Path, step_id: int) -> Path:
+    return directory / f"step-{step_id}.jsonl"
 
 
 def _context_full(paused: Step, ctx_soft_tokens: int) -> bool:
